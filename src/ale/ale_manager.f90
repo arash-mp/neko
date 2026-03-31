@@ -1080,7 +1080,6 @@ contains
 
        kin%vel_trans = 0.0_rp
        kin%vel_ang   = 0.0_rp
-       kin%center = this%ale_pivot(i)%pos 
 
        if (op_mode == 0 .or. op_mode == 2) then
           ! Calculate Prescribed Motion
@@ -1096,7 +1095,7 @@ contains
           kin%vel_trans = 0.0_rp
           kin%vel_ang   = 0.0_rp
        end if
-       
+
        ! output prescribed velocities for FSI if needed.
        if ( (is_override .and. (op_mode == 0 .or. op_mode == 2) ) &
             .and. present(out_prescribed_vels)) then
@@ -1113,10 +1112,11 @@ contains
        end if
 
        if (.not. op_mode == 2) then
+          kin%center = this%ale_pivot(i)%pos
           this%ale_pivot(i)%vel = kin%vel_trans
           this%body_kin(i)%center = kin%center
           this%body_kin(i)%vel_trans = kin%vel_trans
-          this%body_kin(i)%vel_ang = kin%vel_ang      
+          this%body_kin(i)%vel_ang = kin%vel_ang
 
           call this%compute_rotation_matrix(i, time_s)
           rot_mat = this%body_rot_matrices(:,:,i)
