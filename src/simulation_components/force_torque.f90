@@ -63,9 +63,11 @@ module force_torque
   use ale_manager, only : neko_ale
   use ale_rigid_kinematics, only : pivot_state_t
   use utils, only : neko_error
-
+  use mesh, only : mesh_t  
   implicit none
   private
+
+  public :: force_torque_compute
 
   !> A simulation component that computes the force and torque on a given
   !! boundary zone.
@@ -92,10 +94,11 @@ module force_torque
      real(kind=rp) :: center(3) = 0.0_rp
      real(kind=rp) :: scale
      integer :: zone_id
-     character(len=20) :: zone_name
+     character(len=60) :: zone_name
      type(coef_t), pointer :: coef => null()
      type(dirichlet_t) :: bc
      character(len=80) :: print_format
+     logical :: full_log = .true.
      ! Pointer to the live pivot state inside ale_manager
      type(pivot_state_t), pointer :: pivot_link => null()
      logical :: moving_center = .false.
@@ -106,13 +109,16 @@ module force_torque
      ! Current Pivot Position
      real(kind=rp), pointer :: body_P(:) => null()
      ! Current Rotation Matrix
-     real(kind=rp), pointer :: body_R(:,:) => null()
-
+     real(kind=rp), pointer :: body_R(:,:) => null() 
+     ! Public storage for FSI access
+     real(kind=rp) :: total_force(3)  = 0.0_rp
+     real(kind=rp) :: total_torque(3) = 0.0_rp
+     
    contains
      !> Constructor from json, wrapping the actual constructor.
      procedure, pass(this) :: init => force_torque_init_from_json
      !> Common part of constructors.
-     procedure, private, pass(this) :: init_common => force_torque_init_common
+     procedure, public, pass(this) :: init_common => force_torque_init_common
      !> Generic for constructing from components.
      generic :: init_from_components => &
           init_from_controllers, init_from_controllers_properties
@@ -266,7 +272,7 @@ contains
   !! @param coef The SEM coefficients.
   !! @param long_print If true, use a more precise print format.
   subroutine force_torque_init_common(this, name, fluid_name, zone_id, &
-       zone_name, center, scale, coef, long_print, center_type)
+       zone_name, center, scale, coef, long_print, center_type, msh, full_log)
     class(force_torque_t), intent(inout) :: this
     character(len=*), intent(in) :: name
     real(kind=rp), intent(in) :: center(3)
@@ -276,16 +282,21 @@ contains
     integer, intent(in) :: zone_id
     type(coef_t), target, intent(in) :: coef
     logical, intent(in) :: long_print
+    logical, intent(in), optional :: full_log 
     character(len=*), intent(in), optional :: center_type
     character(len=:), allocatable :: ctype_str
+    type(mesh_t), target, intent(in), optional :: msh 
     integer :: n_pts, glb_n_pts, ierr
     real(kind=rp) :: avg_r(3)
     character(len=1000) :: log_buf
+    type(mesh_t), pointer :: msh_ptr
+
     this%name = name
     this%coef => coef
     this%zone_id = zone_id
     this%scale = scale
     this%zone_name = zone_name
+    if (present(full_log)) this%full_log = full_log
 
     if (present(center_type)) then
        ctype_str = center_type
@@ -318,8 +329,15 @@ contains
     this%mu => neko_registry%get_field_by_name(fluid_name // '_mu_tot')
 
 
+    if (present(msh)) then
+       msh_ptr => msh
+    else
+       msh_ptr => this%case%msh
+    end if
+
     call this%bc%init_base(this%coef)
-    call this%bc%mark_zone(this%case%msh%labeled_zones(this%zone_id))
+    ! Use msh_ptr instead of this%case%msh
+    call this%bc%mark_zone(msh_ptr%labeled_zones(this%zone_id)) 
     call this%bc%finalize()
     n_pts = this%bc%msk(0)
     if (n_pts .gt. 0) then
@@ -639,30 +657,46 @@ contains
        dgtq(12) = device_glsum(this%s23msk%x_d, n_pts)
     end if
     dgtq = this%scale*dgtq
-    write(log_buf, '(A, I4, A, A)') 'Force and torque on zone ', &
-         this%zone_id, '  ', this%zone_name
-    call neko_log%message(log_buf)
-    write(log_buf, '(A)') &
-         'Time step, time, total force/torque, pressure, viscous, direction'
-    call neko_log%message(log_buf)
-    write(log_buf, this%print_format) &
-         time%tstep, time%t, dgtq(1) + dgtq(4), dgtq(1), dgtq(4), ', forcex'
-    call neko_log%message(log_buf)
-    write(log_buf, this%print_format) &
-         time%tstep, time%t, dgtq(2) + dgtq(5), dgtq(2), dgtq(5), ', forcey'
-    call neko_log%message(log_buf)
-    write(log_buf, this%print_format) &
-         time%tstep, time%t, dgtq(3) + dgtq(6), dgtq(3), dgtq(6), ', forcez'
-    call neko_log%message(log_buf)
-    write(log_buf, this%print_format) &
-         time%tstep, time%t, dgtq(7) + dgtq(10), dgtq(7), dgtq(10), ', torquex'
-    call neko_log%message(log_buf)
-    write(log_buf, this%print_format) &
-         time%tstep, time%t, dgtq(8) + dgtq(11), dgtq(8), dgtq(11), ', torquey'
-    call neko_log%message(log_buf)
-    write(log_buf, this%print_format) &
-         time%tstep, time%t, dgtq(9) + dgtq(12), dgtq(9), dgtq(12), ', torquez'
-    call neko_log%message(log_buf)
+
+    if (this%full_log) then
+       write(log_buf, '(A, I4, A, A)') 'Force and torque on zone ', &
+           this%zone_id, '  ', this%zone_name
+       call neko_log%message(log_buf)
+       write(log_buf, '(A)') &
+           'Time step, time, total force/torque, pressure, viscous, direction'
+       call neko_log%message(log_buf)
+       write(log_buf, this%print_format) &
+           time%tstep, time%t, dgtq(1) + dgtq(4), dgtq(1), dgtq(4), ', forcex'
+       call neko_log%message(log_buf)
+       write(log_buf, this%print_format) &
+           time%tstep, time%t, dgtq(2) + dgtq(5), dgtq(2), dgtq(5), ', forcey'
+       call neko_log%message(log_buf)
+       write(log_buf, this%print_format) &
+           time%tstep, time%t, dgtq(3) + dgtq(6), dgtq(3), dgtq(6), ', forcez'
+       call neko_log%message(log_buf)
+       write(log_buf, this%print_format) &
+           time%tstep, time%t, dgtq(7) + dgtq(10), dgtq(7), dgtq(10), ', torquex'
+       call neko_log%message(log_buf)
+       write(log_buf, this%print_format) &
+           time%tstep, time%t, dgtq(8) + dgtq(11), dgtq(8), dgtq(11), ', torquey'
+       call neko_log%message(log_buf)
+       write(log_buf, this%print_format) &
+           time%tstep, time%t, dgtq(9) + dgtq(12), dgtq(9), dgtq(12), ', torquez'
+       call neko_log%message(log_buf)
+    else
+       write(log_buf, '(A, I4, A, A, A)') &
+            'Force and torque on zone ', this%zone_id, &
+            ' (', trim(this%zone_name), ') calculated!'
+       call neko_log%message(log_buf) 
+    end if
+
+    this%total_force(1) = dgtq(1) + dgtq(4)
+    this%total_force(2) = dgtq(2) + dgtq(5)
+    this%total_force(3) = dgtq(3) + dgtq(6)
+    
+    this%total_torque(1) = dgtq(7) + dgtq(10)
+    this%total_torque(2) = dgtq(8) + dgtq(11)
+    this%total_torque(3) = dgtq(9) + dgtq(12)
     call neko_scratch_registry%relinquish_field(temp_indices)
 
   end subroutine force_torque_compute
@@ -698,7 +732,7 @@ contains
              body_found = .false.
              nbodies = neko_ale%config%nbodies
              i = 1
-             do while (i <= nbodies .and. .not. body_found)
+             do while (i <= nbodies .and. (.not. body_found))
                 if (allocated(neko_ale%config%bodies(i)%zone_indices)) then
                    nindices = size(neko_ale%config%bodies(i)%zone_indices)
                    j = 1

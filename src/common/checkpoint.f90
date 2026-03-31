@@ -104,6 +104,13 @@ module checkpoint
      real(kind=rp), pointer :: Blaglag(:,:,:,:) => null()
      real(kind=rp), pointer :: basis_pos(:) => null()
      real(kind=rp), pointer :: basis_vel_lag(:,:) => null()
+
+     !> FSI fields
+     real(kind=rp), pointer :: fsi_disp_rel(:) => null()
+     real(kind=rp), pointer :: fsi_body_vel(:) => null()
+     real(kind=rp), pointer :: fsi_body_vel_lag(:,:) => null()
+     real(kind=rp), pointer :: fsi_moving_frame_presc_vel(:,:) => null()
+     
    contains
      procedure, pass(this) :: init => chkp_init
      procedure, pass(this) :: sync_host => chkp_sync_host
@@ -112,6 +119,7 @@ module checkpoint
      procedure, pass(this) :: add_lag => chkp_add_lag
      procedure, pass(this) :: add_scalar => chkp_add_scalar
      procedure, pass(this) :: add_ale => chkp_add_ale
+     procedure, pass(this) :: add_fsi => chkp_add_fsi
      procedure, pass(this) :: restart_time => chkp_restart_time
      procedure, pass(this) :: free => chkp_free
   end type chkp_t
@@ -161,6 +169,12 @@ contains
     if (associated(this%Blag)) nullify(this%Blag)
     if (associated(this%Blaglag)) nullify(this%Blaglag)
     if (associated(this%basis_pos)) nullify(this%basis_pos)
+    ! FSI cleanup
+    if (associated(this%fsi_disp_rel)) nullify(this%fsi_disp_rel)
+    if (associated(this%fsi_body_vel)) nullify(this%fsi_body_vel)
+    if (associated(this%fsi_body_vel_lag)) nullify(this%fsi_body_vel_lag)
+    if (associated(this%fsi_moving_frame_presc_vel)) &
+         nullify(this%fsi_moving_frame_presc_vel)
 
     if (associated(this%abx1)) nullify(this%abx1)
     if (associated(this%abx2)) nullify(this%abx2)
@@ -469,6 +483,21 @@ contains
     this%basis_pos => basis_pos
     this%basis_vel_lag => basis_vel_lag
   end subroutine chkp_add_ale
+
+  !> Add FSI kinematics to checkpointing
+  subroutine chkp_add_fsi(this, disp_rel, body_vel, body_vel_lag, moving_frame_presc_vel)
+    class(chkp_t), intent(inout) :: this
+    ! Note the 'target' attribute here allows it to accept allocatable arrays
+    real(kind=rp), target, intent(in) :: disp_rel(:)
+    real(kind=rp), target, intent(in) :: body_vel(:)
+    real(kind=rp), target, intent(in) :: body_vel_lag(:,:)
+    real(kind=rp), target, intent(in) :: moving_frame_presc_vel(:,:)
+    
+    this%fsi_disp_rel => disp_rel
+    this%fsi_body_vel => body_vel
+    this%fsi_body_vel_lag => body_vel_lag
+    this%fsi_moving_frame_presc_vel => moving_frame_presc_vel
+  end subroutine chkp_add_fsi
 
   !> Return restart time from a loaded checkpoint
   pure function chkp_restart_time(this) result(rtime)

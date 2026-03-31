@@ -261,6 +261,7 @@ neko_fortran_SOURCES = \
 	fluid/fluid_scheme_compressible_euler.f90\
 	fluid/fluid_aux.f90\
 	fluid/fluid_pnpn.f90\
+	fluid/fluid_pnpn_fsi.f90\
 	fluid/fluid_base_fctry.f90\
 	fluid/fluid_pnpn_bc_fctry.f90\
 	fluid/euler_bc_fctry.f90\
@@ -286,6 +287,8 @@ neko_fortran_SOURCES = \
 	fluid/bcknd/cpu/compressible_ops_cpu.f90\
 	fluid/bcknd/device/compressible_ops_device.F90\
 	fluid/fluid_source_term.f90\
+	fsi/fsi_manager.f90\
+	fsi/fsi_dynamics.f90\
 	common/time_step_controller.f90\
 	simulation.f90\
 	math/ax_helm_fctry.f90\

@@ -78,7 +78,7 @@ module ale_rigid_kinematics
   !> Configuration for a single moving body
   type, public :: ale_body_t
      integer :: id
-     character(len=32) :: name = 'body'
+     character(len=256) :: name = 'body'
      type(stiffness_geometry_t) :: stiff_geom
      !> Oscillation (x, y, z)
      real(kind=rp) :: osc_amp(3) = 0.0_rp
