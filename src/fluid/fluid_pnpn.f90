@@ -763,7 +763,7 @@ contains
           
          ! Extrapolate the velocity if it's not done in nut_field estimation
          call sumab%compute_fluid(u_e, v_e, w_e, u, v, w, &
-              ulag, vlag, wlag, ext_bdf%advection_coeffs, ext_bdf%nadv)
+              ulag, vlag, wlag, ext_bdf%advection_coeffs%x, ext_bdf%nadv)
 
          ! Compute the source terms
          call this%source_term%compute(time)
@@ -912,7 +912,7 @@ contains
       ! Returns if .not. ale.
       if (this%ale%active .and. (.not. is_greens) .and. &
       (.not. skip_ale_mesh_vel_update)) then
-         call this%ale%update_mesh_velocity(c_Xh, time, ext_bdf%nadv)
+         call this%ale%update_mesh_velocity(c_Xh, time)
       end if
       
       call fluid_step_info(time, ksp_results, &
@@ -1515,7 +1515,7 @@ subroutine fluid_pnpn_solve_stokes_step(this, time, dt_controller, &
            p, &
            this%f_x, this%f_y, this%f_z, &
            c_Xh, msh, this%Xh, &
-           this%mu_tot, this%rho, this%ext_bdf%diffusion_coeffs(1), &
+           this%mu_tot, this%rho, this%ext_bdf%diffusion_coeffs%x(1), &
            time%dt, n)
 
       call rotate_cyc(u_res%x, v_res%x, w_res%x, 1, c_Xh)

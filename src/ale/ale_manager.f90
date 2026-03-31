@@ -1025,12 +1025,11 @@ contains
   !> Updates the mesh velocity field.
   !> mode = 0: Standard mode + add superposition override for FSI.
   !> mode = 1: Exclusive -> Override target, Freeze others.
-  subroutine update_mesh_velocity(this, coef, time_s, nadv, &
+  subroutine update_mesh_velocity(this, coef, time_s, &
        override_ids, override_trans, override_ang, out_prescribed_vels, mode)
     class(ale_manager_t), intent(inout) :: this
     type(coef_t), intent(in) :: coef
     type(time_state_t), intent(in) :: time_s
-    integer, intent(in) :: nadv
      
     !> Arrays for batch overrides (FSI)
     integer, intent(in), optional :: override_ids(:)

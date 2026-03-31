@@ -142,7 +142,7 @@ contains
           this%batch_ang(:, i) = this%bodies(i)%body_vel(4:6)
        end do    
        ! Apply Initial Guess + Prescribed Motion
-       call this%ale%update_mesh_velocity(this%c_Xh, t_init, 0, &
+       call this%ale%update_mesh_velocity(this%c_Xh, t_init, &
             override_ids = this%batch_ids, &
             override_trans = this%batch_trans, &
             override_ang = this%batch_ang,&
@@ -178,7 +178,7 @@ contains
     nadv = this%ext_bdf%nadv
 
     do i = 0, nadv
-        beta(i) = this%ext_bdf%diffusion_coeffs(i+1)
+        beta(i) = this%ext_bdf%diffusion_coeffs%x(i+1)
         if (i .ge. 1) beta(i) = -beta(i)
     end do
 
@@ -287,7 +287,7 @@ contains
            end if
 
            ! Mode 1: Set rigid body vels to zero, then apply impulse.
-           call this%ale%update_mesh_velocity(this%c_Xh, time, 0, &
+           call this%ale%update_mesh_velocity(this%c_Xh, time, &
                 override_ids = this%batch_ids(1:1), &
                 override_trans = this%batch_trans(:,1:1), &
                 override_ang = this%batch_ang(:,1:1), & 
@@ -400,7 +400,7 @@ contains
     ! Calculate Final Velocity (FSI + Prescribed)
     ! This velocity will be used as the "guessed" velocity 
     ! for the next time step, and also for the ALE mesh update.
-    call this%ale%update_mesh_velocity(this%c_Xh, time, 0, &
+    call this%ale%update_mesh_velocity(this%c_Xh, time, &
           override_ids = this%batch_ids, &
           override_trans = this%batch_trans, &
           override_ang = this%batch_ang,&
@@ -489,7 +489,7 @@ contains
     end do  
 
     ! Here we only get the prescribed motion for frame of movment.
-    call this%ale%update_mesh_velocity(this%c_Xh, time, 0, &
+    call this%ale%update_mesh_velocity(this%c_Xh, time, &
          override_ids = this%batch_ids, &
          out_prescribed_vels = this%temp_prescribed_vels, &
          mode = 2) 
@@ -626,7 +626,7 @@ contains
           this%batch_ang(:, i) = this%bodies(i)%body_vel(4:6)
        end do
 
-       call this%ale%update_mesh_velocity(this%c_Xh, t_restart, 0, &
+       call this%ale%update_mesh_velocity(this%c_Xh, t_restart, &
             override_ids = this%batch_ids, &
             override_trans = this%batch_trans, &
             override_ang = this%batch_ang, &
