@@ -89,6 +89,11 @@ module fluid_scheme_base
      ! List of boundary conditions for velocity
      type(bc_list_t) :: bcs_vel
 
+     ! List of boundary conditions for velocity for Green's function mode
+     type(bc_list_t) :: bcs_vel_green
+     ! List of boundary conditions for pressure for Green's function mode
+     type(bc_list_t) :: bcs_prs_green
+
      type(json_file), pointer :: params !< Parameters
      type(mesh_t), pointer :: msh => null() !< Mesh
 

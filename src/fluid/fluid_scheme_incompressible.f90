@@ -84,6 +84,7 @@ module fluid_scheme_incompressible
      integer :: pr_projection_dim !< Size of the projection space for ksp_pr
      integer :: vel_projection_activ_step !< Steps to activate projection for ksp_vel
      integer :: pr_projection_activ_step !< Steps to activate projection for ksp_pr
+     logical :: pr_projection_reorthogonalize !< To reorthogonalize proj basis
      logical :: strict_convergence !< Strict convergence for the velocity solver
      logical :: allow_stabilization !< Allow stabilization period
      !> Extrapolation velocity fields for LES
@@ -114,6 +115,10 @@ module fluid_scheme_incompressible
      procedure, pass(this) :: bc_apply_vel => fluid_scheme_bc_apply_vel
      !> Apply velocity boundary conditions
      procedure, pass(this) :: bc_apply_prs => fluid_scheme_bc_apply_prs
+     !> Apply pressure boundary conditions for Green's function mode
+     procedure, pass(this) :: bc_apply_green_vel => fluid_scheme_bc_apply_green_vel
+     !> Apply velocity boundary conditions for Green's function mode
+     procedure, pass(this) :: bc_apply_green_prs => fluid_scheme_bc_apply_green_prs
      !> Compute the CFL number
      procedure, pass(this) :: compute_cfl => fluid_compute_cfl
      !> Set rho and mu
@@ -222,7 +227,9 @@ contains
     call json_get_or_lookup_or_default(params, &
          'case.fluid.pressure_solver.projection_hold_steps', &
          this%pr_projection_activ_step, 5)
-
+    call json_get_or_default(params, &
+         'case.fluid.pressure_solver.projection_reorthogonalize_basis', &
+         this%pr_projection_reorthogonalize, .false.)
 
     call json_get_or_default(params, 'case.fluid.freeze', this%freeze, .false.)
 
@@ -374,6 +381,18 @@ contains
     end do
     call this%bcs_prs%free()
 
+   do i = 1, this%bcs_vel_green%size()
+       bc => this%bcs_vel_green%get(i)
+       call bc%free()
+    end do
+    call this%bcs_vel_green%free()
+
+    do i = 1, this%bcs_prs_green%size()
+       bc => this%bcs_prs_green%get(i)
+       call bc%free()
+    end do
+    call this%bcs_prs_green%free()
+
     call this%source_term%free()
 
     call this%gs_Xh%free()
@@ -523,6 +542,72 @@ contains
     nullify(b)
 
   end subroutine fluid_scheme_bc_apply_prs
+
+  !> Apply the Green's function velocity boundary conditions.
+  subroutine fluid_scheme_bc_apply_green_vel(this, time)
+    class(fluid_scheme_incompressible_t), target, intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    class(bc_t), pointer :: b
+    integer :: i
+
+    call this%bcs_vel_green%apply_vector(this%u%x, this%v%x, this%w%x, &
+         this%dm_Xh%size(), time, strong=.true.)
+
+    call rotate_cyc(this%u%x, this%v%x, this%w%x, 1, this%c_Xh)
+    call this%gs_Xh%op(this%u, GS_OP_MIN, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call this%gs_Xh%op(this%v, GS_OP_MIN, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call this%gs_Xh%op(this%w, GS_OP_MIN, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call rotate_cyc(this%u%x, this%v%x, this%w%x, 0, this%c_Xh)
+
+    call this%bcs_vel_green%apply_vector(this%u%x, this%v%x, this%w%x, &
+         this%dm_Xh%size(), time, strong=.true.)
+    
+    call rotate_cyc(this%u%x, this%v%x, this%w%x, 1, this%c_Xh)
+    call this%gs_Xh%op(this%u, GS_OP_MAX, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call this%gs_Xh%op(this%v, GS_OP_MAX, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call this%gs_Xh%op(this%w, GS_OP_MAX, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call rotate_cyc(this%u%x, this%v%x, this%w%x, 0, this%c_Xh)
+
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+          call this%bcs_vel_green%apply_vector_device(this%u%x_d, &
+               this%v%x_d, this%w%x_d, time, strong=.true.)
+    end if
+    
+    do i = 1, this%bcs_vel_green%size()
+       b => this%bcs_vel_green%get(i)
+       b%updated = .false.
+    end do
+  end subroutine fluid_scheme_bc_apply_green_vel
+
+
+  !> Apply the Green's function pressure boundary conditions.
+  subroutine fluid_scheme_bc_apply_green_prs(this, time)
+    class(fluid_scheme_incompressible_t), target, intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    integer :: i
+    class(bc_t), pointer :: b
+
+    call this%bcs_prs_green%apply(this%p, time)
+
+    call this%gs_Xh%op(this%p, GS_OP_MIN, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+
+    call this%bcs_prs_green%apply(this%p, time)
+
+    call this%gs_Xh%op(this%p, GS_OP_MAX, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+
+    do i = 1, this%bcs_prs_green%size()
+       b => this%bcs_prs_green%get(i)
+       b%updated = .false.
+    end do
+  end subroutine fluid_scheme_bc_apply_green_prs
 
   !> Initialize a linear solver
   !! @note Currently only supporting Krylov solvers

@@ -79,7 +79,7 @@ module ale_rigid_kinematics
   !> Configuration for a single moving body
   type, public :: ale_body_t
      integer :: id
-     character(len=32) :: name = 'body'
+     character(len=256) :: name = 'body'
      type(stiffness_geometry_t) :: stiff_geom
      !> Oscillation (x, y, z)
      real(kind=rp) :: osc_amp(3) = 0.0_rp
@@ -300,26 +300,28 @@ contains
     ! This mode uses vel_trans to move the pivot by integrating the velocity
     case ('relative')
 
-       !       write(log_buf, '(A, 3ES23.15)') '  PIVOT_LOC_BEFORE : ', pivot%pos
-       !       call neko_log%message(log_buf)
+!              write(log_buf, '(A, 3ES23.15)') '  PIVOT_LOC_BEFORE : ', pivot%pos
+!              call neko_log%message(log_buf)
+!              write(log_buf, '(A, 3ES23.15)') '  CURRENT_PIVOT_VEL : ', pivot_vel
+!              call neko_log%message(log_buf)
        !
-       !       do i = 1, 3
-       !          write(log_buf, '(A, I1, A, 3ES23.15)') '  PIVOT_VEL_LAG_BEFORE (', i, '): ', pivot%vel_lag(i, :)
-       !          call neko_log%message(log_buf)
-       !       end do
+!              do i = 1, 3
+!                 write(log_buf, '(A, I1, A, 3ES23.15)') '  PIVOT_VEL_LAG_BEFORE (', i, '): ', pivot%vel_lag(i, :)
+!                 call neko_log%message(log_buf)
+!              end do
        if (time%tstep > 0) then
           call ab_integrate_point_pos(pivot%pos, pivot%vel_lag, &
                pivot_vel, time, nadv)
        end if
        pivot_loc = pivot%pos
 
-       !       write(log_buf, '(A, 3ES23.15)') '  PIVOT_LOC_AFTER  : ', pivot%pos
-       !       call neko_log%message(log_buf)
+!              write(log_buf, '(A, 3ES23.15)') '  PIVOT_LOC_AFTER  : ', pivot%pos
+!              call neko_log%message(log_buf)
 
-       !       do i = 1, 3
-       !          write(log_buf, '(A, I1, A, 3ES23.15)') '  PIVOT_VEL_LAG_AFTER  (', i, '): ', pivot%vel_lag(i, :)
-       !          call neko_log%message(log_buf)
-       !       end do
+!              do i = 1, 3
+!                 write(log_buf, '(A, I1, A, 3ES23.15)') '  PIVOT_VEL_LAG_AFTER  (', i, '): ', pivot%vel_lag(i, :)
+!                 call neko_log%message(log_buf)
+!              end do
 
        ! Mostly for validation. It's too restrictive.
        ! maybe I remove it totally in future.

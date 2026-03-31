@@ -111,6 +111,10 @@ contains
     real(kind=rp), pointer :: pivot_vel_lag(:,:) => null()
     real(kind=rp), pointer :: basis_pos(:) => null()
     real(kind=rp), pointer :: basis_vel_lag(:,:) => null()
+    real(kind=rp), pointer :: fsi_disp_rel(:) => null()
+    real(kind=rp), pointer :: fsi_body_vel(:) => null()
+    real(kind=rp), pointer :: fsi_body_vel_lag(:,:) => null()
+    real(kind=rp), pointer :: fsi_moving_frame_presc_vel(:,:) => null()
     real(kind=rp), pointer :: dtlag(:), tlag(:)
     type(mesh_t), pointer :: msh
     type(MPI_Status) :: status
@@ -118,7 +122,7 @@ contains
     integer (kind=MPI_OFFSET_KIND) :: mpi_offset, byte_offset
     integer(kind=i8) :: n_glb_dofs, dof_offset
     logical :: write_lag, write_scalar, write_dtlag
-    logical :: write_ale
+    logical :: write_ale, write_fsi
     logical :: write_scalarlag, write_abvel
     integer :: i
 
@@ -214,6 +218,16 @@ contains
           optional_fields = optional_fields + 32
           write_ale = .true.
        end if
+
+       write_fsi = .false.
+       if (associated(data%fsi_disp_rel)) then
+          fsi_disp_rel => data%fsi_disp_rel
+          fsi_body_vel => data%fsi_body_vel
+          fsi_body_vel_lag => data%fsi_body_vel_lag
+          fsi_moving_frame_presc_vel => data%fsi_moving_frame_presc_vel
+          optional_fields = optional_fields + 64
+          write_fsi = .true.
+       end if       
 
     class default
        call neko_error('Invalid data')
@@ -497,6 +511,26 @@ contains
             int(size(basis_vel_lag), i8) * int(MPI_REAL_PREC_SIZE, i8)
     end if
 
+    if (write_fsi) then
+       call MPI_File_write_at_all(fh, mpi_offset, fsi_disp_rel, &
+            size(fsi_disp_rel), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_disp_rel), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       call MPI_File_write_at_all(fh, mpi_offset, fsi_body_vel, &
+            size(fsi_body_vel), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_body_vel), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       call MPI_File_write_at_all(fh, mpi_offset, fsi_body_vel_lag, &
+            size(fsi_body_vel_lag), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_body_vel_lag), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       call MPI_File_write_at_all(fh, mpi_offset, fsi_moving_frame_presc_vel, &
+            size(fsi_moving_frame_presc_vel), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_moving_frame_presc_vel), i8) * &
+            int(MPI_REAL_PREC_SIZE, i8)
+    end if
+
     call MPI_File_close(fh, ierr)
 
     if (ierr .ne. MPI_SUCCESS) then
@@ -540,6 +574,10 @@ contains
     real(kind=rp), pointer :: pivot_vel_lag(:,:) => null()
     real(kind=rp), pointer :: basis_pos(:) => null()
     real(kind=rp), pointer :: basis_vel_lag(:,:) => null()
+    real(kind=rp), pointer :: fsi_disp_rel(:) => null()
+    real(kind=rp), pointer :: fsi_body_vel(:) => null()
+    real(kind=rp), pointer :: fsi_body_vel_lag(:,:) => null()
+    real(kind=rp), pointer :: fsi_moving_frame_presc_vel(:,:) => null()
     real(kind=rp), allocatable :: x_coord(:,:,:,:)
     real(kind=rp), allocatable :: y_coord(:,:,:,:)
     real(kind=rp), allocatable :: z_coord(:,:,:,:)
@@ -549,9 +587,9 @@ contains
     integer :: glb_nelv, gdim, lx, have_lag, have_scalar, nel
     integer :: optional_fields, have_dtlag
     integer :: have_abvel, have_scalarlag
-    integer :: have_ale
+    integer :: have_ale, have_fsi
     logical :: read_lag, read_scalar, read_dtlag, read_abvel, read_scalarlag
-    logical :: read_ale, read_ale_mass_lag
+    logical :: read_ale, read_ale_mass_lag, read_fsi
     real(kind=rp) :: tol
     real(kind=rp) :: center_x, center_y, center_z
     integer :: i, e
@@ -641,7 +679,13 @@ contains
           basis_vel_lag => data%basis_vel_lag
           read_ale = .true.
        end if
-
+       if (associated(data%fsi_disp_rel)) then
+          fsi_disp_rel => data%fsi_disp_rel
+          fsi_body_vel => data%fsi_body_vel
+          fsi_body_vel_lag => data%fsi_body_vel_lag
+          fsi_moving_frame_presc_vel => data%fsi_moving_frame_presc_vel
+          read_fsi = .true.
+       end if
        chkp => data
 
     class default
@@ -665,6 +709,8 @@ contains
     have_abvel = mod(optional_fields,16)/8
     have_scalarlag = mod(optional_fields,32)/16
     have_ale = mod(optional_fields,64)/32
+    have_fsi = mod(optional_fields,128)/64
+
 
     if ( ( glb_nelv .ne. msh%glb_nelv ) .or. &
          ( gdim .ne. msh%gdim) .or. &
@@ -889,6 +935,28 @@ contains
             int(size(basis_vel_lag), i8) * int(MPI_REAL_PREC_SIZE, i8)
     end if
 
+    if (read_fsi .and. have_fsi .eq. 1) then
+       call MPI_File_read_at_all(fh, mpi_offset, fsi_disp_rel, &
+            size(fsi_disp_rel), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + int(size(fsi_disp_rel), i8) &
+       * int(MPI_REAL_PREC_SIZE, i8)
+
+       call MPI_File_read_at_all(fh, mpi_offset, fsi_body_vel, &
+            size(fsi_body_vel), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + int(size(fsi_body_vel), i8) &
+       * int(MPI_REAL_PREC_SIZE, i8)
+
+       call MPI_File_read_at_all(fh, mpi_offset, fsi_body_vel_lag, &
+            size(fsi_body_vel_lag), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_body_vel_lag), i8) * int(MPI_REAL_PREC_SIZE, i8)
+
+       call MPI_File_read_at_all(fh, mpi_offset, fsi_moving_frame_presc_vel, &
+            size(fsi_moving_frame_presc_vel), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_moving_frame_presc_vel), i8) * &
+            int(MPI_REAL_PREC_SIZE, i8)
+    end if
 
     call MPI_File_close(fh, ierr)
 

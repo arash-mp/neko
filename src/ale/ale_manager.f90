@@ -74,7 +74,6 @@ module ale_manager
   use math, only : glmin, pi
   use field_math, only : field_rzero, field_add2, &
        field_cmult
-
   implicit none
   private
 
@@ -82,6 +81,7 @@ module ale_manager
   public :: add_kinematics_to_mesh_velocity
   public :: update_ale_mesh
   public :: log_rot_angles
+  public :: log_pivot
 
   type, public :: ale_manager_t
     class(ax_t), allocatable :: Ax
@@ -162,6 +162,7 @@ module ale_manager
     procedure, pass(this) :: prep_checkpoint => set_pivot_basis_for_checkpoint
     procedure, pass(this) :: ghost_tracker_coord_step
     procedure, pass(this) :: log_rot_angles
+    procedure, pass(this) :: log_pivot
   end type ale_manager_t
 
   type(ale_manager_t), public, pointer :: neko_ale => null()
@@ -209,7 +210,7 @@ subroutine ale_manager_init(this, coef, json, user)
      neko_ale => this
   end if
 
-  call profiler_start_region('ALE_INIT')
+!  call profiler_start_region('ALE_INIT')
   call neko_log%section("ALE Initialization")
 
   n = coef%dof%size()
@@ -798,7 +799,7 @@ subroutine ale_manager_init(this, coef, json, user)
   end do
   if (allocated(moving_zone_ids)) deallocate(moving_zone_ids)
   call this%mesh_preview(coef, json)
-  call profiler_end_region('ALE_INIT')
+!  call profiler_end_region('ALE_INIT')
   call neko_log%end_section()
 
   end subroutine ale_manager_init
@@ -830,7 +831,7 @@ subroutine ale_manager_init(this, coef, json, user)
     if (.not. this%has_moving_boundary) return
     if (this%config%nbodies == 0) return
 
-    call profiler_start_region('ALE_SOLVE', 99)
+!    call profiler_start_region('ALE_SOLVE')
 
     call neko_log%message(" ")
     call neko_log%message("Starting base mesh motion solve ...")
@@ -1009,74 +1010,129 @@ subroutine ale_manager_init(this, coef, json, user)
     coef%h1 = h1_restore
     coef%h2 = h2_restore
 
-    call profiler_end_region('ALE_SOLVE', 99)
+!    call profiler_end_region('ALE_SOLVE')
   end subroutine solve_base_mesh_displacement
 
-  !> Updates the mesh velocity field based on current time and kinematics
-  !> Sums contributions from all bodies: mesh_vel = Sum( V_i * Phi_i )
-  subroutine update_mesh_velocity(this, coef, time_s, nadv)
+  !> Updates the mesh velocity field.
+  !> mode = 0: Standard mode + add superposition override for FSI.
+  !> mode = 1: Exclusive -> Override target, Freeze others.
+  subroutine update_mesh_velocity(this, coef, time_s, nadv, &
+       override_ids, override_trans, override_ang, out_prescribed_vels, mode)
     class(ale_manager_t), intent(inout) :: this
     type(coef_t), intent(in) :: coef
     type(time_state_t), intent(in) :: time_s
     integer, intent(in) :: nadv
-    integer :: i, idx, t
+     
+    !> Arrays for batch overrides (FSI)
+    integer, intent(in), optional :: override_ids(:)
+    real(kind=rp), intent(in), optional :: override_trans(:,:) ! (3, N)
+    real(kind=rp), intent(in), optional :: override_ang(:,:) ! (3, N)
+    integer, intent(in), optional :: mode 
+    !> Rows 1-3: Trans, Rows 4-6: Ang
+    real(kind=rp), intent(inout), optional :: out_prescribed_vels(:,:)
+    integer :: i, k, op_mode
     type(body_kinematics_t) :: kin
-    real(kind=rp) :: pivot_vel(3)
-    real(kind=rp) :: p_vel(3), rel_pos(3), v_tan(3)
-    character(len=1000) :: log_buf
-    real(kind=rp) :: rot_mat(3,3)
-    real(kind=rp) :: rot_center(3)
+    real(kind=rp) :: rot_mat(3,3), rot_center(3)
+    logical :: is_override
+    integer :: override_idx, n_overrides
+    character(len=1024) :: log_buf
 
     if (.not. this%active) return
     if (.not. this%has_moving_boundary) return
+    call profiler_start_region('ALE add mesh velocity')
 
-    call field_rzero(this%wm_x)
-    call field_rzero(this%wm_y)
-    call field_rzero(this%wm_z)
+    op_mode = 0
+    if (present(mode)) op_mode = mode
 
+    n_overrides = 0
+    if (present(override_ids)) n_overrides = size(override_ids)
+
+    ! Always zero out fields to rebuild cleanly
+    if (.not. op_mode == 2) then
+       call field_rzero(this%wm_x)
+       call field_rzero(this%wm_y)
+       call field_rzero(this%wm_z)
+    end if
+
+    ! Loop over ALL bodies
     do i = 1, this%config%nbodies
-       ! Compute kinematics for built-in motions
-       ! "kin" will be like solid body kinematics at current time
-       call compute_body_kinematics_built_in(kin, &
-            this%config%bodies(i), time_s)
-
-       ! User Modifier (Superposition or Override)
-       if (associated(this%user_ale_rigid_kinematics)) then
-          call this%user_ale_rigid_kinematics(this%config%bodies(i)%id, &
-               time_s, &
-               kin%vel_trans, &
-               kin%vel_ang)
+        
+       ! Check override status
+       is_override = .false.
+       override_idx = 0
+       if (n_overrides > 0) then
+          do k = 1, n_overrides
+             if (this%config%bodies(i)%id == override_ids(k)) then
+                is_override = .true.
+                override_idx = k
+                exit
+             end if
+          end do
        end if
 
-       kin%center = this%ale_pivot(i)%pos
-       this%ale_pivot(i)%vel = kin%vel_trans
+       kin%vel_trans = 0.0_rp
+       kin%vel_ang   = 0.0_rp
+       kin%center = this%ale_pivot(i)%pos 
 
-       this%body_kin(i)%center = this%ale_pivot(i)%pos
-       this%body_kin(i)%vel_trans = kin%vel_trans
-       this%body_kin(i)%vel_ang = kin%vel_ang
-      
-       ! Compute rotation matrix at current time
-       call this%compute_rotation_matrix(i, time_s)
-       rot_mat = this%body_rot_matrices(:,:,i)
-       rot_center = this%config%bodies(i)%rot_center
+       if (op_mode == 0 .or. op_mode == 2) then
+          ! Calculate Prescribed Motion
+          call compute_body_kinematics_built_in(kin, this%config%bodies(i), time_s)
+          ! Apply user hook for rigid body.
+          if (associated(this%user_ale_rigid_kinematics)) then
+             call this%user_ale_rigid_kinematics(this%config%bodies(i)%id, &
+                  time_s, kin%vel_trans, kin%vel_ang)
+          end if
+       elseif (op_mode == 1) then
+          ! Base velocity is zero.
+          ! Only the override below will add motion.
+          kin%vel_trans = 0.0_rp
+          kin%vel_ang   = 0.0_rp
+       end if
+       
+       ! output prescribed velocities for FSI if needed.
+       if ( (is_override .and. (op_mode == 0 .or. op_mode == 2) ) &
+            .and. present(out_prescribed_vels)) then
+             out_prescribed_vels(1:3, override_idx) = kin%vel_trans
+             out_prescribed_vels(4:6, override_idx) = kin%vel_ang
+        endif
 
-       ! Accumulate contribution from each body and add to mesh velocity
-       call add_kinematics_to_mesh_velocity(this%wm_x, this%wm_y, &
-            this%wm_z, this%x_ref, this%y_ref, this%z_ref , &
-            this%base_shapes(i), coef, kin, rot_mat, rot_center)
-      
-       ! For checkpointing
-       call this%prep_checkpoint(i)
+       ! Apply Override (Superposition)
+       if (is_override .and. (.not. op_mode == 2)) then
+          if (present(override_trans)) &
+             kin%vel_trans = kin%vel_trans + override_trans(:, override_idx)           
+          if (present(override_ang)) &
+             kin%vel_ang = kin%vel_ang + override_ang(:, override_idx)
+       end if
+
+       if (.not. op_mode == 2) then
+          this%ale_pivot(i)%vel = kin%vel_trans
+          this%body_kin(i)%center = kin%center
+          this%body_kin(i)%vel_trans = kin%vel_trans
+          this%body_kin(i)%vel_ang = kin%vel_ang      
+
+          call this%compute_rotation_matrix(i, time_s)
+          rot_mat = this%body_rot_matrices(:,:,i)
+          rot_center = this%config%bodies(i)%rot_center
+
+          ! Accumulate contribution from each body and add to mesh velocity
+          call add_kinematics_to_mesh_velocity(this%wm_x, this%wm_y, &
+               this%wm_z, this%x_ref, this%y_ref, this%z_ref , &
+               this%base_shapes(i), coef, kin, rot_mat, rot_center)
+
+          ! For checkpointing
+          call this%prep_checkpoint(i)
+       end if
+       
     end do
 
     ! If user has provided a custom function for mesh velocity.
     ! User mesh velocity will be added to the ale computed mesh velocity.
-    ! This routine should not be used for rigid body motions!
-    if (associated(this%user_ale_mesh_vel)) then
+    ! This routine should not be used for rigid body motions!    
+    if (associated(this%user_ale_mesh_vel) .and. (op_mode == 0)) then
        call this%user_ale_mesh_vel(this%wm_x, this%wm_y, this%wm_z, &
             coef, this%x_ref, this%y_ref, this%z_ref, this%base_shapes, time_s)
     end if
-
+    call profiler_end_region('ALE add mesh velocity')
   end subroutine update_mesh_velocity
 
   !> Main routine to advance the mesh in time
@@ -1090,6 +1146,7 @@ subroutine ale_manager_init(this, coef, json, user)
 
     if (.not. this%active) return
     if (.not. this%has_moving_boundary) return
+    call profiler_start_region('ALE update mesh')
     do i = 1, this%config%nbodies
        ! Advance Point Trackers attached to this body.
        ! Can be used for torque calculation (simcomp) at a point distanced from the body
@@ -1116,6 +1173,7 @@ subroutine ale_manager_init(this, coef, json, user)
     call this%wm_x_lag%update()
     call this%wm_y_lag%update()
     call this%wm_z_lag%update()
+    call profiler_end_region('ALE update mesh')
   end subroutine advance_mesh
 
   ! Compute mesh stiffness with per-body gain/decay from stiff_geom
@@ -1583,6 +1641,7 @@ subroutine ale_manager_init(this, coef, json, user)
 
   end subroutine compute_rotation_matrix
   
+
   !> Logs rotation angles for all or selected bodies.
   !> can be called in user%compute.
   !> eg: call neko_ale%log_rot_angles(time, body_idxs)
@@ -1599,6 +1658,9 @@ subroutine ale_manager_init(this, coef, json, user)
 
     if (.not. this%active) return
     if (.not. this%has_moving_boundary) return
+    call neko_log%message(" ")
+    call neko_log%message("---------Rotation log---------")
+    call neko_log%message("variable, time step, time, body, x_val, y_val, z_val")
 
     ! If body_idxs is provided, only log those. Otherwise, log all.
     do i = 1, merge(size(body_idxs), this%config%nbodies, present(body_idxs))
@@ -1616,13 +1678,66 @@ subroutine ale_manager_init(this, coef, json, user)
        pitch_deg = atan2(-R(3,1), sqrt(R(3,2)**2 + R(3,3)**2)) * rad_to_deg
        roll_deg  = atan2(R(3,2), R(3,3)) * rad_to_deg
 
-       write(log_buf, '(A, 1X, ES18.10, 1X, A, A, A, 3(1X, ES18.10))') &
-            "Time", time%t, &
-            "Body_", trim(this%config%bodies(idx)%name), "_Rot_X_Y_Z_deg", &
+       ! Log Rotation Angles (Roll, Pitch, Yaw) -> (X, Y, Z)
+       write(log_buf, '(A, I0, A, ES13.6, A, A, A, 3(ES17.10, :, 2X))') &
+            "Total_Rot_deg    ", time%tstep, "  ", time%t, "  ", &
+            trim(this%config%bodies(idx)%name), "  ", &
             roll_deg, pitch_deg, yaw_deg 
        call neko_log%message(trim(log_buf))
+
     end do
+
   end subroutine log_rot_angles
+
+  !> Logs pivot positions for all or selected bodies.
+  !> can be called in user%compute.
+  !> eg: call neko_ale%log_pivot(time, body_idxs)
+subroutine log_pivot(this, time, body_idxs)
+    class(ale_manager_t), intent(in) :: this
+    type(time_state_t), intent(in) :: time
+    integer, optional, intent(in) :: body_idxs(:) 
+    
+    integer :: b, i, idx
+    real(kind=rp) :: pivot_pos(3), pivot_vel(3)
+    character(len=256) :: log_buf
+
+    if (.not. this%active) return
+    if (.not. this%has_moving_boundary) return
+    call neko_log%message(" ")
+    call neko_log%message("----------Pivot Log-----------")
+    call neko_log%message("variable, time step, time, body, x_val, y_val, z_val")
+
+    ! If body_idxs is provided, only log those. Otherwise, log all.
+    do i = 1, merge(size(body_idxs), this%config%nbodies, present(body_idxs))
+        
+       if (present(body_idxs)) then
+           idx = body_idxs(i)
+       else
+            idx = i
+       end if
+
+       pivot_pos = this%ale_pivot(idx)%pos
+       pivot_vel = this%ale_pivot(idx)%vel
+
+       ! Pivot Position
+       write(log_buf, '(A, I0, A, ES13.6, A, A, A, 3(ES17.10, :, 2X))') &
+            "Total_Pivot_pos  ", time%tstep, "  ", time%t, "  ", &
+            trim(this%config%bodies(idx)%name), "  ", &
+            this%ale_pivot(idx)%pos
+       call neko_log%message(trim(log_buf))
+
+       ! Pivot Velocity
+       write(log_buf, '(A, I0, A, ES13.6, A, A, A, 3(ES17.10, :, 2X))') &
+            "Total_Pivot_vel  ", time%tstep, "  ", time%t, "  ", &
+            trim(this%config%bodies(idx)%name), "  ", &
+            this%ale_pivot(idx)%vel
+       call neko_log%message(trim(log_buf))
+
+    end do
+    
+
+  end subroutine log_pivot
+
   subroutine set_pivot_basis_for_checkpoint(this, body_idx)
     class(ale_manager_t), intent(inout) :: this
     integer, intent(in) :: body_idx
@@ -1697,9 +1812,9 @@ subroutine ale_manager_init(this, coef, json, user)
                    call ab_integrate_point_pos(this%trackers(t)%pos, this%trackers(t)%vel_lag, &
                         p_vel, time_s, nadv)
                 end if
-             ! write(log_buf, '(A, F12.5, A, 3ES23.15)') &
-             !      "time: ", time_s%t, " | tracer pos AFTER: ", this%trackers(t)%pos
-             ! call neko_log%message(trim(log_buf))
+                ! write(log_buf, '(A, F12.5, A, 3ES23.15)') &
+                !    "time: ", time_s%t, " | tracer pos AFTER: ", this%trackers(t)%pos
+                ! call neko_log%message(trim(log_buf))
           end if
 
         end if
