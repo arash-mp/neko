@@ -48,7 +48,7 @@ module advection
      procedure(compute_adv), pass(this), deferred :: compute
      procedure(compute_scalar_adv), pass(this), deferred :: compute_scalar
      procedure(compute_ale_adv), pass(this), deferred :: compute_ale
-     procedure(advection_update_metrics), pass(this), deferred :: update_metrics
+     procedure(advection_recompute_metrics), pass(this), deferred :: recompute_metrics
      procedure(advection_free), pass(this), deferred :: free
   end type advection_t
 
@@ -146,7 +146,7 @@ module advection
      !! @param vx The x component of velocity.
      !! @param vy The y component of velocity.
      !! @param vz The z component of velocity.
-     !! @param wm_x The x component of mesh velocity. 
+     !! @param wm_x The x component of mesh velocity.
      !! @param wm_y The y component of mesh velocity.
      !! @param wm_z The z component of mesh velocity.
      !! @param fx The x component of source term.
@@ -175,16 +175,16 @@ module advection
   end interface
 
   abstract interface
-    !> Update any geometry/metric data inside the advection object.
-    !> For eg., in ALE, maps the coef_GLL to coef_GL at each iteration
-    !> for dealiasing.
-    subroutine advection_update_metrics(this, coef, moving_boundary)
-      import :: advection_t
-      import :: coef_t
-      class(advection_t), intent(inout) :: this
-      type(coef_t), intent(in) :: coef
-      logical, intent(in) :: moving_boundary
-    end subroutine advection_update_metrics
+     !> Update any geometry/metric data inside the advection object.
+     !> For eg., in ALE, maps the coef_GLL to coef_GL at each iteration
+     !> for dealiasing.
+     subroutine advection_recompute_metrics(this, coef, moving_boundary)
+       import :: advection_t
+       import :: coef_t
+       class(advection_t), intent(inout) :: this
+       type(coef_t), intent(in) :: coef
+       logical, intent(in) :: moving_boundary
+     end subroutine advection_recompute_metrics
   end interface
 
   abstract interface

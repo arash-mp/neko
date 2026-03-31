@@ -57,6 +57,13 @@ module hip_math
        integer(c_int) :: n, n_mask
      end subroutine hip_masked_gather_copy
 
+     subroutine hip_masked_gather_copy_aligned(a_d, b_d, mask_d, n, n_mask, &
+          strm) bind(c, name = 'hip_masked_gather_copy_aligned')
+       use, intrinsic :: iso_c_binding, only : c_ptr, c_int
+       type(c_ptr), value :: a_d, b_d, mask_d, strm
+       integer(c_int) :: n, n_mask
+     end subroutine hip_masked_gather_copy_aligned
+
      subroutine hip_masked_scatter_copy(a_d, b_d, mask_d, n, n_mask, strm) &
           bind(c, name = 'hip_masked_scatter_copy')
        use, intrinsic :: iso_c_binding, only : c_ptr, c_int
@@ -386,6 +393,24 @@ module hip_math
        type(c_ptr), value :: a_d, strm
        integer(c_int) :: n
      end function hip_glsum
+
+     real(c_rp) function hip_glmax(a_d, ninf, n, strm) &
+          bind(c, name = 'hip_glmax')
+       use, intrinsic :: iso_c_binding, only: c_int, c_ptr
+       import c_rp
+       type(c_ptr), value :: a_d, strm
+       real(c_rp) :: ninf
+       integer(c_int) :: n
+     end function hip_glmax
+
+     real(c_rp) function hip_glmin(a_d, pinf, n, strm) &
+          bind(c, name = 'hip_glmin')
+       use, intrinsic :: iso_c_binding, only: c_int, c_ptr
+       import c_rp
+       type(c_ptr), value :: a_d, strm
+       real(c_rp) :: pinf
+       integer(c_int) :: n
+     end function hip_glmin
 
      subroutine hip_absval(a_d, n, strm) &
           bind(c, name = 'hip_absval')

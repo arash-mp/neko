@@ -54,6 +54,7 @@ module neko
   use point, only : point_t
   use mesh_field, only : mesh_fld_t
   use map
+  use import_field_utils, only : import_fields
   use mxm_wrapper, only : mxm
   use global_interpolation
   use file
@@ -91,8 +92,8 @@ module neko
        device_subcol3, device_sub2, device_sub3, device_addcol3, &
        device_addcol4, device_vdot3, device_vlsc3, device_glsc3, &
        device_glsc3_many, device_add2s2_many, device_glsc2, device_glsum, &
-       device_masked_copy_0, device_cfill_mask, device_add3, device_cadd2, &
-       device_absval
+       device_glmax, device_glmin, device_masked_copy_0, device_cfill_mask, &
+       device_add3, device_cadd2, device_absval
   use map_1d, only : map_1d_t
   use map_2d, only : map_2d_t
   use cpr, only : cpr_t, cpr_init, cpr_free
@@ -100,6 +101,7 @@ module neko
   use field_list, only : field_list_t
   use user_source_term, only : user_source_term_t
   use vector, only : vector_t, vector_ptr_t
+  use vector_list, only : vector_list_t
   use matrix, only : matrix_t
   use tensor
   use simulation_component, only : simulation_component_t, &
@@ -118,10 +120,10 @@ module neko
   use data_streamer, only : data_streamer_t
   use time_interpolator, only : time_interpolator_t
   use point_interpolator, only : point_interpolator_t
-  use point_zone, only: point_zone_t
-  use box_point_zone, only: box_point_zone_t
-  use sphere_point_zone, only: sphere_point_zone_t
-  use point_zone_registry, only: neko_point_zone_registry
+  use point_zone, only : point_zone_t
+  use box_point_zone, only : box_point_zone_t
+  use sphere_point_zone, only : sphere_point_zone_t
+  use point_zone_registry, only : neko_point_zone_registry
   use field_dirichlet, only : field_dirichlet_t
   use field_dirichlet_vector, only : field_dirichlet_vector_t
   use runtime_stats, only : neko_rt_stats
@@ -143,6 +145,7 @@ module neko
   use source_term, only : source_term_t, source_term_allocate, &
        register_source_term, source_term_factory, source_term_allocator
   use user_access_singleton, only : neko_user_access
+  use ale_manager, only : neko_ale
   use, intrinsic :: iso_fortran_env
   use mpi_f08
   !$ use omp_lib

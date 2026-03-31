@@ -57,6 +57,13 @@ module opencl_math
        integer(c_int) :: n, n_mask
      end subroutine opencl_masked_gather_copy
 
+     subroutine opencl_masked_gather_copy_aligned(a_d, b_d, mask_d, n, n_mask, &
+          strm) bind(c, name = 'opencl_masked_gather_copy_aligned')
+       use, intrinsic :: iso_c_binding, only : c_ptr, c_int
+       type(c_ptr), value :: a_d, b_d, mask_d, strm
+       integer(c_int) :: n, n_mask
+     end subroutine opencl_masked_gather_copy_aligned
+
      subroutine opencl_masked_scatter_copy(a_d, b_d, mask_d, n, n_mask, strm) &
           bind(c, name = 'opencl_masked_scatter_copy')
        use, intrinsic :: iso_c_binding, only : c_ptr, c_int
@@ -406,6 +413,24 @@ module opencl_math
        type(c_ptr), value :: a_d, strm
        integer(c_int) :: n
      end function opencl_glsum
+
+     real(c_rp) function opencl_glmax(a_d, n, strm) &
+          bind(c, name = 'opencl_glmax')
+       use, intrinsic :: iso_c_binding, only : c_ptr, c_int
+       import c_rp
+       implicit none
+       type(c_ptr), value :: a_d, strm
+       integer(c_int) :: n
+     end function opencl_glmax
+
+     real(c_rp) function opencl_glmin(a_d, n, strm) &
+          bind(c, name = 'opencl_glmin')
+       use, intrinsic :: iso_c_binding, only : c_ptr, c_int
+       import c_rp
+       implicit none
+       type(c_ptr), value :: a_d, strm
+       integer(c_int) :: n
+     end function opencl_glmin
 
      subroutine opencl_absval(a_d, n, strm) &
           bind(c, name = 'opencl_absval')

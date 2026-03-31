@@ -1,4 +1,4 @@
-! Copyright (c) 2025, The Neko Authors
+! Copyright (c) 2025-2026, The Neko Authors
 ! All rights reserved.
 !
 ! Redistribution and use in source and binary forms, with or without
@@ -103,8 +103,19 @@ contains
     real(kind=rp) :: start_time
     type(field_t), pointer :: s, u, v, w, p
     type(coef_t), pointer :: coef
+    logical :: sname_provided
 
-    call json_get_or_default(json, "name", name, "scalar_stats")
+    sname_provided = json%valid_path('field')
+
+    call json_get_or_default(json, 'field', &
+         sname, 's')
+    if (sname_provided) then
+       call json_get_or_default(json, "name", &
+            name, "scalar_stats_" // trim(sname))
+    else
+       call json_get_or_default(json, "name", &
+            name, "scalar_stats")
+    endif
     call this%init_base(json, case)
     call json_get_or_default(json, 'avg_direction', &
          hom_dir, 'none')
@@ -112,8 +123,6 @@ contains
          start_time, 0.0_rp)
     call json_get_or_default(json, 'set_of_stats', &
          stat_set, 'full')
-    call json_get_or_default(json, 'field', &
-         sname, 's')
 
     s => neko_registry%get_field_by_name(sname)
     u => neko_registry%get_field("u")
@@ -127,6 +136,9 @@ contains
        call json_get(json, "output_filename", filename)
        call scalar_stats_simcomp_init_from_components(this, name, s, u, v, w, &
             p, coef, start_time, hom_dir, stat_set, filename)
+    else if (sname_provided) then
+       call scalar_stats_simcomp_init_from_components(this, name, s, u, v, w, &
+            p, coef, start_time, hom_dir, stat_set, "scalar_stats_" // trim(sname) // "0")
     else
        call scalar_stats_simcomp_init_from_components(this, name, s, u, v, w, &
             p, coef, start_time, hom_dir, stat_set)
@@ -144,6 +156,7 @@ contains
   !! @param start_time time to start sampling stats
   !! @param hom_dir directions to average in
   !! @param stat_set Set of statistics to compute (basic/full)
+  !! @param fname name of the output file
   subroutine scalar_stats_simcomp_init_from_components(this, name, s, u, v, w, &
        p, coef, start_time, hom_dir, stat_set, fname)
     class(scalar_stats_simcomp_t), target, intent(inout) :: this
@@ -170,7 +183,7 @@ contains
     call neko_log%message(log_buf)
 
 
-    call this%stats%init(coef, s, u, v, w, p, stat_set)
+    call this%stats%init(coef, s, u, v, w, p, stat_set, name)
 
     this%start_time = start_time
     this%time = start_time
@@ -229,8 +242,7 @@ contains
   end subroutine scalar_stats_simcomp_restart
 
   !> scalar_stats, called depending on compute_control and compute_value
-  !! @param t The time value.
-  !! @param tstep The current time-step
+  !! @param time The current time info
   subroutine scalar_stats_simcomp_compute(this, time)
     class(scalar_stats_simcomp_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time

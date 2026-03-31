@@ -110,9 +110,9 @@ module adv_oifs
      procedure, pass(this) :: free => adv_oifs_free
      !> add the advection term for ALE, i.e. \f$(u - w_m) \cdot \nabla s \f$, to
      !> the RHS
-       procedure, pass(this) :: compute_ale => adv_oifs_compute_ale
+     procedure, pass(this) :: compute_ale => adv_oifs_compute_ale
      !> Update any metrics needed for the advection computation in ALE.
-     procedure, pass(this) :: update_metrics => update_metrics_oifs
+     procedure, pass(this) :: recompute_metrics => recompute_metrics_oifs
   end type adv_oifs_t
 
 contains
@@ -459,44 +459,44 @@ contains
          if (NEKO_BCKND_DEVICE .eq. 1) then
             if (ilag .eq. 1) then
                call device_addcol3s2(fx%x_d, vx%x_d, coef%B_d, &
-                    oifs_scheme%diffusion_coeffs(2), n)
+                    oifs_scheme%diffusion_coeffs%x(2), n)
                call device_addcol3s2(fy%x_d, vy%x_d, coef%B_d, &
-                    oifs_scheme%diffusion_coeffs(2), n)
+                    oifs_scheme%diffusion_coeffs%x(2), n)
                call device_addcol3s2(fz%x_d, vz%x_d, coef%B_d, &
-                    oifs_scheme%diffusion_coeffs(2), n)
+                    oifs_scheme%diffusion_coeffs%x(2), n)
             else
                call device_addcol3s2(fx%x_d, ulag%lf(ilag-1)%x_d, coef%B_d, &
-                    oifs_scheme%diffusion_coeffs(ilag+1), n)
+                    oifs_scheme%diffusion_coeffs%x(ilag+1), n)
                call device_addcol3s2(fy%x_d, vlag%lf(ilag-1)%x_d, coef%B_d, &
-                    oifs_scheme%diffusion_coeffs(ilag+1), n)
+                    oifs_scheme%diffusion_coeffs%x(ilag+1), n)
                call device_addcol3s2(fz%x_d, wlag%lf(ilag-1)%x_d, coef%B_d, &
-                    oifs_scheme%diffusion_coeffs(ilag+1), n)
+                    oifs_scheme%diffusion_coeffs%x(ilag+1), n)
             end if
          else
             if (ilag .eq. 1) then
                do i = 1, n
                   fx%x(i,1,1,1) = fx%x(i,1,1,1) + &
-                       oifs_scheme%diffusion_coeffs(2) &
+                       oifs_scheme%diffusion_coeffs%x(2) &
                        * vx%x(i,1,1,1) * coef%B(i,1,1,1)
                   fy%x(i,1,1,1) = fy%x(i,1,1,1) + &
-                       oifs_scheme%diffusion_coeffs(2) &
+                       oifs_scheme%diffusion_coeffs%x(2) &
                        * vy%x(i,1,1,1) * coef%B(i,1,1,1)
                   fz%x(i,1,1,1) = fz%x(i,1,1,1) + &
-                       oifs_scheme%diffusion_coeffs(2) &
+                       oifs_scheme%diffusion_coeffs%x(2) &
                        * vz%x(i,1,1,1) * coef%B(i,1,1,1)
                end do
             else
                do i = 1, n
                   fx%x(i,1,1,1) = fx%x(i,1,1,1) + &
-                       oifs_scheme%diffusion_coeffs(ilag+1) &
+                       oifs_scheme%diffusion_coeffs%x(ilag+1) &
                        * ulag%lf(ilag-1)%x(i,1,1,1) &
                        * coef%B(i,1,1,1)
                   fy%x(i,1,1,1) = fy%x(i,1,1,1) + &
-                       oifs_scheme%diffusion_coeffs(ilag+1) &
+                       oifs_scheme%diffusion_coeffs%x(ilag+1) &
                        * vlag%lf(ilag-1)%x(i,1,1,1) &
                        * coef%B(i,1,1,1)
                   fz%x(i,1,1,1) = fz%x(i,1,1,1) + &
-                       oifs_scheme%diffusion_coeffs(ilag+1) &
+                       oifs_scheme%diffusion_coeffs%x(ilag+1) &
                        * wlag%lf(ilag-1)%x(i,1,1,1) &
                        * coef%B(i,1,1,1)
                end do
@@ -585,22 +585,22 @@ contains
          if (NEKO_BCKND_DEVICE .eq. 1) then
             if (ilag .eq. 1) then
                call device_addcol3s2(fs%x_d, s%x_d, coef%B_d, &
-                    oifs_scheme%diffusion_coeffs(2), n)
+                    oifs_scheme%diffusion_coeffs%x(2), n)
             else
                call device_addcol3s2(fs%x_d, slag%lf(ilag-1)%x_d, coef%B_d, &
-                    oifs_scheme%diffusion_coeffs(ilag+1), n)
+                    oifs_scheme%diffusion_coeffs%x(ilag+1), n)
             end if
          else
             if (ilag .eq. 1) then
                do i = 1, n
                   fs%x(i,1,1,1) = fs%x(i,1,1,1) + &
-                       oifs_scheme%diffusion_coeffs(2) &
+                       oifs_scheme%diffusion_coeffs%x(2) &
                        * s%x(i,1,1,1) * coef%B(i,1,1,1)
                end do
             else
                do i = 1, n
                   fs%x(i,1,1,1) = fs%x(i,1,1,1) + &
-                       oifs_scheme%diffusion_coeffs(ilag+1) &
+                       oifs_scheme%diffusion_coeffs%x(ilag+1) &
                        * slag%lf(ilag-1)%x(i,1,1,1) * coef%B(i,1,1,1)
                end do
             end if
@@ -628,15 +628,15 @@ contains
     end associate
 
   end subroutine adv_oifs_compute_scalar
-  subroutine update_metrics_oifs(this, coef, moving_boundary)
+  subroutine recompute_metrics_oifs(this, coef, moving_boundary)
     class(adv_oifs_t), intent(inout) :: this
     type(coef_t), intent(in) :: coef
     logical, intent(in) :: moving_boundary
     ! no-op
-  end subroutine update_metrics_oifs
+  end subroutine recompute_metrics_oifs
 
 
-   subroutine adv_oifs_compute_ale(this, vx, vy, vz, wm_x, wm_y, wm_z, &
+  subroutine adv_oifs_compute_ale(this, vx, vy, vz, wm_x, wm_y, wm_z, &
                                            fx, fy, fz, Xh, coef, n, dt)
     class(adv_oifs_t), intent(inout) :: this
     type(field_t), intent(inout) :: vx, vy, vz

@@ -117,7 +117,7 @@ module checkpoint
      procedure, pass(this) :: add_fluid => chkp_add_fluid
      procedure, pass(this) :: add_lag => chkp_add_lag
      procedure, pass(this) :: add_scalar => chkp_add_scalar
-     procedure, pass(this) :: add_ale => chkp_add_ale  
+     procedure, pass(this) :: add_ale => chkp_add_ale
      procedure, pass(this) :: add_fsi => chkp_add_fsi
      procedure, pass(this) :: restart_time => chkp_restart_time
      procedure, pass(this) :: free => chkp_free
@@ -145,9 +145,9 @@ contains
     if (associated(this%w)) nullify(this%w)
     if (associated(this%p)) nullify(this%p)
 
-    nullify(this%ulag)
-    nullify(this%vlag)
-    nullify(this%wlag)
+    if (associated(this%ulag)) nullify(this%ulag)
+    if (associated(this%vlag)) nullify(this%vlag)
+    if (associated(this%wlag)) nullify(this%wlag)
 
     if (associated(this%tlag)) nullify(this%tlag)
     if (associated(this%dtlag)) nullify(this%dtlag)
@@ -160,6 +160,14 @@ contains
     if (associated(this%wm_y_lag)) nullify(this%wm_y_lag)
     if (associated(this%wm_z_lag)) nullify(this%wm_z_lag)
     if (associated(this%basis_vel_lag)) nullify(this%basis_vel_lag)
+    if (associated(this%msh_x)) nullify(this%msh_x)
+    if (associated(this%msh_y)) nullify(this%msh_y)
+    if (associated(this%msh_z)) nullify(this%msh_z)
+    if (associated(this%pivot_pos)) nullify(this%pivot_pos)
+    if (associated(this%pivot_vel_lag)) nullify(this%pivot_vel_lag)
+    if (associated(this%Blag)) nullify(this%Blag)
+    if (associated(this%Blaglag)) nullify(this%Blaglag)
+    if (associated(this%basis_pos)) nullify(this%basis_pos)
     ! FSI cleanup
     if (associated(this%fsi_disp_rel)) nullify(this%fsi_disp_rel)
     if (associated(this%fsi_body_vel)) nullify(this%fsi_body_vel)
@@ -247,10 +255,10 @@ contains
 
             if (associated(this%wm_x_lag) .and. associated(this%wm_y_lag) &
                  .and. associated(this%wm_z_lag)) then
-                
+
                call this%wm_x_lag%lf(1)%copy_from(DEVICE_TO_HOST, &
                     sync = .false.)
-               call this%wm_x_lag%lf(2)%copy_from(DEVICE_TO_HOST, & 
+               call this%wm_x_lag%lf(2)%copy_from(DEVICE_TO_HOST, &
                     sync = .false.)
 
                call this%wm_y_lag%lf(1)%copy_from(DEVICE_TO_HOST, &
@@ -263,7 +271,7 @@ contains
                call this%wm_z_lag%lf(2)%copy_from(DEVICE_TO_HOST, &
                     sync = .false.)
             end if
-         end if        
+         end if
 
          ! Multi-scalar lag field synchronization
          do i = 1, this%scalar_lags%size()
@@ -445,7 +453,7 @@ contains
 
   end subroutine chkp_add_scalar
 
-  !> Add mesh velocity and other required variables to checkpointing
+  !> Add mesh velocity and other required variables to checkpointing for ALE
   subroutine chkp_add_ale(this, x, y, z, Blag, Blaglag, wm_x, wm_y, wm_z, &
                           wm_x_lag, wm_y_lag, wm_z_lag, &
                           pivot_pos, pivot_vel_lag, basis_pos, &
@@ -458,6 +466,7 @@ contains
     real(kind=rp), pointer, intent(in) :: Blag(:,:,:,:), Blaglag(:,:,:,:)
     real(kind=rp), intent(in), pointer :: basis_pos(:)
     real(kind=rp), intent(in), pointer :: basis_vel_lag(:,:)
+
     this%msh_x => x
     this%msh_y => y
     this%msh_z => z
@@ -471,7 +480,7 @@ contains
     this%Blaglag => Blaglag
     this%pivot_pos => pivot_pos
     this%pivot_vel_lag => pivot_vel_lag
-    this%basis_pos => basis_pos 
+    this%basis_pos => basis_pos
     this%basis_vel_lag => basis_vel_lag
   end subroutine chkp_add_ale
 

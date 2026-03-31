@@ -41,12 +41,17 @@ module coefs
   use math, only : rone, invcol1, addcol3, subcol3, copy, &
        chsign, rzero, invers2, glsum, NEKO_EPS
   use mesh, only : mesh_t
-  use device_math, only : device_rone, device_invcol1, device_glsum
+  use device_math, only : device_rone, device_invcol1, &
+       device_glsum
   use device_coef, only : device_coef_generate_geo, &
        device_coef_generate_dxydrst
   use mxm_wrapper, only : mxm
   use device
-  use utils, only : index_is_on_facet, linear_index
+  use utils, only : index_is_on_facet, linear_index, &
+       neko_error
+  use comm, only : NEKO_COMM
+  use neko_config, only : NEKO_BCKND_DEVICE
+  use mpi_f08, only : MPI_Allreduce, MPI_INTEGER, MPI_SUM
   use, intrinsic :: iso_fortran_env
   use, intrinsic :: iso_c_binding
   implicit none
@@ -163,7 +168,8 @@ module coefs
      procedure, pass(this) :: free => coef_free
      procedure, pass(this) :: get_normal => coef_get_normal
      procedure, pass(this) :: get_area => coef_get_area
-     procedure, pass(this) :: update_metrics => coef_update_metrics
+     procedure, pass(this) :: generate_cyclic_bc => coef_generate_cyclic_bc
+     procedure, pass(this) :: recompute_metrics => coef_recompute_metrics
      procedure, pass(this) :: enable_B_history => coef_enable_lagged_mass
      procedure, pass(this) :: update_B_history => coef_update_lagged_mass
      generic :: init => init_empty, init_all
@@ -278,7 +284,7 @@ contains
     ! We do this so in a static simulation we don't allocate extra memory
     this%Blag => this%B
     this%Blaglag => this%B
-    
+
     allocate(this%h1(this%Xh%lx, this%Xh%ly, this%Xh%lz, this%msh%nelv))
     allocate(this%h2(this%Xh%lx, this%Xh%ly, this%Xh%lz, this%msh%nelv))
 
@@ -358,9 +364,9 @@ contains
        call device_rone(this%h1_d, n)
        call device_rone(this%h2_d, n)
        call device_memcpy(this%h1, this%h1_d, n, &
-                          DEVICE_TO_HOST, sync=.false.)
+            DEVICE_TO_HOST, sync=.false.)
        call device_memcpy(this%h2, this%h2_d, n, &
-                          DEVICE_TO_HOST, sync=.false.)
+            DEVICE_TO_HOST, sync=.false.)
     else
        call rone(this%h1,n)
        call rone(this%h2,n)
@@ -382,21 +388,33 @@ contains
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call device_invcol1(this%mult_d, n)
        call device_memcpy(this%mult, this%mult_d, n, &
-                          DEVICE_TO_HOST, sync=.true.)
+            DEVICE_TO_HOST, sync=.true.)
     else
        call invcol1(this%mult, n)
     end if
 
     ncyc = this%msh%periodic%size * this%Xh%lx * this%Xh%lx
     allocate(this%cyc_msk(0:ncyc))
-    allocate(this%R11(ncyc))
-    allocate(this%R12(ncyc))
-    if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_map(this%cyc_msk, this%cyc_msk_d, ncyc+1)
-       call device_map(this%R11, this%R11_d, ncyc)
-       call device_map(this%R12, this%R12_d, ncyc)
+    this%cyc_msk(0) = ncyc + 1
+    if (ncyc .gt. 0) then
+       allocate(this%R11(ncyc))
+       allocate(this%R12(ncyc))
+
+       !>Default values correspond to no rotation
+       call rone(this%R11, ncyc)
+       call rzero(this%R12, ncyc)
+
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          call device_map(this%cyc_msk, this%cyc_msk_d, ncyc+1)
+          call device_map(this%R11, this%R11_d, ncyc)
+          call device_map(this%R12, this%R12_d, ncyc)
+
+          call device_memcpy(this%cyc_msk, this%cyc_msk_d, ncyc+1, HOST_TO_DEVICE, sync=.false.)
+          call device_memcpy(this%R11, this%R11_d, ncyc, HOST_TO_DEVICE, sync=.false.)
+          call device_memcpy(this%R12, this%R12_d, ncyc, HOST_TO_DEVICE, sync=.false.)
+       end if
+
     end if
-    call coef_generate_cyclic_bc(this)
   end subroutine coef_init_all
 
   !> Deallocate coefficients
@@ -435,7 +453,7 @@ contains
        deallocate(this%Blag)
     end if
     nullify(this%Blag)
-   
+
     if (associated(this%Blaglag) .and. .not. associated(this%Blaglag, this%B)) then
        deallocate(this%Blaglag)
     end if
@@ -789,9 +807,10 @@ contains
          call device_memcpy(dtdz, c%dtdz_d, ntot, DEVICE_TO_HOST, sync=.false.)
          call device_memcpy(jac, c%jac_d, ntot, DEVICE_TO_HOST, sync=.false.)
          call device_memcpy(jacinv, c%jacinv_d, ntot, &
-                            DEVICE_TO_HOST, sync=.true.)
+              DEVICE_TO_HOST, sync=.true.)
 
       else
+         !$omp parallel do private(i)
          do e = 1, c%msh%nelv
             call mxm(dx, lx, x(1,1,1,e), lx, dxdr(1,1,1,e), lyz)
             call mxm(dx, lx, y(1,1,1,e), lx, dydr(1,1,1,e), lyz)
@@ -814,6 +833,7 @@ contains
                call rone(dzdt(1,1,1,e), lxy)
             end if
          end do
+         !$omp end parallel do
 
          if (c%msh%gdim .eq. 2) then
             call rzero (jac, ntot)
@@ -829,66 +849,73 @@ contains
             call rzero (dsdz, ntot)
             call rone (dtdz, ntot)
          else
-
+            !$omp parallel private(i)
+            !$omp do
             do i = 1, ntot
                c%jac(i, 1, 1, 1) = 0.0_rp
             end do
-
+            !$omp end do
+            !$omp do
             do i = 1, ntot
                c%jac(i, 1, 1, 1) = c%jac(i, 1, 1, 1) + ( c%dxdr(i, 1, 1, 1) &
-                                 * c%dyds(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1) )
+                    * c%dyds(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1) )
 
                c%jac(i, 1, 1, 1) = c%jac(i, 1, 1, 1) + ( c%dxdt(i, 1, 1, 1) &
-                                 * c%dydr(i, 1, 1, 1) * c%dzds(i, 1, 1, 1) )
+                    * c%dydr(i, 1, 1, 1) * c%dzds(i, 1, 1, 1) )
 
                c%jac(i, 1, 1, 1) = c%jac(i, 1, 1, 1) + ( c%dxds(i, 1, 1, 1) &
-                                 * c%dydt(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1) )
+                    * c%dydt(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1) )
             end do
-
+            !$omp end do
+            !$omp do
             do i = 1, ntot
                c%jac(i, 1, 1, 1) = c%jac(i, 1, 1, 1) - ( c%dxdr(i, 1, 1, 1) &
-                                 * c%dydt(i, 1, 1, 1) * c%dzds(i, 1, 1, 1) )
+                    * c%dydt(i, 1, 1, 1) * c%dzds(i, 1, 1, 1) )
 
                c%jac(i, 1, 1, 1) = c%jac(i, 1, 1, 1) - ( c%dxds(i, 1, 1, 1) &
-                                 * c%dydr(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1) )
+                    * c%dydr(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1) )
 
                c%jac(i, 1, 1, 1) = c%jac(i, 1, 1, 1) - ( c%dxdt(i, 1, 1, 1) &
-                                 * c%dyds(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1) )
+                    * c%dyds(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1) )
             end do
-
+            !$omp end do
+            !$omp do
             do i = 1, ntot
                c%drdx(i, 1, 1, 1) = c%dyds(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1) &
-                                  - c%dydt(i, 1, 1, 1) * c%dzds(i, 1, 1, 1)
+                    - c%dydt(i, 1, 1, 1) * c%dzds(i, 1, 1, 1)
 
                c%drdy(i, 1, 1, 1) = c%dxdt(i, 1, 1, 1) * c%dzds(i, 1, 1, 1) &
-                                  - c%dxds(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1)
+                    - c%dxds(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1)
 
                c%drdz(i, 1, 1, 1) = c%dxds(i, 1, 1, 1) * c%dydt(i, 1, 1, 1) &
-                                  - c%dxdt(i, 1, 1, 1) * c%dyds(i, 1, 1, 1)
+                    - c%dxdt(i, 1, 1, 1) * c%dyds(i, 1, 1, 1)
             end do
-
+            !$omp end do
+            !$omp do
             do i = 1, ntot
                c%dsdx(i, 1, 1, 1) = c%dydt(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1) &
-                                  - c%dydr(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1)
+                    - c%dydr(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1)
 
                c%dsdy(i, 1, 1, 1) = c%dxdr(i, 1, 1, 1) * c%dzdt(i, 1, 1, 1) &
-                                  - c%dxdt(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1)
+                    - c%dxdt(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1)
 
                c%dsdz(i, 1, 1, 1) = c%dxdt(i, 1, 1, 1) * c%dydr(i, 1, 1, 1) &
-                                  - c%dxdr(i, 1, 1, 1) * c%dydt(i, 1, 1, 1)
+                    - c%dxdr(i, 1, 1, 1) * c%dydt(i, 1, 1, 1)
             end do
-
+            !$omp end do
+            !$omp do
             do i = 1, ntot
                c%dtdx(i, 1, 1, 1) = c%dydr(i, 1, 1, 1) * c%dzds(i, 1, 1, 1) &
-                                  - c%dyds(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1)
+                    - c%dyds(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1)
 
                c%dtdy(i, 1, 1, 1) = c%dxds(i, 1, 1, 1) * c%dzdr(i, 1, 1, 1) &
-                                  - c%dxdr(i, 1, 1, 1) * c%dzds(i, 1, 1, 1)
+                    - c%dxdr(i, 1, 1, 1) * c%dzds(i, 1, 1, 1)
 
                c%dtdz(i, 1, 1, 1) = c%dxdr(i, 1, 1, 1) * c%dyds(i, 1, 1, 1) &
-                                  - c%dxds(i, 1, 1, 1) * c%dydr(i, 1, 1, 1)
+                    - c%dxds(i, 1, 1, 1) * c%dydr(i, 1, 1, 1)
             end do
-
+            !$omp end do
+            !$omp end parallel
          end if
          call invers2(jacinv, jac, ntot)
       end if
@@ -908,12 +935,12 @@ contains
     if (NEKO_BCKND_DEVICE .eq. 1) then
 
        call device_coef_generate_geo(c%G11_d, c%G12_d, c%G13_d, &
-                                     c%G22_d, c%G23_d, c%G33_d, &
-                                     c%drdx_d, c%drdy_d, c%drdz_d, &
-                                     c%dsdx_d, c%dsdy_d, c%dsdz_d, &
-                                     c%dtdx_d, c%dtdy_d, c%dtdz_d, &
-                                     c%jacinv_d, c%Xh%w3_d, c%msh%nelv, &
-                                     c%Xh%lx, c%msh%gdim)
+            c%G22_d, c%G23_d, c%G33_d, &
+            c%drdx_d, c%drdy_d, c%drdz_d, &
+            c%dsdx_d, c%dsdy_d, c%dsdz_d, &
+            c%dtdx_d, c%dtdy_d, c%dtdz_d, &
+            c%jacinv_d, c%Xh%w3_d, c%msh%nelv, &
+            c%Xh%lx, c%msh%gdim)
 
        call device_memcpy(c%G11, c%G11_d, ntot, DEVICE_TO_HOST, sync=.false.)
        call device_memcpy(c%G22, c%G22_d, ntot, DEVICE_TO_HOST, sync=.false.)
@@ -927,13 +954,13 @@ contains
 
           do i = 1, ntot
              c%G11(i, 1, 1, 1) = c%drdx(i, 1, 1, 1) * c%drdx(i, 1, 1, 1) &
-                               + c%drdy(i, 1, 1, 1) * c%drdy(i, 1, 1, 1)
+                  + c%drdy(i, 1, 1, 1) * c%drdy(i, 1, 1, 1)
 
              c%G22(i, 1, 1, 1) = c%dsdx(i, 1, 1, 1) * c%dsdx(i, 1, 1, 1) &
-                               + c%dsdy(i, 1, 1, 1) * c%dsdy(i, 1, 1, 1)
+                  + c%dsdy(i, 1, 1, 1) * c%dsdy(i, 1, 1, 1)
 
              c%G12(i, 1, 1, 1) = c%drdx(i, 1, 1, 1) * c%dsdx(i, 1, 1, 1) &
-                               + c%drdy(i, 1, 1, 1) * c%dsdy(i, 1, 1, 1)
+                  + c%drdy(i, 1, 1, 1) * c%dsdy(i, 1, 1, 1)
           end do
 
           do i = 1, ntot
@@ -954,48 +981,53 @@ contains
           end do
 
        else
-
+          !$omp parallel private(i)
+          !$omp do
           do i = 1, ntot
              c%G11(i, 1, 1, 1) = c%drdx(i, 1, 1, 1) * c%drdx(i, 1, 1, 1) &
-                               + c%drdy(i, 1, 1, 1) * c%drdy(i, 1, 1, 1) &
-                               + c%drdz(i, 1, 1, 1) * c%drdz(i, 1, 1, 1)
+                  + c%drdy(i, 1, 1, 1) * c%drdy(i, 1, 1, 1) &
+                  + c%drdz(i, 1, 1, 1) * c%drdz(i, 1, 1, 1)
 
              c%G22(i, 1, 1, 1) = c%dsdx(i, 1, 1, 1) * c%dsdx(i, 1, 1, 1) &
-                               + c%dsdy(i, 1, 1, 1) * c%dsdy(i, 1, 1, 1) &
-                               + c%dsdz(i, 1, 1, 1) * c%dsdz(i, 1, 1, 1)
+                  + c%dsdy(i, 1, 1, 1) * c%dsdy(i, 1, 1, 1) &
+                  + c%dsdz(i, 1, 1, 1) * c%dsdz(i, 1, 1, 1)
 
              c%G33(i, 1, 1, 1) = c%dtdx(i, 1, 1, 1) * c%dtdx(i, 1, 1, 1) &
-                               + c%dtdy(i, 1, 1, 1) * c%dtdy(i, 1, 1, 1) &
-                               + c%dtdz(i, 1, 1, 1) * c%dtdz(i, 1, 1, 1)
+                  + c%dtdy(i, 1, 1, 1) * c%dtdy(i, 1, 1, 1) &
+                  + c%dtdz(i, 1, 1, 1) * c%dtdz(i, 1, 1, 1)
           end do
-
+          !$omp end do
+          !$omp do
           do i = 1, ntot
              c%G11(i, 1, 1, 1) = c%G11(i, 1, 1, 1) * c%jacinv(i, 1, 1, 1)
              c%G22(i, 1, 1, 1) = c%G22(i, 1, 1, 1) * c%jacinv(i, 1, 1, 1)
              c%G33(i, 1, 1, 1) = c%G33(i, 1, 1, 1) * c%jacinv(i, 1, 1, 1)
           end do
-
+          !$omp end do
+          !$omp do
           do i = 1, ntot
              c%G12(i, 1, 1, 1) = c%drdx(i, 1, 1, 1) * c%dsdx(i, 1, 1, 1) &
-                               + c%drdy(i, 1, 1, 1) * c%dsdy(i, 1, 1, 1) &
-                               + c%drdz(i, 1, 1, 1) * c%dsdz(i, 1, 1, 1)
+                  + c%drdy(i, 1, 1, 1) * c%dsdy(i, 1, 1, 1) &
+                  + c%drdz(i, 1, 1, 1) * c%dsdz(i, 1, 1, 1)
 
              c%G13(i, 1, 1, 1) = c%drdx(i, 1, 1, 1) * c%dtdx(i, 1, 1, 1) &
-                               + c%drdy(i, 1, 1, 1) * c%dtdy(i, 1, 1, 1) &
-                               + c%drdz(i, 1, 1, 1) * c%dtdz(i, 1, 1, 1)
+                  + c%drdy(i, 1, 1, 1) * c%dtdy(i, 1, 1, 1) &
+                  + c%drdz(i, 1, 1, 1) * c%dtdz(i, 1, 1, 1)
 
              c%G23(i, 1, 1, 1) = c%dsdx(i, 1, 1, 1) * c%dtdx(i, 1, 1, 1) &
-                               + c%dsdy(i, 1, 1, 1) * c%dtdy(i, 1, 1, 1) &
-                               + c%dsdz(i, 1, 1, 1) * c%dtdz(i, 1, 1, 1)
+                  + c%dsdy(i, 1, 1, 1) * c%dtdy(i, 1, 1, 1) &
+                  + c%dsdz(i, 1, 1, 1) * c%dtdz(i, 1, 1, 1)
           end do
-
+          !$omp end do
+          !$omp do
           do i = 1, ntot
              c%G12(i, 1, 1, 1) = c%G12(i, 1, 1, 1) * c%jacinv(i, 1, 1, 1)
              c%G13(i, 1, 1, 1) = c%G13(i, 1, 1, 1) * c%jacinv(i, 1, 1, 1)
              c%G23(i, 1, 1, 1) = c%G23(i, 1, 1, 1) * c%jacinv(i, 1, 1, 1)
           end do
-
-          do concurrent (e = 1:c%msh%nelv)
+          !$omp end do
+          !$omp do
+          do e = 1, c%msh%nelv
              do concurrent (i = 1:lxyz)
                 c%G11(i,1,1,e) = c%G11(i,1,1,e) * c%Xh%w3(i,1,1)
                 c%G22(i,1,1,e) = c%G22(i,1,1,e) * c%Xh%w3(i,1,1)
@@ -1006,7 +1038,8 @@ contains
                 c%G23(i,1,1,e) = c%G23(i,1,1,e) * c%Xh%w3(i,1,1)
              end do
           end do
-
+          !$omp end do
+          !$omp end parallel
        end if
     end if
 
@@ -1110,19 +1143,19 @@ contains
     ! ds x dt
     do i = 1, n
        a(i, 1, 1, 1) = coef%dyds(i, 1, 1, 1) * coef%dzdt(i, 1, 1, 1) &
-                     - coef%dzds(i, 1, 1, 1) * coef%dydt(i, 1, 1, 1)
+            - coef%dzds(i, 1, 1, 1) * coef%dydt(i, 1, 1, 1)
 
        b(i, 1, 1, 1) = coef%dzds(i, 1, 1, 1) * coef%dxdt(i, 1, 1, 1) &
-                     - coef%dxds(i, 1, 1, 1) * coef%dzdt(i, 1, 1, 1)
+            - coef%dxds(i, 1, 1, 1) * coef%dzdt(i, 1, 1, 1)
 
        c(i, 1, 1, 1) = coef%dxds(i, 1, 1, 1) * coef%dydt(i, 1, 1, 1) &
-                     - coef%dyds(i, 1, 1, 1) * coef%dxdt(i, 1, 1, 1)
+            - coef%dyds(i, 1, 1, 1) * coef%dxdt(i, 1, 1, 1)
     end do
 
     do i = 1, n
        dot(i, 1, 1, 1) = a(i, 1, 1, 1) * a(i, 1, 1, 1) &
-                       + b(i, 1, 1, 1) * b(i, 1, 1, 1) &
-                       + c(i, 1, 1, 1) * c(i, 1, 1, 1)
+            + b(i, 1, 1, 1) * b(i, 1, 1, 1) &
+            + c(i, 1, 1, 1) * c(i, 1, 1, 1)
     end do
 
     do concurrent (e = 1:coef%msh%nelv)
@@ -1144,19 +1177,19 @@ contains
     ! dr x dt
     do i = 1, n
        a(i, 1, 1, 1) = coef%dydr(i, 1, 1, 1) * coef%dzdt(i, 1, 1, 1) &
-                     - coef%dzdr(i, 1, 1, 1) * coef%dydt(i, 1, 1, 1)
+            - coef%dzdr(i, 1, 1, 1) * coef%dydt(i, 1, 1, 1)
 
        b(i, 1, 1, 1) = coef%dzdr(i, 1, 1, 1) * coef%dxdt(i, 1, 1, 1) &
-                     - coef%dxdr(i, 1, 1, 1) * coef%dzdt(i, 1, 1, 1)
+            - coef%dxdr(i, 1, 1, 1) * coef%dzdt(i, 1, 1, 1)
 
        c(i, 1, 1, 1) = coef%dxdr(i, 1, 1, 1) * coef%dydt(i, 1, 1, 1) &
-                     - coef%dydr(i, 1, 1, 1) * coef%dxdt(i, 1, 1, 1)
+            - coef%dydr(i, 1, 1, 1) * coef%dxdt(i, 1, 1, 1)
     end do
 
     do i = 1, n
        dot(i, 1, 1, 1) = a(i, 1, 1, 1) * a(i, 1, 1, 1) &
-                       + b(i, 1, 1, 1) * b(i, 1, 1, 1) &
-                       + c(i, 1, 1, 1) * c(i, 1, 1, 1)
+            + b(i, 1, 1, 1) * b(i, 1, 1, 1) &
+            + c(i, 1, 1, 1) * c(i, 1, 1, 1)
     end do
 
     do concurrent (e = 1:coef%msh%nelv)
@@ -1178,19 +1211,19 @@ contains
     ! dr x ds
     do i = 1, n
        a(i, 1, 1, 1) = coef%dydr(i, 1, 1, 1) * coef%dzds(i, 1, 1, 1) &
-                     - coef%dzdr(i, 1, 1, 1) * coef%dyds(i, 1, 1, 1)
+            - coef%dzdr(i, 1, 1, 1) * coef%dyds(i, 1, 1, 1)
 
        b(i, 1, 1, 1) = coef%dzdr(i, 1, 1, 1) * coef%dxds(i, 1, 1, 1) &
-                     - coef%dxdr(i, 1, 1, 1) * coef%dzds(i, 1, 1, 1)
+            - coef%dxdr(i, 1, 1, 1) * coef%dzds(i, 1, 1, 1)
 
        c(i, 1, 1, 1) = coef%dxdr(i, 1, 1, 1) * coef%dyds(i, 1, 1, 1) &
-                     - coef%dydr(i, 1, 1, 1) * coef%dxds(i, 1, 1, 1)
+            - coef%dydr(i, 1, 1, 1) * coef%dxds(i, 1, 1, 1)
     end do
 
     do i = 1, n
        dot(i, 1, 1, 1) = a(i, 1, 1, 1) * a(i, 1, 1, 1) &
-                       + b(i, 1, 1, 1) * b(i, 1, 1, 1) &
-                       + c(i, 1, 1, 1) * c(i, 1, 1, 1)
+            + b(i, 1, 1, 1) * b(i, 1, 1, 1) &
+            + c(i, 1, 1, 1) * c(i, 1, 1, 1)
     end do
 
     do concurrent (e = 1:coef%msh%nelv)
@@ -1228,65 +1261,85 @@ contains
     if (NEKO_BCKND_DEVICE .eq. 1) then
        n = size(coef%area)
        call device_memcpy(coef%area, coef%area_d, n, &
-                          HOST_TO_DEVICE, sync=.false.)
+            HOST_TO_DEVICE, sync=.false.)
        call device_memcpy(coef%nx, coef%nx_d, n, &
-                          HOST_TO_DEVICE, sync=.false.)
+            HOST_TO_DEVICE, sync=.false.)
        call device_memcpy(coef%ny, coef%ny_d, n, &
-                          HOST_TO_DEVICE, sync=.false.)
+            HOST_TO_DEVICE, sync=.false.)
        call device_memcpy(coef%nz, coef%nz_d, n, &
-                          HOST_TO_DEVICE, sync=.false.)
+            HOST_TO_DEVICE, sync=.false.)
     end if
 
   end subroutine coef_generate_area_and_normal
 
-
-  subroutine coef_generate_cyclic_bc(coef)
-    type(coef_t), intent(inout) :: coef
+  subroutine coef_generate_cyclic_bc(this)
+    class(coef_t), intent(inout) :: this
     real(kind=rp) :: un(3), len, d
-    integer :: lx, ly, lz, ntot, np
+    integer :: lx, ly, lz, np, np_glb, ierr
     integer :: i, j, k, pf, pe, n, nc, ncyc
 
-    ntot = coef%dof%size()
-    np = coef%msh%periodic%size
-    lx = coef%Xh%lx
-    ly = coef%Xh%ly
-    lz = coef%Xh%lz
-    ncyc = coef%msh%periodic%size * coef%Xh%lx * coef%Xh%lx
-    nc = 1
-    coef%cyc_msk(0) = ncyc + 1
+    if (.not. this%cyclic) return
 
+    np = this%msh%periodic%size
+    call MPI_Allreduce(np, np_glb, 1, &
+         MPI_INTEGER, MPI_SUM, NEKO_COMM, ierr)
+
+    if (np_glb .eq. 0) then
+       call neko_error("There are no periodic boundaries. " // &
+            "Switch cyclic off in the case file.")
+    end if
+
+    if (np .eq. 0) return
+
+    lx = this%Xh%lx
+    ly = this%Xh%ly
+    lz = this%Xh%lz
+    ncyc = this%cyc_msk(0) - 1
+    nc = 1
     do n = 1, np
-       pf = coef%msh%periodic%facet_el(n)%x(1)
-       pe = coef%msh%periodic%facet_el(n)%x(2)
+       pf = this%msh%periodic%facet_el(n)%x(1)
+       pe = this%msh%periodic%facet_el(n)%x(2)
        do k = 1, lz
           do j = 1, ly
              do i = 1, lx
                 if (index_is_on_facet(i, j, k, lx, ly, lz, pf)) then
-                   un = coef%get_normal(i, j, k, pe, pf)
+                   un = this%get_normal(i, j, k, pe, pf)
                    len = sqrt(un(1) * un(1) + un(2) * un(2))
-                   d = coef%dof%y(i, j, k, pe) * un(1) - coef%dof%x(i, j, k, pe) * un(2)
+                   if (len .gt. NEKO_EPS) then
+                      d = this%dof%y(i, j, k, pe) * un(1) &
+                           - this%dof%x(i, j, k, pe) * un(2)
 
-                   coef%cyc_msk(nc) = linear_index(i, j, k, pe, lx, ly, lz)
-                   coef%R11(nc) = un(1)/len * sign(1.0_rp, d)
-                   coef%R12(nc) = un(2)/len * sign(1.0_rp, d)
-
-                   nc = nc + 1
+                      this%cyc_msk(nc) = linear_index(i, j, k, pe, lx, ly, lz)
+                      this%R11(nc) = un(1) / len * sign(1.0_rp, d)
+                      this%R12(nc) = un(2) / len * sign(1.0_rp, d)
+                      nc = nc + 1
+                   else
+                      call neko_error("x and y components of surface " // &
+                           "normals are zero. Cyclic rotations must be " // &
+                           "around z-axis.")
+                   end if
                 end if
              end do
           end do
        end do
     end do
 
+    if (nc - 1 /= ncyc) then
+       call neko_error("The number of cyclic GLL points were " // &
+            "not estimated correctly.")
+    end if
+
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_memcpy(coef%cyc_msk, coef%cyc_msk_d, ncyc+1, HOST_TO_DEVICE, sync=.false.)
-       call device_memcpy(coef%R11, coef%R11_d, ncyc, HOST_TO_DEVICE, sync=.false.)
-       call device_memcpy(coef%R12, coef%R12_d, ncyc, HOST_TO_DEVICE, sync=.false.)
+       call device_memcpy(this%cyc_msk, this%cyc_msk_d, ncyc+1, HOST_TO_DEVICE, sync=.false.)
+       call device_memcpy(this%R11, this%R11_d, ncyc, HOST_TO_DEVICE, sync=.false.)
+       call device_memcpy(this%R12, this%R12_d, ncyc, HOST_TO_DEVICE, sync=.false.)
     end if
 
   end subroutine coef_generate_cyclic_bc
 
+
   !> Recompute and update geometric factors (ALE)
-  subroutine coef_update_metrics(this)
+  subroutine coef_recompute_metrics(this)
     class(coef_t), intent(inout) :: this
 
     call coef_generate_dxyzdrst(this)
@@ -1296,7 +1349,8 @@ contains
     if (this%cyclic) then
        call coef_generate_cyclic_bc(this)
     end if
-  end subroutine coef_update_metrics
+  end subroutine coef_recompute_metrics
+
 
   !> Enable separate memory for lagged B matrices if needed.
   !> For eg. when mesh moves.
@@ -1305,11 +1359,11 @@ contains
     integer :: n
     integer(c_size_t) :: n_bytes
 
-    ! Return if already allocated distinctly 
+    ! Return if already allocated distinctly
     if (.not. associated(this%Blag, this%B)) return
 
     n = this%Xh%lx * this%Xh%ly * this%Xh%lz * this%msh%nelv
-    
+
     if (rp .eq. REAL32) then
        n_bytes = int(n, c_size_t) * 4_c_size_t
     else
@@ -1335,12 +1389,14 @@ contains
 
   end subroutine coef_enable_lagged_mass
 
+
   !> Update history: Blaglag = Blag, Blag = B
   subroutine coef_update_lagged_mass(this)
     class(coef_t), intent(inout), target :: this
     integer :: n
     integer(c_size_t) :: n_bytes
 
+    ! If this%Blag does not have separate memory, we don't need to update it.
     if (associated(this%Blag, this%B)) return
 
     this%Blaglag = this%Blag
@@ -1352,11 +1408,11 @@ contains
           n_bytes = int(n, c_size_t) * 4_c_size_t
        else
           n_bytes = int(n, c_size_t) * 8_c_size_t
-       end if       
+       end if
 
        call device_memcpy(this%Blaglag_d, this%Blag_d, n_bytes, &
                           DEVICE_TO_DEVICE, sync=.false.)
-                          
+
        call device_memcpy(this%Blag_d, this%B_d, n_bytes, &
                           DEVICE_TO_DEVICE, sync=.true.)
     end if

@@ -106,7 +106,7 @@ contains
     real(kind=rp), pointer :: msh_y(:,:,:,:) => null()
     real(kind=rp), pointer :: msh_z(:,:,:,:) => null()
     real(kind=rp), pointer :: Blag(:,:,:,:) => null()
-    real(kind=rp), pointer :: Blaglag(:,:,:,:) => null()   
+    real(kind=rp), pointer :: Blaglag(:,:,:,:) => null()
     real(kind=rp), pointer :: pivot_pos(:) => null()
     real(kind=rp), pointer :: pivot_vel_lag(:,:) => null()
     real(kind=rp), pointer :: basis_pos(:) => null()
@@ -291,7 +291,7 @@ contains
        do i = 1, ulag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
-          ! We should not need this extra associate block, ant it works
+          ! We should not need this extra associate block, and it works
           ! great without it for GNU, Intel, NEC and Cray, but throws an
           ! ICE with NAG.
           associate (x => ulag%lf(i)%x)
@@ -304,7 +304,7 @@ contains
        do i = 1, vlag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
-          ! We should not need this extra associate block, ant it works
+          ! We should not need this extra associate block, and it works
           ! great without it for GNU, Intel, NEC and Cray, but throws an
           ! ICE with NAG.
           associate (x => vlag%lf(i)%x)
@@ -317,7 +317,7 @@ contains
        do i = 1, wlag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
-          ! We should not need this extra associate block, ant it works
+          ! We should not need this extra associate block, and it works
           ! great without it for GNU, Intel, NEC and Cray, but throws an
           ! ICE with NAG.
           associate (x => wlag%lf(i)%x)
@@ -383,7 +383,7 @@ contains
        do i = 1, slag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
-          ! We should not need this extra associate block, ant it works
+          ! We should not need this extra associate block, and it works
           ! great without it for GNU, Intel, NEC and Cray, but throws an
           ! ICE with NAG.
           associate (x => slag%lf(i)%x)
@@ -445,7 +445,7 @@ contains
        do i = 1, wm_x_lag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
-          ! We should not need this extra associate block, ant it works
+          ! We should not need this extra associate block, and it works
           ! great without it for GNU, Intel, NEC and Cray, but throws an
           ! ICE with NAG.
           associate (x => wm_x_lag%lf(i)%x)
@@ -458,7 +458,7 @@ contains
        do i = 1, wm_y_lag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
-          ! We should not need this extra associate block, ant it works
+          ! We should not need this extra associate block, and it works
           ! great without it for GNU, Intel, NEC and Cray, but throws an
           ! ICE with NAG.
           associate (x => wm_y_lag%lf(i)%x)
@@ -471,7 +471,7 @@ contains
        do i = 1, wm_z_lag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
-          ! We should not need this extra associate block, ant it works
+          ! We should not need this extra associate block, and it works
           ! great without it for GNU, Intel, NEC and Cray, but throws an
           ! ICE with NAG.
           associate (x => wm_z_lag%lf(i)%x)
@@ -589,7 +589,7 @@ contains
     integer :: have_abvel, have_scalarlag
     integer :: have_ale, have_fsi
     logical :: read_lag, read_scalar, read_dtlag, read_abvel, read_scalarlag
-    logical :: read_ale, read_ale_mass_lag, read_fsi
+    logical :: read_ale, read_fsi
     real(kind=rp) :: tol
     real(kind=rp) :: center_x, center_y, center_z
     integer :: i, e
@@ -661,6 +661,8 @@ contains
           abs2 => data%abs2
           read_scalarlag = .true.
        end if
+
+       read_ale = .false.
        if (associated(data%wm_x)) then
           msh_x => data%msh_x
           msh_y => data%msh_y
@@ -884,26 +886,26 @@ contains
        byte_offset = mpi_offset + &
             dof_offset * int(MPI_REAL_PREC_SIZE, i8)
        call this%read_field(fh, byte_offset, wm_z%x, nel)
-       mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)   
-       
+       mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
+
        do i = 1, wm_x_lag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
           call this%read_field(fh, byte_offset, wm_x_lag%lf(i)%x, nel)
           mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
-       end do  
+       end do
        do i = 1, wm_y_lag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
           call this%read_field(fh, byte_offset, wm_y_lag%lf(i)%x, nel)
           mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
-       end do       
+       end do
        do i = 1, wm_z_lag%size()
           byte_offset = mpi_offset + &
                dof_offset * int(MPI_REAL_PREC_SIZE, i8)
           call this%read_field(fh, byte_offset, wm_z_lag%lf(i)%x, nel)
           mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
-       end do            
+       end do
        byte_offset = mpi_offset + &
             dof_offset * int(MPI_REAL_PREC_SIZE, i8)
        call this%read_field(fh, byte_offset, Blag, nel)

@@ -81,6 +81,8 @@ contains
     if (present(fmt)) then
        if (fmt .eq. 'adios2') then
           suffix = '.bp'
+       else if (fmt .eq. 'vtkhdf') then
+          suffix = '.vtkhdf'
        end if
     end if
 
@@ -149,7 +151,7 @@ contains
     if (present(scalar_fields)) then
        do j = 1, n_scalars
           i = i + 1
-          call this%fluid%assign(i, scalar_fields%scalar_fields(j)%s)
+          call this%fluid%assign(i, scalar_fields%scalar_fields(j)%scalar%s)
        end do
     end if
 
@@ -182,7 +184,6 @@ contains
     class(fluid_output_t), intent(inout) :: this
     real(kind=rp), intent(in) :: t
     integer :: i
-    logical :: is_ale = .false.
     if (NEKO_BCKND_DEVICE .eq. 1) then
 
        associate(fields => this%fluid%items)

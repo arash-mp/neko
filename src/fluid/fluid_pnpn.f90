@@ -103,7 +103,7 @@ module fluid_pnpn
       ! respect to the previous time-step.
       type(field_t) :: dp, du, dv, dw
 
-      !> ALE Manager 
+      !> ALE Manager
       type(ale_manager_t) :: ale
 
       ! ! Implicit operators, i.e. the left-hand-side of the Helmholz problem.
@@ -304,7 +304,8 @@ contains
           this%full_stress_formulation, .false.)
 
     call json_get_or_default(params, "case.fluid.cyclic", this%c_Xh%cyclic, &
-          .false.)
+         .false.)
+    call this%c_Xh%generate_cyclic_bc()
 
     if (this%full_stress_formulation) then
        ! Setup backend dependent Ax routines
@@ -379,17 +380,19 @@ contains
     call this%dw%init(this%dm_Xh, 'dw')
     call this%dp%init(this%dm_Xh, 'dp')
     ! Initialize ALE
-    call this%ale%init(this%c_Xh, params, user) 
-   
+    call this%ale%init(this%c_Xh, params, user)
+
+    call neko_log%section("Fluid boundary conditions")
     ! Set up boundary conditions
     call this%setup_bcs(user, params)
 
     ! Check if we need to output boundaries
     call json_get_or_default(params, 'case.output_boundary', found, .false.)
     if (found) call this%write_boundary_conditions()
+    call neko_log%end_section()
 
     call this%proj_prs%init(this%dm_Xh%size(), this%pr_projection_dim, &
-          this%pr_projection_activ_step, this%pr_projection_reorthogonalize)
+         this%pr_projection_activ_step, this%pr_projection_reorthogonalize_basis)
 
     call this%proj_vel%init(this%dm_Xh%size(), this%vel_projection_dim, &
           this%vel_projection_activ_step)
@@ -457,14 +460,14 @@ contains
     ! Add checkpoint data for ALE.
     if (this%ale%active) then
        call this%chkp%add_ale(this%c_Xh%dof%x, this%c_Xh%dof%y, this%c_Xh%dof%z, &
-             this%c_Xh%Blag, this%c_Xh%Blaglag, &
-             this%ale%wm_x, this%ale%wm_y, this%ale%wm_z, &
-             this%ale%wm_x_lag, this%ale%wm_y_lag, &
-             this%ale%wm_z_lag, &
-             this%ale%global_pivot_pos, &      
-             this%ale%global_pivot_vel_lag, &
-             this%ale%global_basis_pos, &
-             this%ale%global_basis_vel_lag)
+           this%c_Xh%Blag, this%c_Xh%Blaglag, &
+           this%ale%wm_x, this%ale%wm_y, this%ale%wm_z, &
+           this%ale%wm_x_lag, this%ale%wm_y_lag, &
+           this%ale%wm_z_lag, &
+           this%ale%global_pivot_pos, &
+           this%ale%global_pivot_vel_lag, &
+           this%ale%global_basis_pos, &
+           this%ale%global_basis_vel_lag)
     end if
 
     call neko_log%end_section()
@@ -603,6 +606,9 @@ contains
     call this%bc_prs_surface%free()
     call this%bc_sym_surface%free()
     call this%bclst_vel_res%free()
+    call this%bclst_du%free()
+    call this%bclst_dv%free()
+    call this%bclst_dw%free()
     call this%bclst_dp%free()
 
     ! Free the Green's function lists
@@ -766,30 +772,33 @@ contains
          call this%bcs_vel%apply_vector(f_x%x, f_y%x, f_z%x, &
               this%dm_Xh%size(), time, strong = .false.)
 
-         if (this%ale%active) then
-            if (oifs) call neko_error("ALE not supported with OIFS.")
-
-            !> adds div.(u_i*wm) to RHS
-            call this%adv%compute_ale(u, v, w, &
-                 ale%wm_x, ale%wm_y, ale%wm_z, f_x, f_y, f_z, &
-                 Xh, c_Xh, dm_Xh%size())
-         end if
-
+      if (this%ale%active) then
          if (oifs) then
-            ! Add the advection operators to the right-hand-side.
-            call this%adv%compute(u, v, w, &
-                 this%advx, this%advy, this%advz, &
-                 Xh, this%c_Xh, dm_Xh%size(), dt)
-         
-            ! At this point the RHS contains the sum of the advection operator and
-            ! additional source terms, evaluated using the velocity field from the
-            ! previous time-step. Now, this value is used in the explicit time
-            ! scheme to advance both terms in time.
+            call neko_error("ALE is not yet supported with OIFS time integration.")
+         end if
+         !> adds div.(u_i*wm) to RHS
+         call this%adv%compute_ale(u, v, w, &
+              ale%wm_x, ale%wm_y, ale%wm_z, &
+              f_x, f_y, f_z, &
+              Xh, c_Xh, dm_Xh%size())
+      end if
 
-            call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1,&
-                 this%abx2, this%aby2, this%abz2, &
-                 f_x%x, f_y%x, f_z%x, &
-                 rho%x(1,1,1,1), ext_bdf%advection_coeffs, n)
+
+      if (oifs) then
+         ! Add the advection operators to the right-hand-side.
+         call this%adv%compute(u, v, w, &
+              this%advx, this%advy, this%advz, &
+              Xh, this%c_Xh, dm_Xh%size(), dt)
+
+         ! At this point the RHS contains the sum of the advection operator and
+         ! additional source terms, evaluated using the velocity field from the
+         ! previous time-step. Now, this value is used in the explicit time
+         ! scheme to advance both terms in time.
+
+         call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1,&
+              this%abx2, this%aby2, this%abz2, &
+              f_x%x, f_y%x, f_z%x, &
+              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
 
             ! Now, the source terms from the previous time step are added to the RHS.
             call makeoifs%compute_fluid(this%advx%x, this%advy%x, this%advz%x, &
@@ -801,24 +810,24 @@ contains
                  f_x, f_y, f_z, &
                  Xh, this%c_Xh, dm_Xh%size())
 
-            ! At this point the RHS contains the sum of the advection operator and
-            ! additional source terms, evaluated using the velocity field from the
-            ! previous time-step. Now, this value is used in the explicit time
-            ! scheme to advance both terms in time.
-         
-            call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1,&
-                 this%abx2, this%aby2, this%abz2, &
-                 f_x%x, f_y%x, f_z%x, &
-                 rho%x(1,1,1,1), ext_bdf%advection_coeffs, n)
+         ! At this point the RHS contains the sum of the advection operator and
+         ! additional source terms, evaluated using the velocity field from the
+         ! previous time-step. Now, this value is used in the explicit time
+         ! scheme to advance both terms in time.
 
-            ! Add the RHS contributions coming from the BDF scheme.
-            ! Blag and Blaglag are history of B matrices, mainly used for ALE.
-            ! For a normal simulation (no moving mesh), Blag and Blaglag 
-            ! are just the initial B matrix, filled at initialization.
-            call makebdf%compute_fluid(ulag, vlag, wlag, f_x%x, f_y%x, f_z%x, &
-                 u, v, w, c_Xh%B, rho%x(1,1,1,1), dt, &
-                 ext_bdf%diffusion_coeffs, ext_bdf%ndiff, n, &
-                 c_Xh%Blag, c_Xh%Blaglag)
+         call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1,&
+              this%abx2, this%aby2, this%abz2, &
+              f_x%x, f_y%x, f_z%x, &
+              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
+
+         ! Add the RHS contributions coming from the BDF scheme.
+         ! Blag and Blaglag are history of B matrices, mainly used for ALE.
+         ! For a normal simulation (no moving mesh), Blag and Blaglag
+         ! are just the initial B matrix, filled at initialization.
+         call makebdf%compute_fluid(ulag, vlag, wlag, f_x%x, f_y%x, f_z%x, &
+              u, v, w, c_Xh%B, rho%x(1,1,1,1), dt, &
+              ext_bdf%diffusion_coeffs%x, ext_bdf%ndiff, n, &
+              c_Xh%Blag, c_Xh%Blaglag)
 
          end if
       end if 
@@ -829,11 +838,10 @@ contains
          call this%ale%advance_mesh(c_Xh, time, ext_bdf%nadv)
 
          ! Update Metrics
-         call c_Xh%update_metrics()
-
+         call c_Xh%recompute_metrics()
          ! Update the metrics used by the adv operator for delaiasing (coef_GL)
          ! Maps the updated coef_GLL to coef_GL.
-         call this%adv%update_metrics(c_Xh, .true.)     
+         call this%adv%recompute_metrics(c_Xh, .true.)
       end if
 
       ! Update lag terms (only for standard solve)
@@ -863,7 +871,7 @@ contains
       call prs_res%compute(p, p_res, u, v, w, u_e, v_e, w_e, &
            f_x, f_y, f_z, c_Xh, gs_Xh, &
            this%bc_prs_surface, this%bc_sym_surface,&
-           Ax_prs, ext_bdf%diffusion_coeffs(1), dt, &
+           Ax_prs, ext_bdf%diffusion_coeffs%x(1), dt, &
            mu_tot, rho, event)
 
 
@@ -893,11 +901,11 @@ contains
          ! Horrible mu hack?!
          call this%vol_flow%adjust( u, v, w, p, u_res, v_res, w_res, p_res, &
               c_Xh, gs_Xh, ext_bdf, rho%x(1,1,1,1), mu_tot, &
-              dt, this%bclst_dp, this%bclst_du, this%bclst_dv, &
+              dt, time, this%bclst_dp, this%bclst_du, this%bclst_dv, &
               this%bclst_dw, this%bclst_vel_res, Ax_vel, Ax_prs, this%ksp_prs, &
               this%ksp_vel, this%pc_prs, this%pc_vel, this%ksp_prs%max_iter, &
               this%ksp_vel%max_iter)
-      end if  
+      end if
 
       ! Update mesh velocities for ALE
       ! We update them here (end of step) for the next step.
@@ -941,8 +949,8 @@ contains
     this%ale%has_moving_boundary = .false.
     any_moving_wall = .false.
     ale_active_local = .false.
-
-    call json_get_or_default(params, 'case.fluid.ale.ale_active', &
+    call json_get_or_default(params, &
+         'case.fluid.ale.enabled', &
          ale_active_local, .false.)
          
     ! Check FSI active
@@ -987,7 +995,7 @@ contains
 
           call json_get_or_lookup(bc_subdict, "zone_indices", zone_indices)
 
-          ! Set the ALE flag to true if there is any moving no_slip wall 
+          ! Set the ALE flag to true if there is any moving no_slip wall
           call json_get(bc_subdict, "type", bc_type_str)
           moving_ = .false.
           if (trim(bc_type_str) .eq. "no_slip") then
@@ -1100,11 +1108,11 @@ contains
           end if
        end do
 
-          if (this%ale%active .and. (.not. this%ale%has_moving_boundary)) then
-             call neko_error("Case file error: ALE is active, &
-                  &but no moving wall was found. " // &
+       if (this%ale%active .and. (.not. this%ale%has_moving_boundary)) then
+          call neko_error("Case file error: ALE is active, &
+          &but no moving wall was found. " // &
                   "Use type='no_slip' with 'moving': true in case file.")
-          end if
+       end if
 
        ! Make sure all labeled zones with non-zero size have been marked
        do i = 1, size(this%msh%labeled_zones)
@@ -1313,7 +1321,6 @@ contains
     class(bc_t), pointer :: bci
     character(len=LOG_SIZE) :: log_buf
 
-    call neko_log%section("Fluid boundary conditions")
     write(log_buf, '(A)') 'Marking using integer keys in bdry0.f00000'
     call neko_log%message(log_buf)
     write(log_buf, '(A)') 'Condition-value pairs: '
@@ -1340,7 +1347,6 @@ contains
     call neko_log%message(log_buf)
     write(log_buf, '(A)') '  no_slip (moving wall)           = 12'
     call neko_log%message(log_buf)
-    call neko_log%end_section()
 
     call neko_scratch_registry%request_field(bdry_field, temp_index, .true.)
 
@@ -1379,11 +1385,11 @@ contains
        select type (bc => bci)
        type is (no_slip_t)
           if (bc%is_moving) then
-             ! moving wall 
-             call bdry_mask%init_from_components(this%c_Xh, 12.0_rp) 
+             ! moving wall
+             call bdry_mask%init_from_components(this%c_Xh, 12.0_rp)
           else
-             ! stationary wall 
-             call bdry_mask%init_from_components(this%c_Xh, 1.0_rp)  
+             ! stationary wall
+             call bdry_mask%init_from_components(this%c_Xh, 1.0_rp)
           end if
           call bdry_mask%mark_facets(bci%marked_facet)
           call bdry_mask%finalize()
