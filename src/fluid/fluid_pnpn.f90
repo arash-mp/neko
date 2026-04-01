@@ -959,7 +959,7 @@ contains
          ale_active_local, .false.)
          
     ! Check FSI active
-    call json_get_or_default(params, 'case.fluid.fsi.active', &
+    call json_get_or_default(params, 'case.fluid.fsi.enabled', &
          fsi_active, .false.)
 
     ! Lists for the residuals and solution increments
