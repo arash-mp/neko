@@ -52,7 +52,7 @@ module fluid_pnpn_fsi
       
       ! N-Body Storage
       integer :: nbodies_fsi = 0
-      type(fsi_body_t), allocatable :: bodies(:)
+      type(fsi_body_t), allocatable :: fsi_bodies(:)
       
       ! Mapping
       integer, allocatable :: fsi_dof_map(:,:)
@@ -99,6 +99,7 @@ contains
     
     ! Initialize the base PnPn solver
     call this%fluid_pnpn_t%init(msh, lx, params, user, chkp) 
+    
     ! Initialize Standard Fields locally
     call this%u_s%init(this%dm_Xh, 'u_s')
     call this%v_s%init(this%dm_Xh, 'v_s')
@@ -107,7 +108,7 @@ contains
 
     ! Init fsi_manager to parse JSON and setup matrices
     call fsi_manager_init(params, msh, this%ale, this%c_Xh, this%dm_Xh, &
-         this%if_fsi, this%nbodies_fsi, this%bodies, this%fsi_dof_map, &
+         this%if_fsi, this%nbodies_fsi, this%fsi_bodies, this%fsi_dof_map, &
          this%total_active_dofs, &
          this%M_global, this%B_global, this%X_sol, &
          this%u_g, this%v_g, this%w_g, this%p_g, &
@@ -137,9 +138,9 @@ contains
        t_init%tstep = 0
        t_init%dt = 0.0_rp
        do i = 1, this%nbodies_fsi
-          this%batch_ids(i) = this%bodies(i)%ale_id
-          this%batch_trans(:, i) = this%bodies(i)%body_vel(1:3)
-          this%batch_ang(:, i) = this%bodies(i)%body_vel(4:6)
+          this%batch_ids(i) = this%fsi_bodies(i)%ale_id
+          this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
+          this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
        end do    
        ! Apply Initial Guess + Prescribed Motion
        call this%ale%update_mesh_velocity(this%c_Xh, t_init, &
@@ -149,7 +150,7 @@ contains
             out_prescribed_vels = this%temp_prescribed_vels, &
             mode = 0) 
        do i = 1, this%nbodies_fsi
-          this%bodies(i)%moving_frame_presc_vel(:, 0) = &
+          this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
                this%temp_prescribed_vels(:, i)
        end do
     end if
@@ -188,17 +189,17 @@ contains
     dt_history(3) = time%dtlag(2)
     call ab_scheme_obj%compute_coeffs(ab_coeffs, dt_history, nadv)
 
-!    write(msg, '(A, 4(F10.5, 1X))') "DEBUG BETA (0-3):   ", &
-!          beta(0), beta(1), beta(2), beta(3)
-!    call neko_log%message(trim(msg))
+    !write(msg, '(A, 4(F10.5, 1X))') "DEBUG BETA (0-3):   ", &
+    !      beta(0), beta(1), beta(2), beta(3)
+    !call neko_log%message(trim(msg))
 
     !write(msg, '(A, 3(F10.5, 1X))') "DEBUG ALPHA_EXT (1-3):", &
     !      alpha_ext(1), alpha_ext(2), alpha_ext(3)
     !call neko_log%message(trim(msg))
 
-    write(msg, '(A, 4(F10.5, 1X))') "DEBUG AB_COEFFS (1-3):", &
-          ab_coeffs(1), ab_coeffs(2), ab_coeffs(3), ab_coeffs(4)
-    call neko_log%message(trim(msg))
+    !write(msg, '(A, 4(F10.5, 1X))') "DEBUG AB_COEFFS (1-3):", &
+    !      ab_coeffs(1), ab_coeffs(2), ab_coeffs(3), ab_coeffs(4)
+    !call neko_log%message(trim(msg))
 
 
     ! Calculate the new displacements at the current time-step
@@ -209,11 +210,11 @@ contains
     ! Otherwise (I think) we will have drift between displacement 
     ! and pivot point.
     do i = 1, this%nbodies_fsi
-        this%bodies(i)%disp_rel = this%bodies(i)%disp_rel + &
-             dt * ab_coeffs(1) * this%bodies(i)%body_vel
+        this%fsi_bodies(i)%disp_rel = this%fsi_bodies(i)%disp_rel + &
+             dt * ab_coeffs(1) * this%fsi_bodies(i)%body_vel
         do j = 2, nadv
-           this%bodies(i)%disp_rel = this%bodies(i)%disp_rel + &
-                dt * ab_coeffs(j) * this%bodies(i)%body_vel_lag(:, j)
+           this%fsi_bodies(i)%disp_rel = this%fsi_bodies(i)%disp_rel + &
+                dt * ab_coeffs(j) * this%fsi_bodies(i)%body_vel_lag(:, j)
         end do    
     end do
 
@@ -246,9 +247,9 @@ contains
 
     ! Compute fluid forces/tourques
     do i = 1, this%nbodies_fsi
-       call this%bodies(i)%force_monitor%compute_(time)
-       F_fluid(1:3) = this%bodies(i)%force_monitor%total_force
-       F_fluid(4:6) = this%bodies(i)%force_monitor%total_torque
+       call this%fsi_bodies(i)%force_monitor%compute_(time)
+       F_fluid(1:3) = this%fsi_bodies(i)%force_monitor%total_force
+       F_fluid(4:6) = this%fsi_bodies(i)%force_monitor%total_torque
        
        ! Fill B_global with fluid forces (F_s)
        do k = 1, 6
@@ -274,7 +275,7 @@ contains
            call field_copy(this%p, this%p_g(col_g))
            
            ! Setup Perturbation
-           this%batch_ids(1) = this%bodies(j)%ale_id
+           this%batch_ids(1) = this%fsi_bodies(j)%ale_id
            this%batch_trans(:,1) = 0.0_rp
            this%batch_ang(:,1) = 0.0_rp
 
@@ -318,18 +319,18 @@ contains
            ! Fill M matrix with Impulse forces/tourques (F_g)
            ! Here, we add the cross-coupling forces on all bodies, on all DOFs.
            do i = 1, this%nbodies_fsi
-              call this%bodies(i)%force_monitor%compute_(time)
+              call this%fsi_bodies(i)%force_monitor%compute_(time)
               do k_row = 1, 6
                  row_g = this%fsi_dof_map(i, k_row)
                  if (row_g > 0) then
                     if (k_row <= 3) then
                        this%M_global(row_g, col_g) = &
                        this%M_global(row_g, col_g) - &
-                       this%bodies(i)%force_monitor%total_force(k_row)
+                       this%fsi_bodies(i)%force_monitor%total_force(k_row)
                     else
                        this%M_global(row_g, col_g) = &
                        this%M_global(row_g, col_g) - &
-                       this%bodies(i)%force_monitor%total_torque(k_row-3)
+                       this%fsi_bodies(i)%force_monitor%total_torque(k_row-3)
                     end if
                  end if
               end do
@@ -378,21 +379,21 @@ contains
           row_g = this%fsi_dof_map(i, k)
           if (row_g > 0) then
             ! Corrected fsi_body velocity 
-             this%bodies(i)%body_vel(k) = this%X_sol(row_g) + &
-                  this%bodies(i)%body_vel_lag(k, 1)
+             this%fsi_bodies(i)%body_vel(k) = this%X_sol(row_g) + &
+                  this%fsi_bodies(i)%body_vel_lag(k, 1)
           end if
        end do   
        ! Update History
        do k = nadv, 2, -1
-          this%bodies(i)%body_vel_lag(:, k) = &
-               this%bodies(i)%body_vel_lag(:, k-1)
+          this%fsi_bodies(i)%body_vel_lag(:, k) = &
+               this%fsi_bodies(i)%body_vel_lag(:, k-1)
        end do
-       this%bodies(i)%body_vel_lag(:, 1) = this%bodies(i)%body_vel
+       this%fsi_bodies(i)%body_vel_lag(:, 1) = this%fsi_bodies(i)%body_vel
 
        ! Fill Batch Arrays
-       this%batch_ids(i) = this%bodies(i)%ale_id
-       this%batch_trans(:, i) = this%bodies(i)%body_vel(1:3)
-       this%batch_ang(:, i) = this%bodies(i)%body_vel(4:6)
+       this%batch_ids(i) = this%fsi_bodies(i)%ale_id
+       this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
+       this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
        
        
     end do
@@ -407,12 +408,12 @@ contains
           out_prescribed_vels = this%temp_prescribed_vels, &
           mode = 0) 
     do i = 1, this%nbodies_fsi
-       this%bodies(i)%moving_frame_presc_vel(:, 0) = &
+       this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
             this%temp_prescribed_vels(:, i)
     end do
 
 
-    call fsi_prep_checkpoint(this%nbodies_fsi, this%bodies, this%global_disp_rel, &
+    call fsi_prep_checkpoint(this%nbodies_fsi, this%fsi_bodies, this%global_disp_rel, &
          this%global_body_vel, this%global_body_vel_lag, &
          this%global_moving_frame_presc_vel)
 
@@ -426,11 +427,11 @@ contains
     class(fluid_pnpn_fsi_t), intent(inout) :: this
     integer :: i, k
     
-    if (allocated(this%bodies)) then
+    if (allocated(this%fsi_bodies)) then
         do i = 1, this%nbodies_fsi
-           call this%bodies(i)%force_monitor%free()
+           call this%fsi_bodies(i)%force_monitor%free()
         end do
-        deallocate(this%bodies)
+        deallocate(this%fsi_bodies)
     end if
     
     if (allocated(this%M_global)) deallocate(this%M_global)
@@ -479,13 +480,13 @@ contains
     ! index 0 is the current time prescribed velocity, 1-3 are the history.
     do i = 1, this%nbodies_fsi
        do k = nadv, 1, -1
-          this%bodies(i)%moving_frame_presc_vel(:, k) = &
-               this%bodies(i)%moving_frame_presc_vel(:, k-1)
+          this%fsi_bodies(i)%moving_frame_presc_vel(:, k) = &
+               this%fsi_bodies(i)%moving_frame_presc_vel(:, k-1)
        end do
     end do
 
     do i = 1, this%nbodies_fsi
-       this%batch_ids(i) = this%bodies(i)%ale_id
+       this%batch_ids(i) = this%fsi_bodies(i)%ale_id
     end do  
 
     ! Here we only get the prescribed motion for frame of movment.
@@ -496,23 +497,23 @@ contains
 
     ! current velocity of the moving frame
     do i = 1, this%nbodies_fsi
-       this%bodies(i)%moving_frame_presc_vel(:, 0) = &
+       this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
             this%temp_prescribed_vels(:, i)
     end do
 
     do i = 1, this%nbodies_fsi
-      this%bodies(i)%moving_frame_presc_acc = 0.0_rp
+      this%fsi_bodies(i)%moving_frame_presc_acc = 0.0_rp
       do k = 0, nadv
-         this%bodies(i)%moving_frame_presc_acc = &
-              this%bodies(i)%moving_frame_presc_acc + &
-              (beta(k) * this%bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
+         this%fsi_bodies(i)%moving_frame_presc_acc = &
+              this%fsi_bodies(i)%moving_frame_presc_acc + &
+              (beta(k) * this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
       end do
     end do
 
     ! Here we fill the M_global and B_global
     ! using the contributuon from strucutre and also
     ! bodies' inertial motion from previous time steps.
-    call assemble_structural_inertial_terms(this%nbodies_fsi, this%bodies, &
+    call assemble_structural_inertial_terms(this%nbodies_fsi, this%fsi_bodies, &
          this%fsi_dof_map, this%M_global, this%B_global, &
          this%ale%body_rot_matrices, time, gamma, beta, nadv, this%gravity_vec)
 
@@ -552,42 +553,42 @@ contains
        ! Linear Displacement (x, y, z)
        write(msg, fmt_res) &
             "FSI_DISP_L  ", time%tstep, "  ", time%t, "  ", &
-            trim(this%bodies(i)%name), "  ", &
-            this%bodies(i)%disp_rel(1:3)
+            trim(this%fsi_bodies(i)%name), "  ", &
+            this%fsi_bodies(i)%disp_rel(1:3)
        call neko_log%message(trim(msg))
    
        ! Angular Displacement (rx, ry, rz)
        write(msg, fmt_res) &
             "FSI_DISP_A  ", time%tstep, "  ", time%t, "  ", &
-            trim(this%bodies(i)%name), "  ", &
-            this%bodies(i)%disp_rel(4:6)
+            trim(this%fsi_bodies(i)%name), "  ", &
+            this%fsi_bodies(i)%disp_rel(4:6)
        call neko_log%message(trim(msg))
    
        ! Linear Velocity (x, y, z)
        write(msg, fmt_res) &
             "FSI_VEL_L   ", time%tstep, "  ", time%t, "  ", &
-            trim(this%bodies(i)%name), "  ", &
-            this%bodies(i)%body_vel(1:3)
+            trim(this%fsi_bodies(i)%name), "  ", &
+            this%fsi_bodies(i)%body_vel(1:3)
        call neko_log%message(trim(msg))
    
        ! Angular Velocity (rx, ry, rz)
        write(msg, fmt_res) &
             "FSI_VEL_A   ", time%tstep, "  ", time%t, "  ", &
-            trim(this%bodies(i)%name), "  ", &
-            this%bodies(i)%body_vel(4:6)
+            trim(this%fsi_bodies(i)%name), "  ", &
+            this%fsi_bodies(i)%body_vel(4:6)
        call neko_log%message(trim(msg))
    
        ! Linear Correction Coef
        write(msg, fmt_res) &
             "FSI_CORR_L  ", time%tstep, "  ", time%t, "  ", &
-            trim(this%bodies(i)%name), "  ", &
+            trim(this%fsi_bodies(i)%name), "  ", &
             corr_coef(1:3)
        call neko_log%message(trim(msg))
    
        ! Angular Correction Coef
        write(msg, fmt_res) &
             "FSI_CORR_A  ", time%tstep, "  ", time%t, "  ", &
-            trim(this%bodies(i)%name), "  ", &
+            trim(this%fsi_bodies(i)%name), "  ", &
             corr_coef(4:6)
        call neko_log%message(trim(msg))
    
@@ -611,7 +612,7 @@ contains
     call this%fluid_pnpn_t%restart(chkp)
     ! Restore FSI specific arrays 
     if (this%if_fsi .and. this%nbodies_fsi > 0) then
-       call fsi_restart_restore(this%nbodies_fsi, this%bodies, &
+       call fsi_restart_restore(this%nbodies_fsi, this%fsi_bodies, &
             this%global_disp_rel, this%global_body_vel, &
             this%global_body_vel_lag, &
             this%global_moving_frame_presc_vel)
@@ -621,9 +622,9 @@ contains
        t_restart%dt = chkp%dtlag(1)
 
        do i = 1, this%nbodies_fsi
-          this%batch_ids(i) = this%bodies(i)%ale_id
-          this%batch_trans(:, i) = this%bodies(i)%body_vel(1:3)
-          this%batch_ang(:, i) = this%bodies(i)%body_vel(4:6)
+          this%batch_ids(i) = this%fsi_bodies(i)%ale_id
+          this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
+          this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
        end do
 
        call this%ale%update_mesh_velocity(this%c_Xh, t_restart, &

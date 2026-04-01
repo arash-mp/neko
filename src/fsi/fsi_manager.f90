@@ -85,9 +85,9 @@ subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
     call neko_log%section("Fluid-Structure Interaction")
 
     if (params%valid_path('case.fluid.fsi')) then
-       call json_get(params, 'case.fluid.fsi.active', if_fsi)
+       call json_get(params, 'case.fluid.fsi.enabled', if_fsi)
        if (.not. if_fsi) then
-          call neko_error("Scheme pnpn_fsi: FSI block present, but active = false in case file")
+          call neko_error("Scheme pnpn_fsi: FSI block present, but 'fsi.enabled': false in case file")
        end if
 
        call json_get_or_default(params, 'case.fluid.fsi.log_forces', log_forces, .true.)
