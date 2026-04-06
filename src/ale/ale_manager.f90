@@ -205,7 +205,7 @@ contains
     else if (this%active) then
        if (NEKO_BCKND_DEVICE .eq. 1) then
           if (NEKO_BCKND_HIP .eq. 1) then
-             call neko_log%message("Initializing ALE with DEVICE backend (HIP).")
+             call neko_log%message("Initializing ALE Manager with DEVICE backend (HIP).")
           else
              call neko_error("ALE_device currently supported only with HIP backend.")
           end if
@@ -217,6 +217,11 @@ contains
 
     tmp_logical = .false.
     n = coef%dof%size()
+
+    call this%x_ref%init(coef%dof, "x_ref")
+    call this%y_ref%init(coef%dof, "y_ref")
+    call this%z_ref%init(coef%dof, "z_ref")
+
     this%x_ref%x = coef%dof%x
     this%y_ref%x = coef%dof%y
     this%z_ref%x = coef%dof%z
