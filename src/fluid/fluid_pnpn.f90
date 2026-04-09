@@ -774,12 +774,13 @@ contains
          call this%bcs_vel%apply_vector(f_x%x, f_y%x, f_z%x, &
               this%dm_Xh%size(), time, strong = .false.)
 
-         if (this%ale%active) then
-            if (oifs) then
-               call neko_error("ALE is not yet supported with OIFS time integration.")
-            end if
-            !> adds div.(u_i*wm) to RHS
-            call this%adv%compute_ale(u, v, w, &
+      if (this%ale%active) then
+         if (oifs) then
+            call neko_error("ALE is not yet supported " // &
+                 "with OIFS time integration.")
+         end if
+         !> adds div.(u_i*wm) to RHS
+         call this%adv%compute_ale(u, v, w, &
               ale%wm_x, ale%wm_y, ale%wm_z, &
               f_x, f_y, f_z, &
               Xh, c_Xh, dm_Xh%size())
@@ -839,11 +840,13 @@ contains
          ! Advance Mesh (Moves points, updates B history, updates wm_lags)
          call this%ale%advance_mesh(c_Xh, time, ext_bdf%nadv)
 
+         call profiler_start_region('ALE recompute metrics')
          ! Update Metrics
          call c_Xh%recompute_metrics()
          ! Update the metrics used by the adv operator for delaiasing (coef_GL)
          ! Maps the updated coef_GLL to coef_GL.
          call this%adv%recompute_metrics(c_Xh, .true.)
+         call profiler_end_region('ALE recompute metrics')
       end if
 
       ! Update lag terms (only for standard solve)
@@ -1113,7 +1116,7 @@ contains
        if (this%ale%active .and. (.not. this%ale%has_moving_boundary)) then
           call neko_error("Case file error: ALE is active, &
           &but no moving wall was found. " // &
-                  "Use type='no_slip' with 'moving': true in case file.")
+                  "Use type = 'no_slip' with 'moving': true in case file.")
        end if
 
        ! Make sure all labeled zones with non-zero size have been marked
@@ -1481,8 +1484,9 @@ contains
       if (is_greens) call neko_log%message(" ")
       if (is_greens) call neko_log%message("--------Green's Step----------")
 
-      call active_proj_p%pre_solving(p_res%x, time%tstep, c_Xh, n, dt_controller, &
-           Ax=Ax_prs, gs_h=gs_Xh, bclst=this%bclst_dp, string='Pressure')
+      call active_proj_p%pre_solving(p_res%x, time%tstep, c_Xh, n, &
+           dt_controller, Ax = Ax_prs, gs_h = gs_Xh, &
+           bclst = this%bclst_dp, string = 'Pressure')
 
       call this%pc_prs%update()
 
