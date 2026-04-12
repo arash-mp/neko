@@ -179,7 +179,7 @@ contains
     integer :: n_moving_zones
     integer :: z, tmp_int, ksp_max_iter
     integer, allocatable :: moving_zone_ids(:)
-    integer :: i, j, n_bcs, n, n_bodies
+    integer :: i, j, k, n_bcs, n, n_bodies
     real(kind=rp), allocatable :: tmp_vec(:)
     real(kind=rp) :: tmp_val, abstol
     character(len=128) :: log_buf
@@ -188,7 +188,7 @@ contains
     character(len=:), allocatable :: tmp_str
     character(len=:), allocatable :: ksp_solver
     character(len=:), allocatable :: precon_type
-    logical :: tmp_logical
+    logical :: tmp_logical, oifs
     logical :: moving_
     logical :: found_zone
     logical :: has_user_kin, has_user_mesh
@@ -198,6 +198,7 @@ contains
     if (json%valid_path('case.fluid.ale')) then
        call json_get(json, 'case.fluid.ale.enabled', this%active)
     end if
+    call json_get_or_default(json, 'case.numerics.oifs', oifs, .false.)
 
     if (.not. this%active) then
        neko_ale => null()
@@ -209,6 +210,9 @@ contains
           else
              call neko_error("ALE_device currently supported only with HIP backend.")
           end if
+       end if
+       if (oifs) then
+          call neko_error("ALE not currently supported with OIFS.")
        end if
        neko_ale => this
     end if
@@ -245,7 +249,7 @@ contains
     has_user_kin = associated(this%user_ale_rigid_kinematics)
     has_user_mesh = associated(this%user_ale_mesh_vel)
 
-    ! Enable B history
+    ! Enable B history (Blag, Blaglag)
     call coef%enable_B_history()
     call json_get(json, 'case.numerics.time_order', time_order)
 
@@ -392,7 +396,8 @@ contains
           if (body_sub%valid_path('rotation')) then
              ! Check if pivot exists.
              if (.not. body_sub%valid_path('pivot')) then
-                call neko_error("ale.bodies.pivot is missing from the case file.")
+                call neko_error("ale.bodies.pivot is missing " // &
+                     "from the case file.")
              end if
 
              call json_get(body_sub, 'rotation.type', tmp_str)
@@ -404,7 +409,7 @@ contains
                      expected_size = 3)
                 this%config%bodies(i)%rot_amp_degree = tmp_vec
 
-                call json_get(body_sub, 'rotation.freq', tmp_vec, &
+                call json_get(body_sub, 'rotation.frequency', tmp_vec, &
                      expected_size = 3)
                 this%config%bodies(i)%rot_freq = tmp_vec
 
@@ -454,7 +459,8 @@ contains
 
           ! Rotation Center
           if (body_sub%valid_path('pivot')) then
-             call json_get_or_default(body_sub, 'pivot.type', tmp_str, 'relative')
+             call json_get_or_default(body_sub, 'pivot.type', tmp_str, &
+                  'relative')
              this%config%bodies(i)%rotation_center_type = tmp_str
 
              call json_get(body_sub, 'pivot.value', tmp_vec, expected_size = 3)
@@ -616,13 +622,14 @@ contains
                 is_rot_active = any(abs(this%config%bodies(i)%ramp_omega0) &
                    > 0.0_rp)
              case ('smooth_step')
-                is_rot_active = (abs(this%config%bodies(i)%target_rot_angle_deg) &
-                   > 0.0_rp)
+                is_rot_active = &
+                     (abs(this%config%bodies(i)%target_rot_angle_deg) > 0.0_rp)
              end select
 
              if (is_rot_active) then
                 ! Harmonic
-                if (trim(this%config%bodies(i)%rotation_type) == 'harmonic') then
+                if (trim(this%config%bodies(i)%rotation_type) &
+                     == 'harmonic') then
                    if (has_user_kin .or. has_user_mesh) then
                       call neko_log%message('   Rotation     : ' // &
                            'Theta(t) = Amp*sin(2*pi*Freq*t) + User')
@@ -638,7 +645,8 @@ contains
                    call neko_log%message(log_buf)
 
                    ! Ramp
-                elseif (trim(this%config%bodies(i)%rotation_type) == 'ramp') then
+                elseif (trim(this%config%bodies(i)%rotation_type) &
+                     == 'ramp') then
                    if (has_user_kin .or. has_user_mesh) then
                       call neko_log%message('   Rotation     : ' // &
                            'Omega(t) = Omega0*(1 - exp(-4.6*t/t0)) + User')
@@ -666,7 +674,8 @@ contains
                    write(log_buf, '(A,I10)') '    Rotation Axis    :', &
                         this%config%bodies(i)%rotation_axis
                    call neko_log%message(log_buf)
-                   write(log_buf, '(A,ES18.11)') '    Target Rot Angle (deg)  :', &
+                   write(log_buf, '(A,ES18.11)') '    Target Rot ' // &
+                        'Angle (deg)  :', &
                         this%config%bodies(i)%target_rot_angle_deg
                    call neko_log%message(log_buf)
                    write(log_buf, '(A,4(ES18.11,1X))') &
@@ -742,6 +751,29 @@ contains
                    "but the BC is not no_slip with moving: true."
                 call neko_error(trim(log_buf_l))
              end if
+          end do
+       end if
+    end do
+
+    ! Check no zone ID is assigned to more than one ALE body.
+    do j = 1, this%config%nbodies
+       if (allocated(this%config%bodies(j)%zone_indices)) then
+          do i = 1, size(this%config%bodies(j)%zone_indices)
+             z = this%config%bodies(j)%zone_indices(i)
+
+             do k = j + 1, this%config%nbodies
+                if (allocated(this%config%bodies(k)%zone_indices)) then
+                   if (any(this%config%bodies(k)%zone_indices == z)) then
+                      write(log_buf_l, '(A,I0,A,A,A,A,A)') &
+                           "ALE: zone index ", z, &
+                           " is assigned to multiple bodies ('", &
+                           trim(this%config%bodies(j)%name), "' and '", &
+                           trim(this%config%bodies(k)%name), "')."
+                      call neko_error(trim(log_buf_l))
+                   end if
+                end if
+             end do
+
           end do
        end if
     end do
@@ -828,8 +860,6 @@ contains
          coef%gs_h, this%bc_list, precon_type, precon_params)
 
     ! Save original h1/h2
-
-    ! Save values
     h1_restore = coef%h1
     h2_restore = coef%h2
 
@@ -1000,12 +1030,10 @@ contains
           call bcloc_zeros_only%free()
 
           if (this%config%if_output_phi) then
-
              if (NEKO_BCKND_DEVICE .eq. 1) then
                 call device_memcpy(this%base_shapes(body_idx)%x, &
                      this%base_shapes(body_idx)%x_d, n, DEVICE_TO_HOST, .true.)
              end if
-
              call phi_file%init('phi_' // &
                   trim(this%config%bodies(body_idx)%name) // '.fld')
              call phi_file%write(this%base_shapes(body_idx))
@@ -1016,12 +1044,10 @@ contains
        end do
 
        if (this%config%if_output_phi .and. (this%config%nbodies > 1)) then
-
           if (NEKO_BCKND_DEVICE .eq. 1) then
              call device_memcpy(this%phi_total%x, this%phi_total%x_d, n, &
                   DEVICE_TO_HOST, .true.)
           end if
-
           call neko_log%message("   phi_total.fld saved.")
           call phi_file%init('phi_total.fld')
           call phi_file%write(this%phi_total)
@@ -1033,8 +1059,8 @@ contains
     call corr_field%free()
 
     ! Restore h1/h2 to what they were before
-    coef%h1(:,:,:,:) = h1_restore(:,:,:,:)
-    coef%h2(:,:,:,:) = h2_restore(:,:,:,:)
+    coef%h1 = h1_restore
+    coef%h2 = h2_restore
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call device_memcpy(coef%h1, coef%h1_d, n, HOST_TO_DEVICE, .false.)
        call device_memcpy(coef%h2, coef%h2_d, n, HOST_TO_DEVICE, .true.)
