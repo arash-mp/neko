@@ -27,7 +27,7 @@ module fsi_manager
   public :: fsi_restart_restore
 contains
 
-subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
+  subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
         if_fsi, nbodies_fsi, bodies, fsi_dof_map, &
         total_active_dofs, M_global, B_global, X_sol, &
         u_g, v_g, w_g, p_g, res_long_print, gravity_vec, &
@@ -59,7 +59,7 @@ subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
 
     integer :: fsi_vel_projection_activ_step !< Steps to activate projection for ksp_pr
     integer :: fsi_pr_projection_activ_step !< Steps to activate projection for ksp_pr for FSI problem (green's solve)
-    logical :: fsi_pr_projection_reorthogonalize_basis 
+    logical :: fsi_pr_projection_reorthogonalize_basis
     real(kind=rp), intent(out) :: gravity_vec(3)
     logical, intent(out) :: res_long_print
 
@@ -105,7 +105,7 @@ subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
 
        call json_get_or_default(params, &
               'case.fluid.fsi.pressure_solver.projection_reorthogonalize_basis', &
-              fsi_pr_projection_reorthogonalize_basis, .false.)              
+              fsi_pr_projection_reorthogonalize_basis, .false.)
 
        call json_get_or_default(params, &
               'case.fluid.fsi.velocity_solver.projection_space_size', &
@@ -127,9 +127,9 @@ subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
        ! Global FSI Logging
        write(log_buf, '(A,3(ES13.6,1X))') ' Gravity Vector  : ', gravity_vec
        call neko_log%message(log_buf)
-       write(log_buf, '(A,ES13.6)')      ' Force Scale     : ', force_scale
+       write(log_buf, '(A,ES13.6)') ' Force Scale     : ', force_scale
        call neko_log%message(log_buf)
-       write(log_buf, '(A,I0)')         ' Number of Bodies: ', nbodies_fsi
+       write(log_buf, '(A,I0)') ' Number of Bodies: ', nbodies_fsi
        call neko_log%message(log_buf)
        call neko_log%message(' ')
 
@@ -303,7 +303,7 @@ subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
           ! I think it should be just 3. For the first two time
           ! lag(2) and lag(3) does not matter since we do not use them.
           ! but it's important to keep the in lag array since
-          ! we do not touch lag(2) and lag(3) in updating lag arrays 
+          ! we do not touch lag(2) and lag(3) in updating lag arrays
           ! in first two time steps, so we will loose this if we don't
           ! fill them now.
           do m = 1, 3
@@ -321,13 +321,13 @@ subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
 
           ! Comprehensive Per-Body Logging
           call neko_log%message('Registered Body : ' // trim(bodies(i)%name))
-          
+
           write(log_buf, '(A,I0,A,I0)') '   Zone ID       : ', bodies(i)%zone_id, ' | ALE ID : ', bodies(i)%ale_id
           call neko_log%message(log_buf)
-          
+
           write(log_buf, '(A,6(I2,1X))') '   Active DOFs   : ', bodies(i)%active_dofs
           call neko_log%message(log_buf)
-          
+
           write(log_buf, '(A,ES18.11)') '   Mass          : ', bodies(i)%mass
           call neko_log%message(log_buf)
 
@@ -367,7 +367,7 @@ subroutine fsi_manager_init(params, msh, ale, c_Xh, dm_Xh, &
              call neko_log%message(log_buf)
              write(log_buf, '(A,3(ES13.6,1X))') '   COB Offset    : ', bodies(i)%local_offset_cob
              call neko_log%message(log_buf)
-             write(log_buf, '(A,ES13.6)')     '   Mass Disp.    : ', bodies(i)%mass_disp
+             write(log_buf, '(A,ES13.6)') '   Mass Disp.    : ', bodies(i)%mass_disp
              call neko_log%message(log_buf)
           end if
 
