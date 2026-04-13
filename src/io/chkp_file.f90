@@ -681,6 +681,8 @@ contains
           basis_vel_lag => data%basis_vel_lag
           read_ale = .true.
        end if
+
+       read_fsi = .false.
        if (associated(data%fsi_disp_rel)) then
           fsi_disp_rel => data%fsi_disp_rel
           fsi_body_vel => data%fsi_body_vel
