@@ -178,7 +178,7 @@ contains
     nadv = this%ext_bdf%nadv
 
     do i = 0, nadv
-        beta(i) = this%ext_bdf%diffusion_coeffs(i+1)
+        beta(i) = this%ext_bdf%diffusion_coeffs%x(i+1)
         if (i .ge. 1) beta(i) = -beta(i)
     end do
 

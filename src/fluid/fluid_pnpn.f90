@@ -1520,7 +1520,7 @@ subroutine fluid_pnpn_solve_stokes_step(this, time, dt_controller, &
            p, &
            this%f_x, this%f_y, this%f_z, &
            c_Xh, msh, this%Xh, &
-           this%mu_tot, this%rho, this%ext_bdf%diffusion_coeffs(1), &
+           this%mu_tot, this%rho, this%ext_bdf%diffusion_coeffs%x(1), &
            time%dt, n)
 
       call rotate_cyc(u_res%x, v_res%x, w_res%x, 1, c_Xh)

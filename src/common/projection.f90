@@ -60,10 +60,8 @@
 !> Project x onto X, the space of old solutions and back again
 !! @note In this code we assume that the matrix project for the
 !! pressure Ax can vary in time if reortho_basis is used.
-!! pressure Ax can vary in time if reortho_basis is used.
 module projection
   use num_types, only : rp, c_rp
-  use math, only : rzero, glsc3, add2, add2s2, copy, cmult
   use math, only : rzero, glsc3, add2, add2s2, copy, cmult
   use coefs, only : coef_t
   use ax_product, only : ax_t
@@ -243,9 +241,6 @@ contains
     integer, intent(in) :: tstep
     class(coef_t), intent(inout) :: coef
     type(time_step_controller_t), intent(in) :: dt_controller
-    class(bc_list_t), optional, intent(inout) :: bclst
-    type(gs_t), optional, intent(inout) :: gs_h
-    class(Ax_t), optional, intent(in) :: Ax
     class(bc_list_t), optional, intent(inout) :: bclst
     type(gs_t), optional, intent(inout) :: gs_h
     class(Ax_t), optional, intent(in) :: Ax
