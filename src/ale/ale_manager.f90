@@ -1098,7 +1098,6 @@ contains
 
        kin%vel_trans = 0.0_rp
        kin%vel_ang   = 0.0_rp
-       kin%center = this%ale_pivot(i)%pos 
 
        if (op_mode == 0 .or. op_mode == 2) then
           ! Calculate Prescribed Motion
@@ -1131,6 +1130,7 @@ contains
        end if
 
        if (.not. op_mode == 2) then
+          kin%center = this%ale_pivot(i)%pos
           this%ale_pivot(i)%vel = kin%vel_trans
           this%body_kin(i)%center = kin%center
           this%body_kin(i)%vel_trans = kin%vel_trans
