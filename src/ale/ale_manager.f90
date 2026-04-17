@@ -37,6 +37,8 @@ module ale_manager
   use json_utils, only : json_get, json_get_or_default, json_extract_item
   use field, only : field_t
   use coefs, only : coef_t
+  use space, only : space_t
+  use checkpoint, only : chkp_t
   use ax_product, only : ax_t, ax_helm_factory
   use krylov, only : ksp_t, ksp_monitor_t, krylov_solver_factory
   use precon, only : pc_t, precon_factory, precon_destroy
@@ -1330,15 +1332,37 @@ contains
 
   ! Restores the current coef and related metrics
   ! and the pivot states at restart.
-  subroutine set_coef_restart(this, coef, adv, time_restart)
+  subroutine set_coef_restart(this, coef, Xh, adv, chkp, gs_Xh)
     class(ale_manager_t), intent(inout) :: this
     class(advection_t), intent(inout) :: adv
     type(coef_t), intent(inout) :: coef
-    real(kind=dp), intent(in) :: time_restart
+    type(space_t), intent(inout) :: Xh
+    type(chkp_t), intent(in) :: chkp
+    type(gs_t), intent(inout) :: gs_Xh
+    character(len=512) :: log_buf
 
     if (.not. this%active) return
 
-    call this%set_pivot_restart(time_restart)
+        if (allocated(chkp%previous_mesh%elements)) then
+        call neko_error("ALE restart failed: " // &
+            "The current mesh has a different number " // &
+            "of elements than the checkpoint.")
+    end if
+
+    if (chkp%previous_Xh%lx .ne. Xh%lx) then
+        write(log_buf, '(A, A, A, I0, A, A, I0, A, A)') &
+            "ALE restart failed: Polynomial order mismatch.", &
+            new_line('a'), &
+            " - Checkpoint mesh polynomial order: ", chkp%previous_Xh%lx - 1, &
+            new_line('a'), &
+            " - Present mesh polynomial order: ", Xh%lx - 1, &
+            new_line('a'), &
+            "Changing polynomial order during restart is " // &
+            "not yet supported in ALE module."
+        call neko_error(trim(log_buf))
+    end if
+
+    call this%set_pivot_restart(chkp%t)
     call coef%recompute_metrics()
     call adv%recompute_metrics(coef, .true.)
 

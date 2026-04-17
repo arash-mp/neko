@@ -561,7 +561,7 @@ contains
        end do
     end if
 
-    call this%ale%set_coef_restart(this%c_Xh, this%adv, chkp%t)
+    call this%ale%set_coef_restart(this%c_Xh, this%Xh, this%adv, chkp, this%gs_Xh)
 
 
   end subroutine fluid_pnpn_restart
