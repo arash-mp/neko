@@ -37,10 +37,12 @@ module ale_manager
   use json_utils, only : json_get, json_get_or_default, json_extract_item
   use field, only : field_t
   use coefs, only : coef_t
+  use space, only : space_t
   use ax_product, only : ax_t, ax_helm_factory
   use krylov, only : ksp_t, ksp_monitor_t, krylov_solver_factory
   use precon, only : pc_t, precon_factory, precon_destroy
   use bc_list, only : bc_list_t
+  use checkpoint, only : chkp_t
   use zero_dirichlet, only : zero_dirichlet_t
   use gather_scatter, only : gs_t, GS_OP_ADD
   use dofmap, only : dofmap_t
@@ -62,7 +64,7 @@ module ale_manager
   use ale_routines_device, only : compute_stiffness_ale_device, &
        add_kinematics_to_mesh_velocity_device, update_ale_mesh_device
   use utils, only : neko_error
-  use neko_config, only : NEKO_BCKND_DEVICE
+  use neko_config, only : NEKO_BCKND_DEVICE, NEKO_BCKND_HIP, NEKO_BCKND_CUDA
   use mpi_f08, only : MPI_WTIME, MPI_Barrier
   use comm, only : NEKO_COMM
   use registry, only : neko_registry
@@ -71,10 +73,13 @@ module ale_manager
   use fld_file, only : fld_file_t
   use user_intf, only : user_t, user_ale_mesh_velocity_intf, &
        user_ale_base_shapes_intf, user_ale_rigid_kinematics_intf
-  use math, only : glmin, pi
+  use math, only : glmin, pi, copy
+  use device_math, only : device_glmin
   use field_math, only : field_rzero, field_add2, &
        field_cmult
-
+  use device, only : device_memcpy, HOST_TO_DEVICE, DEVICE_TO_HOST
+  use operators, only : rotate_cyc
+  use, intrinsic :: iso_c_binding, only : c_associated
   implicit none
   private
 
@@ -149,7 +154,7 @@ module ale_manager
      procedure, pass(this) :: advance_mesh
      procedure, pass(this) :: update_mesh_velocity
      procedure, pass(this) :: set_pivot_restart
-     procedure, pass(this) :: set_coef_restart
+     procedure, pass(this) :: sync_chkp
      procedure, pass(this) :: request_tracker
      procedure, pass(this) :: get_tracker_pos
      procedure, pass(this) :: compute_rotation_matrix
@@ -157,6 +162,7 @@ module ale_manager
      procedure, pass(this) :: ghost_tracker_coord_step
      procedure, pass(this) :: log_rot_angles
      procedure, pass(this) :: log_pivot
+     procedure, pass(this) :: register_checkpoint_fields
   end type ale_manager_t
 
   type(ale_manager_t), public, pointer :: neko_ale => null()
@@ -165,14 +171,15 @@ contains
 
   !> Initialize ALE Manager
   !> Sets up solver, registers fields, solves for base shape, etc.
-  subroutine ale_manager_init(this, coef, json, user)
+  subroutine ale_manager_init(this, coef, json, user, chkp)
     class(ale_manager_t), intent(inout), target :: this
     type(coef_t), intent(inout) :: coef
     type(json_file), intent(inout) :: json
+    type(user_t), intent(in) :: user
+    type(chkp_t), intent(inout) :: chkp
     type(json_file) :: body_sub, bc_subdict
     type(json_file) :: precon_params
     type(time_state_t) :: t_init
-    type(user_t), intent(in) :: user
     integer, allocatable :: zone_indices(:)
     integer :: time_order
     integer :: n_moving_zones
@@ -204,7 +211,11 @@ contains
        return
     else if (this%active) then
        if (NEKO_BCKND_DEVICE .eq. 1) then
-          call neko_error("ALE not currently supported with device backend.")
+          if ((.not. (NEKO_BCKND_HIP .eq. 1)) .and. &
+               (.not. (NEKO_BCKND_CUDA .eq. 1))) then
+             call neko_error("ALE_device currently " // &
+                  "supported only with HIP or CUDA backend.")
+          end if
        end if
        if (oifs) then
           call neko_error("ALE not currently supported with OIFS.")
@@ -213,6 +224,17 @@ contains
     end if
 
     call neko_log%section("ALE Initialization")
+    call neko_log%message(" ")
+
+    if (NEKO_BCKND_HIP .eq. 1) then
+       call neko_log%message("Initializing ALE Manager " // &
+            "with DEVICE backend (HIP).")
+    else if (NEKO_BCKND_CUDA .eq. 1) then
+       call neko_log%message("Initializing ALE Manager " // &
+            "with DEVICE backend (CUDA).")
+    else
+       call neko_log%message("Initializing ALE Manager with CPU backend.")
+    end if
 
     tmp_logical = .false.
     n = coef%dof%size()
@@ -221,9 +243,16 @@ contains
     call this%y_ref%init(coef%dof, "y_ref")
     call this%z_ref%init(coef%dof, "z_ref")
 
-    this%x_ref%x = coef%dof%x
-    this%y_ref%x = coef%dof%y
-    this%z_ref%x = coef%dof%z
+    call copy(this%x_ref%x, coef%dof%x, n)
+    call copy(this%y_ref%x, coef%dof%y, n)
+    call copy(this%z_ref%x, coef%dof%z, n)
+
+    ! Sync to device
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call this%x_ref%copy_from(HOST_TO_DEVICE, .false.)
+       call this%y_ref%copy_from(HOST_TO_DEVICE, .false.)
+       call this%z_ref%copy_from(HOST_TO_DEVICE, .true.)
+    end if
 
     ! Set user function pointers.
     this%user_ale_mesh_vel => user%ale_mesh_velocity
@@ -794,6 +823,9 @@ contains
     ! Performing mesh_preview.
     call this%mesh_preview(coef, json)
 
+    ! Register checkpoint fields
+    call this%register_checkpoint_fields(coef, chkp)
+
     call neko_log%end_section()
   end subroutine ale_manager_init
 
@@ -894,6 +926,11 @@ contains
        ! Compute Stiffness
        call compute_stiffness_ale(coef, this%config)
 
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          call device_memcpy(coef%h1, coef%h1_d, n, HOST_TO_DEVICE, .false.)
+          call device_memcpy(coef%h2, coef%h2_d, n, HOST_TO_DEVICE, .true.)
+       end if
+
        ! Output Stiffness if requested (for diagnostic)
        if (this%config%if_output_stiffness) then
           rhs_field%x = coef%h1
@@ -944,7 +981,9 @@ contains
           call bcloc_zeros_only%append(bc_inactive_body)
 
           call field_rzero(this%base_shapes(body_idx))
-
+          this%base_shapes(body_idx)%x = 0.0_rp
+          rhs_field%x = 0.0_rp
+          corr_field%x = 0.0_rp
           !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
           ! phi = phi_corr + phi_lifted!
           ! A*phi_corr = -A*phi_lifted !
@@ -956,6 +995,11 @@ contains
              k = bc_active_body%msk(i)
              this%base_shapes(body_idx)%x(k, 1, 1, 1) = 1.0_rp
           end do
+
+          if (NEKO_BCKND_DEVICE .eq. 1) then
+             call device_memcpy(this%base_shapes(body_idx)%x, &
+                  this%base_shapes(body_idx)%x_d, n, HOST_TO_DEVICE, .true.)
+          end if
 
           ! Apply Zeros to others.
           ! This ensures fixed walls and other bodies are 0.0,
@@ -1003,6 +1047,12 @@ contains
           call bcloc_zeros_only%free()
 
           if (this%config%if_output_phi) then
+
+             if (NEKO_BCKND_DEVICE .eq. 1) then
+                call device_memcpy(this%base_shapes(body_idx)%x, &
+                     this%base_shapes(body_idx)%x_d, n, DEVICE_TO_HOST, .true.)
+             end if
+
              call phi_file%init('phi_' // &
                   trim(this%config%bodies(body_idx)%name) // '.fld')
              call phi_file%write(this%base_shapes(body_idx))
@@ -1013,6 +1063,12 @@ contains
        end do
 
        if (this%config%if_output_phi .and. (this%config%nbodies > 1)) then
+
+          if (NEKO_BCKND_DEVICE .eq. 1) then
+             call device_memcpy(this%phi_total%x, this%phi_total%x_d, n, &
+                  DEVICE_TO_HOST, .true.)
+          end if
+
           call neko_log%message("   phi_total.fld saved.")
           call phi_file%init('phi_total.fld')
           call phi_file%write(this%phi_total)
@@ -1024,8 +1080,12 @@ contains
     call corr_field%free()
 
     ! Restore h1/h2 to what they were before
-    coef%h1 = h1_restore
-    coef%h2 = h2_restore
+    coef%h1(:,:,:,:) = h1_restore(:,:,:,:)
+    coef%h2(:,:,:,:) = h2_restore(:,:,:,:)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_memcpy(coef%h1, coef%h1_d, n, HOST_TO_DEVICE, .false.)
+       call device_memcpy(coef%h2, coef%h2_d, n, HOST_TO_DEVICE, .true.)
+    end if
 
     if (allocated(h1_restore)) deallocate(h1_restore)
     if (allocated(h2_restore)) deallocate(h2_restore)
@@ -1047,7 +1107,7 @@ contains
     class(ale_manager_t), intent(inout) :: this
     type(coef_t), intent(in) :: coef
     type(time_state_t), intent(in) :: time_s
-    integer :: i
+    integer :: i, n
     type(body_kinematics_t) :: kin
     real(kind=rp) :: rot_mat(3,3)
     real(kind=rp) :: rot_center(3)
@@ -1101,7 +1161,18 @@ contains
     if (associated(this%user_ale_mesh_vel)) then
        call this%user_ale_mesh_vel(this%wm_x, this%wm_y, this%wm_z, &
             coef, this%x_ref, this%y_ref, this%z_ref, this%base_shapes, time_s)
+
+       ! Sync user modifications to the device
+       ! This probably is better NOT TO BE DONE HERE, and directly in the user function, and directry on device.
+       ! I will leave it here so I won't forget about it, but it needs to be revisited.
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          n = coef%dof%size()
+          call device_memcpy(this%wm_x%x, this%wm_x%x_d, n, HOST_TO_DEVICE, .false.)
+          call device_memcpy(this%wm_y%x, this%wm_y%x_d, n, HOST_TO_DEVICE, .false.)
+          call device_memcpy(this%wm_z%x, this%wm_z%x_d, n, HOST_TO_DEVICE, .true.)
+       end if
     end if
+
     call profiler_end_region('ALE add mesh velocity')
 
   end subroutine update_mesh_velocity
@@ -1139,12 +1210,13 @@ contains
     call update_ale_mesh(coef, this%wm_x, this%wm_y, this%wm_z, &
          this%wm_x_lag, this%wm_y_lag, this%wm_z_lag, &
          time, nadv, "ab")
+         
+    call profiler_end_region('ALE update mesh')
 
     ! Update internal history of mesh velocity.
     call this%wm_x_lag%update()
     call this%wm_y_lag%update()
     call this%wm_z_lag%update()
-    call profiler_end_region('ALE update mesh')
   end subroutine advance_mesh
 
   ! Compute mesh stiffness with per-body gain/decay from stiff_geom.
@@ -1330,19 +1402,129 @@ contains
 
   ! Restores the current coef and related metrics
   ! and the pivot states at restart.
-  subroutine set_coef_restart(this, coef, adv, time_restart)
+  subroutine sync_chkp(this, coef, Xh, adv, chkp, gs_Xh)
     class(ale_manager_t), intent(inout) :: this
     class(advection_t), intent(inout) :: adv
     type(coef_t), intent(inout) :: coef
-    real(kind=dp), intent(in) :: time_restart
-
+    type(space_t), intent(inout) :: Xh
+    type(chkp_t), intent(in) :: chkp
+    type(gs_t), intent(inout) :: gs_Xh
+    integer :: i, j, n
+    ! Return if ALE is not active.
     if (.not. this%active) return
 
-    call this%set_pivot_restart(time_restart)
+    if (allocated(chkp%previous_mesh%elements)) then
+        call neko_error("ALE restart failed: " // &
+            "The current mesh has a different number " // &
+            "of elements than the checkpoint.")
+    end if
+
+    if (chkp%previous_Xh%lx .ne. Xh%lx) then
+       n = coef%dof%size()
+       associate(wm_x => this%wm_x, wm_y => this%wm_y, wm_z => this%wm_z)
+          do concurrent (j = 1:n)
+             ! Mesh Velocity
+             wm_x%x(j,1,1,1) = wm_x%x(j,1,1,1) * coef%mult(j,1,1,1)
+             wm_y%x(j,1,1,1) = wm_y%x(j,1,1,1) * coef%mult(j,1,1,1)
+             wm_z%x(j,1,1,1) = wm_z%x(j,1,1,1) * coef%mult(j,1,1,1)
+          end do
+       end associate
+
+       do i = 1, this%wm_x_lag%size()
+          do concurrent (j = 1:n)
+             this%wm_x_lag%lf(i)%x(j,1,1,1) = &
+                  this%wm_x_lag%lf(i)%x(j,1,1,1) * coef%mult(j,1,1,1)
+             this%wm_y_lag%lf(i)%x(j,1,1,1) = &
+                  this%wm_y_lag%lf(i)%x(j,1,1,1) * coef%mult(j,1,1,1)
+             this%wm_z_lag%lf(i)%x(j,1,1,1) = &
+                  this%wm_z_lag%lf(i)%x(j,1,1,1) * coef%mult(j,1,1,1)
+          end do
+       end do
+    end if
+
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call this%wm_x%copy_from(HOST_TO_DEVICE, sync = .false.)
+       call this%wm_y%copy_from(HOST_TO_DEVICE, sync = .false.)
+       call this%wm_z%copy_from(HOST_TO_DEVICE, sync = .false.)
+
+       call this%wm_x_lag%lf(1)%copy_from(HOST_TO_DEVICE, &
+            sync = .false.)
+       call this%wm_x_lag%lf(2)%copy_from(HOST_TO_DEVICE, &
+            sync = .false.)
+
+       call this%wm_y_lag%lf(1)%copy_from(HOST_TO_DEVICE, &
+            sync = .false.)
+       call this%wm_y_lag%lf(2)%copy_from(HOST_TO_DEVICE, &
+            sync = .false.)
+
+       call this%wm_z_lag%lf(1)%copy_from(HOST_TO_DEVICE, &
+            sync = .false.)
+       call this%wm_z_lag%lf(2)%copy_from(HOST_TO_DEVICE, &
+            sync = .false.)
+
+       if (c_associated(coef%dof%x_d)) then
+          call device_memcpy(coef%dof%x, coef%dof%x_d, &
+              size(coef%dof%x), HOST_TO_DEVICE, .false.)
+          call device_memcpy(coef%dof%y, coef%dof%y_d, &
+              size(coef%dof%y), HOST_TO_DEVICE, .false.)
+          call device_memcpy(coef%dof%z, coef%dof%z_d, &
+              size(coef%dof%z), HOST_TO_DEVICE, .false.)
+       end if
+
+       if (c_associated(coef%Blag_d)) then
+          call device_memcpy(coef%Blag, coef%Blag_d, size(coef%Blag), &
+               HOST_TO_DEVICE, .false.)
+       end if
+
+       if (c_associated(coef%Blaglag_d)) then
+          call device_memcpy(coef%Blaglag, coef%Blaglag_d, &
+               size(coef%Blaglag), HOST_TO_DEVICE, .true.)
+       end if
+    end if
+
+    if (chkp%previous_Xh%lx .ne. Xh%lx) then
+       call rotate_cyc(this%wm_x%x, this%wm_y%x, this%wm_z%x, 1, coef)
+       call gs_Xh%op(this%wm_x, GS_OP_ADD)
+       call gs_Xh%op(this%wm_y, GS_OP_ADD)
+       call gs_Xh%op(this%wm_z, GS_OP_ADD)
+       call rotate_cyc(this%wm_x%x, this%wm_y%x, this%wm_z%x, 0, coef)
+
+       do i = 1, this%wm_x_lag%size()
+          call rotate_cyc(this%wm_x_lag%lf(i)%x, this%wm_y_lag%lf(i)%x, &
+               this%wm_z_lag%lf(i)%x, 1, coef)
+          call gs_Xh%op(this%wm_x_lag%lf(i), GS_OP_ADD)
+          call gs_Xh%op(this%wm_y_lag%lf(i), GS_OP_ADD)
+          call gs_Xh%op(this%wm_z_lag%lf(i), GS_OP_ADD)
+          call rotate_cyc(this%wm_x_lag%lf(i)%x, this%wm_y_lag%lf(i)%x, &
+               this%wm_z_lag%lf(i)%x, 0, coef)
+       end do
+    end if
+
+
+    call this%set_pivot_restart(chkp%t)
     call coef%recompute_metrics()
+
+    ! If polynomial order changes during restart, we use current's mesh mass matrix
+    ! for Blag and Blaglag. This will introduce some error, but maybe better than
+    ! not restarting at all.
+    if (chkp%previous_Xh%lx .ne. Xh%lx) then
+        coef%Blag = coef%B
+        coef%Blaglag = coef%B
+        if (NEKO_BCKND_DEVICE .eq. 1) then
+           if (c_associated(coef%Blag_d)) then
+              call device_memcpy(coef%Blag, coef%Blag_d, n, &
+                   HOST_TO_DEVICE, .false.)
+           end if
+           if (c_associated(coef%Blaglag_d)) then
+              call device_memcpy(coef%Blaglag, coef%Blaglag_d, n, &
+                   HOST_TO_DEVICE, .true.)
+           end if
+        end if
+    end if
+
     call adv%recompute_metrics(coef, .true.)
 
-  end subroutine set_coef_restart
+  end subroutine sync_chkp
 
   subroutine set_pivot_basis_for_checkpoint(this, body_idx)
     class(ale_manager_t), intent(inout) :: this
@@ -1473,7 +1655,11 @@ contains
     n = coef%dof%size()
     file_index = -2
 
-    min_jac = glmin(coef%jac, n)
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       min_jac = device_glmin(coef%jac_d, n)
+    else
+       min_jac = glmin(coef%jac, n)
+    end if
     call save_mesh_preview_step(coef, dummy_field, out_file, t_state, step, &
          file_index)
     write(log_buf, '(A,I0, A,ES23.15, A,ES18.11)') &
@@ -1491,7 +1677,12 @@ contains
        call this%advance_mesh(coef, t_state, nadv)
        call coef%recompute_metrics()
 
-       min_jac = glmin(coef%jac, n)
+
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          min_jac = device_glmin(coef%jac_d, n)
+       else
+          min_jac = glmin(coef%jac, n)
+       end if
 
        if (min_jac <= 0.0_rp) then
           write(log_buf, '(A, ES18.11, A, ES23.15)') &
@@ -1540,14 +1731,31 @@ contains
     type(time_state_t), intent(in) :: t_state
     integer, intent(in) :: step
     integer, intent(inout) :: file_index
+    integer :: n
 
+    n = coef%dof%size()
     file_index = file_index + 1
-    dummy_field%x = coef%B
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_memcpy(coef%B, coef%B_d, n, DEVICE_TO_HOST, .true.)
+    else
+       call copy(dummy_field%x, coef%B, n)
+    end if
+
 
     call out_file%init("mesh_preview.fld")
     select type (ft => out_file%file_type)
     type is (fld_file_t)
        ft%write_mesh = .true.
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          associate(mesh => coef%dof)
+            call device_memcpy(mesh%x, mesh%x_d, mesh%size(), &
+               DEVICE_TO_HOST, sync = .false.)
+            call device_memcpy(mesh%y, mesh%y_d, mesh%size(), &
+               DEVICE_TO_HOST, sync = .false.)
+            call device_memcpy(mesh%z, mesh%z_d, mesh%size(), &
+               DEVICE_TO_HOST, sync = .true.)
+          end associate
+       end if
     end select
 
     call out_file%set_counter(file_index)
@@ -1848,4 +2056,28 @@ contains
        end if
     end if
   end subroutine get_ale_solver_params_json
+
+  ! Register ALE fields for checkpointing.
+  subroutine register_checkpoint_fields(this, coef, checkpoint)
+    class(ale_manager_t), intent(inout) :: this
+    type(coef_t), intent(inout) :: coef
+    type(chkp_t), intent(inout) :: checkpoint
+    integer :: i
+
+    if (.not. this%active) return
+
+    ! Add checkpoint data for ALE.
+    call checkpoint%add_ale(coef%dof%x, coef%dof%y, &
+         coef%dof%z, coef%dof%x_d, coef%dof%y_d, &
+         coef%dof%z_d, &
+         coef%Blag, coef%Blaglag, coef%Blag_d, coef%Blaglag_d, &
+         this%wm_x, this%wm_y, this%wm_z, &
+         this%wm_x_lag, this%wm_y_lag, &
+         this%wm_z_lag, &
+         this%global_pivot_pos, &
+         this%global_pivot_vel_lag, &
+         this%global_basis_pos, &
+         this%global_basis_vel_lag)
+
+  end subroutine register_checkpoint_fields
 end module ale_manager

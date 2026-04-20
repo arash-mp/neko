@@ -34,15 +34,15 @@
 module adv_dealias
   use advection, only : advection_t
   use num_types, only : rp
-  use math, only : vdot3, sub2
+  use math, only : vdot3, sub2, add2
   use space, only : space_t, GL
   use field, only : field_t
   use coefs, only : coef_t
-  use device_math, only : device_vdot3, device_sub2
+  use device_math, only : device_vdot3, device_sub2, device_col3, device_add2
   use neko_config, only : NEKO_BCKND_DEVICE, NEKO_BCKND_SX, NEKO_BCKND_XSMM, &
        NEKO_BCKND_OPENCL, NEKO_BCKND_CUDA, NEKO_BCKND_HIP
   use utils, only : neko_error
-  use operators, only : opgrad
+  use operators, only : opgrad, div
   use interpolation, only : interpolator_t
   use device, only : device_map, device_get_ptr, device_free
   use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR, c_associated
@@ -460,7 +460,7 @@ contains
   end subroutine compute_scalar_advection_dealias
 
 
-  !!> Add the advection term in ALE framework.
+  !!> Add the advection term in ALE framework using dealiasing.
   !! @param this The object.
   !! @param vx The x component of velocity.
   !! @param vy The y component of velocity.
@@ -481,13 +481,15 @@ contains
   !! Ph.D. thesis, Massachusetts Institute of Technology, 1989.
   !! Note: In Nek5000, dealiasing is not done for this term.
   subroutine compute_ale_advection_dealias(this, vx, vy, vz, wm_x, wm_y, wm_z, &
-       fx, fy, fz, Xh, coef, n, dt)
+        fx, fy, fz, Xh, coef, n, dt)
     class(adv_dealias_t), intent(inout) :: this
     type(field_t), intent(inout) :: vx, vy, vz
     type(field_t), intent(inout) :: wm_x, wm_y, wm_z
     type(field_t), intent(inout) :: fx, fy, fz
     type(space_t), intent(in) :: Xh
     type(coef_t), intent(in) :: coef
+    integer, intent(in) :: n
+    real(kind=rp), intent(in), optional :: dt
     real(kind=rp), dimension(this%Xh_GL%lxyz) :: vx_GL, vy_GL, vz_GL
     real(kind=rp), dimension(this%Xh_GL%lxyz) :: wm_x_GL, wm_y_GL, wm_z_GL
     real(kind=rp), dimension(this%Xh_GL%lxyz) :: flux_GL
@@ -495,20 +497,83 @@ contains
     real(kind=rp), dimension(this%Xh_GL%lxyz) :: total_div_GL
     integer :: e, i, idx, nel, n_GL
     real(kind=rp), dimension(this%Xh_GLL%lxyz) :: temp_x, temp_y, temp_z
-    integer, intent(in) :: n
-    real(kind=rp), intent(in), optional :: dt
 
     nel = coef%msh%nelv
     n_GL = nel * this%Xh_GL%lxyz
 
     associate(c_GL => this%coef_GL)
-      if (NEKO_BCKND_DEVICE .eq. 1) then
-         call neko_error("ALE advection with dealiasing not " // &
-              "implemented yet for device")
-      else if ((NEKO_BCKND_SX .eq. 1) .or. (NEKO_BCKND_XSMM .eq. 1)) then
-         call neko_error("ALE advection with dealiasing not " // &
-              "implemented yet for device")
-      else
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+
+         ! Map mesh velocity (wm) to the GL space
+         call this%GLL_to_GL%map(this%vr, wm_x%x, nel, this%Xh_GL)
+         call this%GLL_to_GL%map(this%vs, wm_y%x, nel, this%Xh_GL)
+         call this%GLL_to_GL%map(this%vt, wm_z%x, nel, this%Xh_GL)
+
+         ! --------------------- X-Momentum
+         ! Fx = vx * wm_x
+         call this%GLL_to_GL%map(this%temp, vx%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vr_d, n_GL)
+         call opgrad(this%tz, this%tx, this%ty, this%temp, c_GL)
+
+         ! Fy = vx * wm_y
+         call this%GLL_to_GL%map(this%temp, vx%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vs_d, n_GL)
+         call opgrad(this%tx, this%tbf, this%ty, this%temp, c_GL)
+         call device_add2(this%tz_d, this%tbf_d, n_GL)
+
+         ! Fz = vx * wm_z
+         call this%GLL_to_GL%map(this%temp, vx%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vt_d, n_GL)
+         call opgrad(this%tx, this%ty, this%tbf, this%temp, c_GL)
+         call device_add2(this%tz_d, this%tbf_d, n_GL)
+
+         ! Map strong divergence (tz) back to GLL space and add to RHS
+         call this%GLL_to_GL%map(this%temp, this%tz, nel, this%Xh_GLL)
+         call device_add2(fx%x_d, this%temp_d, n)
+
+         ! --------------------- Y-Momentum
+         ! Fx = vy * wm_x
+         call this%GLL_to_GL%map(this%temp, vy%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vr_d, n_GL)
+         call opgrad(this%tz, this%tx, this%ty, this%temp, c_GL)
+
+         ! Fy = vy * wm_y
+         call this%GLL_to_GL%map(this%temp, vy%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vs_d, n_GL)
+         call opgrad(this%tx, this%tbf, this%ty, this%temp, c_GL)
+         call device_add2(this%tz_d, this%tbf_d, n_GL)
+
+         ! Fz = vy * wm_z
+         call this%GLL_to_GL%map(this%temp, vy%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vt_d, n_GL)
+         call opgrad(this%tx, this%ty, this%tbf, this%temp, c_GL)
+         call device_add2(this%tz_d, this%tbf_d, n_GL)
+
+         call this%GLL_to_GL%map(this%temp, this%tz, nel, this%Xh_GLL)
+         call device_add2(fy%x_d, this%temp_d, n)
+
+         ! --------------------- Z-Momentum
+         ! Fx = wz * wm_x
+         call this%GLL_to_GL%map(this%temp, vz%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vr_d, n_GL)
+         call opgrad(this%tz, this%tx, this%ty, this%temp, c_GL)
+
+         ! Fy = wz * wm_y
+         call this%GLL_to_GL%map(this%temp, vz%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vs_d, n_GL)
+         call opgrad(this%tx, this%tbf, this%ty, this%temp, c_GL)
+         call device_add2(this%tz_d, this%tbf_d, n_GL)
+
+         ! Fz = wz * wm_z
+         call this%GLL_to_GL%map(this%temp, vz%x, nel, this%Xh_GL)
+         call device_col3(this%temp_d, this%temp_d, this%vt_d, n_GL)
+         call opgrad(this%tx, this%ty, this%tbf, this%temp, c_GL)
+         call device_add2(this%tz_d, this%tbf_d, n_GL)
+
+         call this%GLL_to_GL%map(this%temp, this%tz, nel, this%Xh_GLL)
+         call device_add2(fz%x_d, this%temp_d, n)
+
+       else
          !$omp parallel do private(e, i, flux_GL, total_div_GL, idx)
          do e = 1, coef%msh%nelv
             ! Map advecting velocity and mesh velocity onto the higher-order space
@@ -519,11 +584,10 @@ contains
             call this%GLL_to_GL%map(wm_y_GL, wm_y%x(1,1,1,e), 1, this%Xh_GL)
             call this%GLL_to_GL%map(wm_z_GL, wm_z%x(1,1,1,e), 1, this%Xh_GL)
 
-            ! x-momentum
-            total_div_GL = 0.0_rp
             ! I think below can be written more efficiently. Will fix it later.
             ! This works for now.
-
+            ! --------------------- X-Momentum
+            total_div_GL = 0.0_rp
             ! div(u * wm_*) = d/dx (u * wm_x) + d/dy (u * wm_y) + d/dz (u * wm_z)
 
             flux_GL = vx_GL * wm_x_GL
@@ -536,10 +600,10 @@ contains
             call opgrad(grad_x, grad_y, grad_z, flux_GL, c_GL, e, e)
             total_div_GL = total_div_GL + grad_z
 
-            ! Map back the contructed operator to the original space
+            ! Map back the constructed operator to the original space
             call this%GLL_to_GL%map(temp_x, total_div_GL, 1, this%Xh_GLL)
 
-            ! y-momentum
+            ! --------------------- Y-Momentum
             total_div_GL = 0.0_rp
             ! div(v * wm_*) = d/dx (v * wm_x) + d/dy (v * wm_y) + d/dz (v * wm_z)
 
@@ -553,10 +617,10 @@ contains
             call opgrad(grad_x, grad_y, grad_z, flux_GL, c_GL, e, e)
             total_div_GL = total_div_GL + grad_z
 
-            ! Map back the contructed operator to the original space
+            ! Map back the constructed operator to the original space
             call this%GLL_to_GL%map(temp_y, total_div_GL, 1, this%Xh_GLL)
 
-            ! z-momentum
+            ! --------------------- Z-Momentum
             total_div_GL = 0.0_rp
             ! div(w * wm_*) = d/dx (w * wm_x) + d/dy (w * wm_y) + d/dz (w * wm_z)
 
@@ -570,7 +634,7 @@ contains
             call opgrad(grad_x, grad_y, grad_z, flux_GL, c_GL, e, e)
             total_div_GL = total_div_GL + grad_z
 
-            ! Map back the contructed operator to the original space
+            ! Map back the constructed operator to the original space
             call this%GLL_to_GL%map(temp_z, total_div_GL, 1, this%Xh_GLL)
 
             ! Note we add (+) here since the ALE advection term is
@@ -586,7 +650,6 @@ contains
          !$omp end parallel do
       end if
     end associate
-
   end subroutine compute_ale_advection_dealias
 
   subroutine recompute_metrics_dealias(this, coef, moving_boundary)
