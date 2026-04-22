@@ -100,6 +100,10 @@ module ale_rigid_kinematics
      real(kind=rp) :: ramp_t0(3) = 1.0_rp
      !> Boundary Zone Indices associated with this body
      integer, allocatable :: zone_indices(:)
+
+     !> ERF Blending Parameters
+      real(kind=rp) :: erf_x1 = 0.0_rp  ! Inner rigid radius
+      real(kind=rp) :: erf_x2 = 1.0_rp  ! Outer anchor radius
   end type ale_body_t
 
   !> Global ALE Configuration
@@ -107,6 +111,7 @@ module ale_rigid_kinematics
      !> Stiffness Control.
      !> A placeholder for future options.
      character(len=32) :: stiffness_type = 'built-in'
+     character(len=32) :: blending_method = 'laplace'
      logical :: if_output_phi = .true.
      logical :: if_output_stiffness = .false.
      !> Array of Moving Bodies

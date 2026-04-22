@@ -53,6 +53,7 @@ module ale_routines_cpu
   public :: compute_stiffness_ale_cpu
   public :: add_kinematics_to_mesh_velocity_cpu
   public :: update_ale_mesh_cpu
+  public :: compute_cheap_dist_v2_cpu
 
 contains
 
