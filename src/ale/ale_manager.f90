@@ -1973,16 +1973,17 @@ contains
              this%base_shapes(b)%x(i, 1, 1, 1) = weight * ownership * coef%mult(i,1,1,1)
           end if
        end do
-    end do
-
-    call coef%gs_h%op(this%base_shapes(b), GS_OP_ADD)
-    
-    if (this%config%nbodies > 1) then
-       do concurrent (i = 1:n)
+       
+       call coef%gs_h%op(this%base_shapes(b), GS_OP_ADD)
+       
+       if (this%config%nbodies > 1) then
+          do concurrent (i = 1:n)
              this%phi_total%x(i, 1, 1, 1) = this%phi_total%x(i, 1, 1, 1) + &
                                             this%base_shapes(b)%x(i, 1, 1, 1)
-       end do
-    end if    
+          end do
+       end if 
+       
+    end do
 
     
     if (NEKO_BCKND_DEVICE .eq. 1) then
