@@ -1961,22 +1961,17 @@ contains
           if (raw_dist > x2) then
              this%base_shapes(b)%x(i, 1, 1, 1) = 0.0_rp
           else
-          
-          ! Calculate how much this body owns this gll grid
-          ownership = (1.0_rp / (raw_dist**2 + NEKO_EPS)) / idw_sum_field(i)
-          
-          ! Standard ERF Calculation
-          clamped_dist = max(raw_dist, x1)
-          clamped_dist = min(clamped_dist, x2)
-          rr = ((y2 - y1) / (x2 - x1)) * clamped_dist + ((y1 * x2 - y2 * x1) / (x2 - x1))
-          
-          if (raw_dist > x2) then
-             weight = 0.0_rp
-          else
+             ! Calculate how much this body owns this gll grid
+             ownership = (1.0_rp / (raw_dist**2 + NEKO_EPS)) / idw_sum_field(i)
+             
+             clamped_dist = max(raw_dist, x1)
+             clamped_dist = min(clamped_dist, x2)
+             rr = ((y2 - y1) / (x2 - x1)) * clamped_dist + ((y1 * x2 - y2 * x1) / (x2 - x1))
+             
              weight = (erf(rr) - erf_y2) / erf_diff
+             
+             this%base_shapes(b)%x(i, 1, 1, 1) = weight * ownership
           end if
-          
-          this%base_shapes(b)%x(i, 1, 1, 1) = weight * ownership
           
           if (this%config%nbodies > 1) then
              this%phi_total%x(i, 1, 1, 1) = this%phi_total%x(i, 1, 1, 1) + &
