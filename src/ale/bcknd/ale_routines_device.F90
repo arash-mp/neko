@@ -58,6 +58,7 @@ module ale_routines_device
   public :: compute_stiffness_ale_device
   public :: add_kinematics_to_mesh_velocity_device
   public :: update_ale_mesh_device
+  public :: compute_cheap_dist_device
 
   type, bind(c) :: kinematics_params_t
     real(c_rp) :: cx, cy, cz
