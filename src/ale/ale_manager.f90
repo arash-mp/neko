@@ -60,9 +60,11 @@ module ale_manager
        init_pivot_state, update_pivot_location, &
        compute_body_kinematics_built_in, ab_integrate_point_pos
   use ale_routines_cpu, only : compute_stiffness_ale_cpu, &
-       add_kinematics_to_mesh_velocity_cpu, update_ale_mesh_cpu
+       add_kinematics_to_mesh_velocity_cpu, update_ale_mesh_cpu, &
+       compute_cheap_dist_v2_cpu
   use ale_routines_device, only : compute_stiffness_ale_device, &
-       add_kinematics_to_mesh_velocity_device, update_ale_mesh_device
+       add_kinematics_to_mesh_velocity_device, update_ale_mesh_device, &
+       compute_cheap_dist_device
   use utils, only : neko_error
   use neko_config, only : NEKO_BCKND_DEVICE, NEKO_BCKND_HIP, NEKO_BCKND_CUDA
   use mpi_f08, only : MPI_WTIME, MPI_Barrier
@@ -73,7 +75,7 @@ module ale_manager
   use fld_file, only : fld_file_t
   use user_intf, only : user_t, user_ale_mesh_velocity_intf, &
        user_ale_base_shapes_intf, user_ale_rigid_kinematics_intf
-  use math, only : glmin, pi, copy
+  use math, only : glmin, pi, NEKO_EPS, copy
   use device_math, only : device_glmin
   use field_math, only : field_rzero, field_add2, &
        field_cmult
@@ -163,6 +165,7 @@ module ale_manager
      procedure, pass(this) :: log_rot_angles
      procedure, pass(this) :: log_pivot
      procedure, pass(this) :: register_checkpoint_fields
+     procedure, pass(this) :: compute_erf_base_mesh_displacement
   end type ale_manager_t
 
   type(ale_manager_t), public, pointer :: neko_ale => null()
@@ -337,6 +340,16 @@ contains
           call neko_error("ALE: stiffness_type must be 'built-in'")
        end if
     end if
+
+    ! Blending function Method
+    if (json%valid_path('case.fluid.ale.blending_method')) then
+       call json%get('case.fluid.ale.blending_method', tmp_str)
+       this%config%blending_method = tmp_str
+       if (trim(tmp_str) /= 'laplace' .and. trim(tmp_str) /= 'erf') then
+          call neko_error("ALE: blending_method must be 'laplace' or 'erf'")
+       end if
+    end if
+
     if (.not. associated(this%user_ale_base_shapes)) then
        call neko_log%message('Solver Type       : (' // &
           trim(ksp_solver) // ', ' // trim(precon_type) // ')')
@@ -489,8 +502,19 @@ contains
              end if
           end if
 
+          ! ERF Parameters
+          if (trim(this%config%blending_method) == 'erf') then
+             if (body_sub%valid_path('erf')) then
+                call json_get(body_sub, 'erf.x1', this%config%bodies(i)%erf_x1)
+                call json_get(body_sub, 'erf.x2', this%config%bodies(i)%erf_x2)
+             else
+                call neko_error("ALE: blending_method 'erf' requires 'erf.x1' " // &
+                     "and 'erf.x2' defined for body '" // trim(this%config%bodies(i)%name) // "'")
+             end if
+          end if
+
           ! Stiff Geom
-          if (body_sub%valid_path('stiff_geom')) then
+          if (body_sub%valid_path('stiff_geom') .and. trim(this%config%blending_method) == 'laplace') then
              call json_get(body_sub, 'stiff_geom.type', tmp_str)
              this%config%bodies(i)%stiff_geom%type = tmp_str
              call json_get(body_sub, 'stiff_geom.gain', &
@@ -531,9 +555,11 @@ contains
                      trim(this%config%bodies(i)%stiff_geom%type))
              end select
           else
-             call neko_error("ALE: Body '" // &
-                  trim(this%config%bodies(i)%name) // &
-                  "' must have 'stiff_geom' definition.")
+             if (trim(this%config%blending_method) == 'laplace') then
+                call neko_error("ALE: Body '" // &
+                     trim(this%config%bodies(i)%name) // &
+                     "' must have 'stiff_geom' definition.")
+             end if
           end if
 
           ! Initialize the pivots.
@@ -793,8 +819,12 @@ contains
     end do
 
     ! Find the smooth blending function for mesh displacement.
-    call this%solve_base_mesh_displacement(coef, abstol, ksp_solver, &
-         ksp_max_iter, precon_type, precon_params, res_monitor)
+    if (trim(this%config%blending_method) == 'erf') then
+       call this%compute_erf_base_mesh_displacement(coef)
+    else
+       call this%solve_base_mesh_displacement(coef, abstol, ksp_solver, &
+            ksp_max_iter, precon_type, precon_params, res_monitor)
+    end if
 
     ! If we are restarting, we skip this. It will be handled
     ! properly by chkp file.
@@ -2080,4 +2110,144 @@ contains
          this%global_basis_vel_lag)
 
   end subroutine register_checkpoint_fields
+
+!> Compute mesh blending fields using ERF distance method
+  subroutine compute_erf_base_mesh_displacement(this, coef)
+    class(ale_manager_t), intent(inout) :: this
+    type(coef_t), intent(inout) :: coef
+    type(file_t) :: phi_file
+    integer :: i, n, b, ierr, body_idx
+    real(kind=rp) :: raw_dist, clamped_dist, rr, weight, ownership
+    real(kind=rp) :: x1, x2, y1, y2
+    real(kind=rp) :: erf_y1, erf_y2, erf_diff
+    real(kind=rp) :: sample_start_time, sample_end_time, sample_time
+    real(kind=rp), allocatable :: dist_fields(:,:)
+    real(kind=rp), allocatable :: idw_sum_field(:)
+    character(len=128) :: log_buf
+    
+    if (.not. this%active) return
+    if (.not. this%has_moving_boundary) return
+    if (this%config%nbodies == 0) return
+
+    call neko_log%message(" ")
+    call neko_log%message("Starting explicit ERF base mesh motion calculation ...")
+    n = coef%dof%size()
+
+    allocate(dist_fields(n, this%config%nbodies))
+    dist_fields = huge(0.0_rp)
+    
+
+    do b = 1, this%config%nbodies
+       call neko_log%message(" Start: cheap dist calculation for body '" // &
+            trim(this%config%bodies(b)%name) // "'")
+       call MPI_Barrier(NEKO_COMM, ierr)
+       sample_start_time = MPI_WTIME()
+
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          call compute_cheap_dist_device(dist_fields(:, b), coef, &
+               coef%msh, this%config%bodies(b)%zone_indices)
+       else
+          call compute_cheap_dist_v2_cpu(dist_fields(:, b), coef, &
+               coef%msh, this%config%bodies(b)%zone_indices)
+       end if
+
+       call MPI_Barrier(NEKO_COMM, ierr)
+       sample_end_time = MPI_WTIME()
+       sample_time = sample_end_time - sample_start_time
+       
+       write(log_buf, '(A, A, A, ES11.4, A)') "   cheap dist for '", &
+            trim(this%config%bodies(b)%name), "' took ", sample_time, " (s)"
+       call neko_log%message(log_buf)
+    end do
+
+    
+    allocate(idw_sum_field(n))
+    idw_sum_field = 0.0_rp
+    
+    ! calculate the sum of 1/d^2
+    do b = 1, this%config%nbodies
+       do concurrent (i = 1:n)
+          idw_sum_field(i) = idw_sum_field(i) + &
+               1.0_rp / (dist_fields(i, b)**2 + NEKO_EPS)
+       end do
+    end do
+
+
+    y1 = 2.0_rp
+    y2 = -2.0_rp
+    erf_y1 = erf(y1)
+    erf_y2 = erf(y2)
+    erf_diff = erf_y1 - erf_y2
+    
+    if (this%config%nbodies > 1) call field_rzero(this%phi_total)
+
+    do b = 1, this%config%nbodies
+       x1 = this%config%bodies(b)%erf_x1
+       x2 = this%config%bodies(b)%erf_x2
+       
+       call field_rzero(this%base_shapes(b))
+       
+       do concurrent (i = 1:n)
+          raw_dist = dist_fields(i, b)
+          
+          ! Calculate how much this body owns this gll grid
+          ownership = (1.0_rp / (raw_dist**2 + NEKO_EPS)) / idw_sum_field(i)
+          
+          ! Standard ERF Calculation
+          clamped_dist = max(raw_dist, x1)
+          clamped_dist = min(clamped_dist, x2)
+          rr = ((y2 - y1) / (x2 - x1)) * clamped_dist + ((y1 * x2 - y2 * x1) / (x2 - x1))
+          
+          if (raw_dist > x2) then
+             weight = 0.0_rp
+          else
+             weight = (erf(rr) - erf_y2) / erf_diff
+          end if
+          
+          this%base_shapes(b)%x(i, 1, 1, 1) = weight * ownership
+          
+          if (this%config%nbodies > 1) then
+             this%phi_total%x(i, 1, 1, 1) = this%phi_total%x(i, 1, 1, 1) + &
+                                            this%base_shapes(b)%x(i, 1, 1, 1)
+          end if
+       end do
+    end do
+    
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       do b = 1, this%config%nbodies
+          call device_memcpy(this%base_shapes(b)%x, &
+               this%base_shapes(b)%x_d, n, HOST_TO_DEVICE, .false.)
+       end do
+       if (this%config%nbodies > 1) then
+          call device_memcpy(this%phi_total%x, &
+               this%phi_total%x_d, n, HOST_TO_DEVICE, .true.)
+       end if
+    end if
+
+       if (this%config%if_output_phi) then
+          ! Individual Bodies
+          do body_idx = 1, this%config%nbodies
+             call phi_file%init('phi_' // &
+                  trim(this%config%bodies(body_idx)%name) // '.fld')
+             call phi_file%write(this%base_shapes(body_idx))
+             call phi_file%free()
+             call neko_log%message('   phi_' // &
+                  trim(this%config%bodies(body_idx)%name) // '.fld saved.')
+          end do
+
+          ! Total
+          if (this%config%nbodies > 1) then
+             call neko_log%message("  phi_total.fld saved.")
+             call phi_file%init('phi_total.fld')
+             call phi_file%write(this%phi_total)
+             call phi_file%free()
+          end if
+       end if
+
+    call neko_log%message(" ERF blending calculation complete.")
+    
+    if (allocated(dist_fields)) deallocate(dist_fields)
+    if (allocated(idw_sum_field)) deallocate(idw_sum_field)
+    
+  end subroutine compute_erf_base_mesh_displacement
 end module ale_manager
