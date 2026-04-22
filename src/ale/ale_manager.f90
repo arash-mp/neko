@@ -2205,7 +2205,18 @@ contains
           end if
        end do
        
+
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          call device_memcpy(this%base_shapes(b)%x, &
+               this%base_shapes(b)%x_d, n, HOST_TO_DEVICE, .true.)
+       end if
+
        call coef%gs_h%op(this%base_shapes(b), GS_OP_ADD)
+
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          call device_memcpy(this%base_shapes(b)%x, &
+               this%base_shapes(b)%x_d, n, DEVICE_TO_HOST, .true.)
+       end if       
        
        if (this%config%nbodies > 1) then
           do concurrent (i = 1:n)
@@ -2218,10 +2229,6 @@ contains
 
     
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       do b = 1, this%config%nbodies
-          call device_memcpy(this%base_shapes(b)%x, &
-               this%base_shapes(b)%x_d, n, HOST_TO_DEVICE, .false.)
-       end do
        if (this%config%nbodies > 1) then
           call device_memcpy(this%phi_total%x, &
                this%phi_total%x_d, n, HOST_TO_DEVICE, .true.)
