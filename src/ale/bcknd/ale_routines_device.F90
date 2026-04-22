@@ -286,7 +286,7 @@ contains
     lz = coef%dof%Xh%lz
     nel = msh%nelv
     n = size(d)
-    max_pass = 10000
+    max_pass = 250000
 
     ! Limit for worst case scenario such that all nodes can propagate
     ! their values across the element before triggering an MPI call.
