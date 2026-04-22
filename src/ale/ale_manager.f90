@@ -2189,6 +2189,9 @@ contains
        
        do concurrent (i = 1:n)
           raw_dist = dist_fields(i, b)
+          if (raw_dist > x2) then
+             this%base_shapes(b)%x(i, 1, 1, 1) = 0.0_rp
+          else
           
           ! Calculate how much this body owns this gll grid
           ownership = (1.0_rp / (raw_dist**2 + NEKO_EPS)) / idw_sum_field(i)
