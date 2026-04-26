@@ -485,9 +485,10 @@ contains
   end subroutine chkp_add_ale
 
   !> Add FSI kinematics to checkpointing
-  subroutine chkp_add_fsi(this, disp_rel, body_vel, body_vel_lag, moving_frame_presc_vel)
+  subroutine chkp_add_fsi(this, disp_rel, body_vel, body_vel_lag, &
+       moving_frame_presc_vel)
     class(chkp_t), intent(inout) :: this
-    ! Note the 'target' attribute here allows it to accept allocatable arrays
+
     real(kind=rp), target, intent(in) :: disp_rel(:)
     real(kind=rp), target, intent(in) :: body_vel(:)
     real(kind=rp), target, intent(in) :: body_vel_lag(:,:)
