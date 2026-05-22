@@ -96,6 +96,10 @@ module fluid_pnpn
 
   type, public, extends(fluid_scheme_incompressible_t) :: fluid_pnpn_t
 
+     !> Number of schwarz-like iterations to perform each time step.
+     !! Set to 0 for no iterations.
+     integer :: schwarz_iterations = 0
+
      !> The right-hand sides in the linear solves.
      type(field_t) :: p_res, u_res, v_res, w_res
 
@@ -472,6 +476,10 @@ contains
             this%ale%global_basis_vel_lag)
     end if
 
+    !> Set the number of schwarz iterations to perform each time step.
+    call json_get_or_default(params, 'case.fluid.schwarz_iterations', &
+         this%schwarz_iterations, 0)
+
     call neko_log%end_section()
 
   end subroutine fluid_pnpn_init
@@ -717,6 +725,12 @@ contains
     logical :: is_greens
     integer :: n
     type(ksp_monitor_t) :: ksp_results(4)
+    integer :: iter
+
+    type(file_t) :: dump_file
+    class(bc_t), pointer :: bc_i
+    type(non_normal_t), pointer :: bc_j
+
     type(projection_t), intent(inout), optional :: proj_prs_green
     type(projection_vel_t), intent(inout), optional :: proj_vel_green
     if (this%freeze) return
@@ -856,51 +870,60 @@ contains
          call wlag%update()
       end if
 
-      ! BCs application
-      if (is_greens) then
-         ! Green's Mode
-         !  - Inlet/Stationary Wall = 0.0 (Zero Dirichlet)
-         !  - Moving Wall = Mesh Velocity (No Slip with is_moving=true)
-         call this%bc_apply_green_vel(time)
-         call this%bc_apply_green_prs(time)
 
-      else
-         ! Standard Mode
-         call this%bc_apply_vel(time, strong = .true.)
-         call this%bc_apply_prs(time)
-      end if
       call this%update_material_properties(time)
 
-      ! Compute pressure residual.
-      call profiler_start_region('Pressure_residual', 18)
-      call prs_res%compute(p, p_res, u, v, w, u_e, v_e, w_e, &
-           f_x, f_y, f_z, c_Xh, gs_Xh, &
+      do iter = 1, 1 + this%schwarz_iterations
+
+         ! BCs application
+         if (is_greens) then
+            ! Green's Mode
+            !  - Inlet/Stationary Wall = 0.0 (Zero Dirichlet)
+            !  - Moving Wall = Mesh Velocity (No Slip with is_moving=true)
+            call this%bc_apply_green_vel(time)
+            call this%bc_apply_green_prs(time)
+         else
+            ! Standard Mode
+            call this%bc_apply_vel(time, strong = .true.)
+            call this%bc_apply_prs(time)
+         end if
+
+         ! Compute pressure residual.
+         call profiler_start_region('Pressure_residual', 18)
+         call prs_res%compute(p, p_res,&
+           u, v, w, &
+           u_e, v_e, w_e, &
+           f_x, f_y, f_z, &
+           c_Xh, gs_Xh, &
            this%bc_prs_surface, this%bc_sym_surface,&
            Ax_prs, ext_bdf%diffusion_coeffs%x(1), dt, &
            mu_tot, rho, event)
 
+         ! De-mean the pressure residual when no strong pressure boundaries present
+         if (.not. this%prs_dirichlet .and. NEKO_BCKND_DEVICE .eq. 1) then
+            call device_ortho(p_res%x_d, this%glb_n_points, n)
+         else if (.not. this%prs_dirichlet) then
+            call ortho(p_res%x, this%glb_n_points, n)
+         end if
+
+         call gs_Xh%op(p_res, GS_OP_ADD, event)
+         call device_event_sync(event)
+
+         ! Set the residual to zero at strong pressure boundaries.
+         call this%bclst_dp%apply_scalar(p_res%x, p%dof%size(), time)
 
 
-      ! De-mean the pressure residual when no strong pressure boundaries present
-      if (.not. this%prs_dirichlet .and. NEKO_BCKND_DEVICE .eq. 1) then
-         call device_ortho(p_res%x_d, this%glb_n_points, n)
-      else if (.not. this%prs_dirichlet) then
-         call ortho(p_res%x, this%glb_n_points, n)
-      end if
+         call profiler_end_region('Pressure_residual', 18)
 
-      call gs_Xh%op(p_res, GS_OP_ADD, event)
-      call device_event_sync(event)
+         ! Solve Stokes System
+         call this%solve_stokes_step(time, dt_controller, ksp_results, &
+              greens_function=is_greens, proj_prs_green=proj_prs_green,&
+              proj_vel_green=proj_vel_green)
 
-      ! Set the residual to zero at strong pressure boundaries.
-      call this%bclst_dp%apply_scalar(p_res%x, p%dof%size(), time)
-
-
-      call profiler_end_region('Pressure_residual', 18)
-
-      ! Solve Stokes System
-      call this%solve_stokes_step(time, dt_controller, ksp_results, &
-           greens_function=is_greens, proj_prs_green=proj_prs_green,&
-           proj_vel_green=proj_vel_green)
+         call fluid_step_info(time, ksp_results, &
+              this%full_stress_formulation, this%strict_convergence, &
+              this%allow_stabilization)
+      end do
 
       if (this%forced_flow_rate) then
          ! Horrible mu hack?!
@@ -919,11 +942,6 @@ contains
       (.not. skip_ale_mesh_vel_update)) then
          call this%ale%update_mesh_velocity(c_Xh, time)
       end if
-
-      call fluid_step_info(time, ksp_results, &
-           this%full_stress_formulation, this%strict_convergence, &
-           this%allow_stabilization)
-
     end associate
     call profiler_end_region('Fluid', 1)
   end subroutine fluid_pnpn_step_ext
@@ -1114,9 +1132,9 @@ contains
        end do
 
        if (this%ale%active .and. (.not. this%ale%has_moving_boundary)) then
-          call neko_error("Case file error: ALE is active, &
-          &but no moving wall was found. " // &
-                  "Use type = 'no_slip' with 'moving': true in case file.")
+          call neko_error("Case file error: ALE is active, " // &
+               "but no moving wall was found. " // &
+               "Use type = 'no_slip' with 'moving': true in case file.")
        end if
 
        ! Make sure all labeled zones with non-zero size have been marked
