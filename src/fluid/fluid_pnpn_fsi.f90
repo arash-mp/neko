@@ -532,7 +532,7 @@ contains
     call neko_log%message("---------FSI Results----------")
 
     if (this%res_long_print) then
-       fmt_res = '(A, I0, A, ES17.10, A, A, A, 3(ES22.15, :, 2X))'
+       fmt_res = '(A, I0, A, ES23.15, A, A, A, 3(ES22.15, :, 2X))'
     else
        fmt_res = '(A, I0, A, ES17.10, A, A, A, 3(ES17.10, :, 2X))'
     end if
