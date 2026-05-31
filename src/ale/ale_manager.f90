@@ -1743,7 +1743,7 @@ contains
        roll_deg = atan2(R(3,2), R(3,3)) * rad_to_deg
 
        ! Log Rotation Angles (Roll, Pitch, Yaw) -> (X, Y, Z)
-       write(log_buf, '(A, I0, A, ES13.6, A, A, A, 3(ES17.10, :, 2X))') &
+       write(log_buf, '(A, I0, A, ES23.15, A, A, A, 3(ES17.10, :, 2X))') &
             "Total_Rot_deg    ", time%tstep, "  ", time%t, "  ", &
             trim(this%config%bodies(idx)%name), "  ", &
             roll_deg, pitch_deg, yaw_deg
@@ -1791,14 +1791,14 @@ contains
        pivot_vel = this%ale_pivot(idx)%vel
 
        ! Pivot Position
-       write(log_buf, '(A, I0, A, ES13.6, A, A, A, 3(ES17.10, :, 2X))') &
+       write(log_buf, '(A, I0, A, ES23.15, A, A, A, 3(ES17.10, :, 2X))') &
             "Total_Pivot_pos  ", time%tstep, "  ", time%t, "  ", &
             trim(this%config%bodies(idx)%name), "  ", &
             this%ale_pivot(idx)%pos
        call neko_log%message(trim(log_buf))
 
        ! Pivot Velocity
-       write(log_buf, '(A, I0, A, ES13.6, A, A, A, 3(ES17.10, :, 2X))') &
+       write(log_buf, '(A, I0, A, ES23.15, A, A, A, 3(ES17.10, :, 2X))') &
             "Total_Pivot_vel  ", time%tstep, "  ", time%t, "  ", &
             trim(this%config%bodies(idx)%name), "  ", &
             this%ale_pivot(idx)%vel
