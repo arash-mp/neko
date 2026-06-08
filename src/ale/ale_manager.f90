@@ -1057,8 +1057,8 @@ contains
     !> Rows 1-3: Trans, Rows 4-6: Ang
     real(kind=rp), intent(inout), optional :: out_prescribed_vels(:,:)
     integer :: i, k, op_mode
-    type(body_kinematics_t) :: kin
-    real(kind=rp) :: rot_mat(3,3), rot_center(3)
+    type(body_kinematics_t) :: current_kin
+    real(kind=rp) :: rot_mat(3,3), initial_rot_center(3)
     logical :: is_override
     integer :: override_idx, n_overrides
     character(len=1024) :: log_buf
@@ -1096,54 +1096,54 @@ contains
           end do
        end if
 
-       kin%vel_trans = 0.0_rp
-       kin%vel_ang   = 0.0_rp
+       current_kin%vel_trans = 0.0_rp
+       current_kin%vel_ang = 0.0_rp
 
        if (op_mode == 0 .or. op_mode == 2) then
           ! Calculate Prescribed Motion
-          call compute_body_kinematics_built_in(kin, this%config%bodies(i), time_s)
+          call compute_body_kinematics_built_in(current_kin, this%config%bodies(i), time_s)
           ! Apply user hook for rigid body.
           if (associated(this%user_ale_rigid_kinematics)) then
              call this%user_ale_rigid_kinematics(this%config%bodies(i)%id, &
-                  time_s, kin%vel_trans, kin%vel_ang)
+                  time_s, current_kin%vel_trans, current_kin%vel_ang)
           end if
        elseif (op_mode == 1) then
           ! Base velocity is zero.
           ! Only the override below will add motion.
-          kin%vel_trans = 0.0_rp
-          kin%vel_ang   = 0.0_rp
+          current_kin%vel_trans = 0.0_rp
+          current_kin%vel_ang = 0.0_rp
        end if
        
        ! output prescribed velocities for FSI if needed.
        if ( (is_override .and. (op_mode == 0 .or. op_mode == 2) ) &
             .and. present(out_prescribed_vels)) then
-             out_prescribed_vels(1:3, override_idx) = kin%vel_trans
-             out_prescribed_vels(4:6, override_idx) = kin%vel_ang
+             out_prescribed_vels(1:3, override_idx) = current_kin%vel_trans
+             out_prescribed_vels(4:6, override_idx) = current_kin%vel_ang
         endif
 
        ! Apply Override (Superposition)
        if (is_override .and. (.not. op_mode == 2)) then
           if (present(override_trans)) &
-             kin%vel_trans = kin%vel_trans + override_trans(:, override_idx)           
+             current_kin%vel_trans = current_kin%vel_trans + override_trans(:, override_idx)
           if (present(override_ang)) &
-             kin%vel_ang = kin%vel_ang + override_ang(:, override_idx)
+             current_kin%vel_ang = current_kin%vel_ang + override_ang(:, override_idx)
        end if
 
        if (.not. op_mode == 2) then
-          kin%center = this%ale_pivot(i)%pos
-          this%ale_pivot(i)%vel = kin%vel_trans
-          this%body_kin(i)%center = kin%center
-          this%body_kin(i)%vel_trans = kin%vel_trans
-          this%body_kin(i)%vel_ang = kin%vel_ang      
+          current_kin%center = this%ale_pivot(i)%pos
+          this%ale_pivot(i)%vel = current_kin%vel_trans
+          this%body_kin(i)%center = current_kin%center
+          this%body_kin(i)%vel_trans = current_kin%vel_trans
+          this%body_kin(i)%vel_ang = current_kin%vel_ang
 
           call this%compute_rotation_matrix(i, time_s)
           rot_mat = this%body_rot_matrices(:,:,i)
-          rot_center = this%config%bodies(i)%rot_center
+          initial_rot_center = this%config%bodies(i)%rot_center
 
           ! Accumulate contribution from each body and add to mesh velocity
           call add_kinematics_to_mesh_velocity(this%wm_x, this%wm_y, &
                this%wm_z, this%x_ref, this%y_ref, this%z_ref , &
-               this%base_shapes(i), coef, kin, rot_mat, rot_center)
+               this%base_shapes(i), coef, current_kin, rot_mat, initial_rot_center)
 
           ! For checkpointing
           call this%prep_checkpoint(i)
