@@ -549,18 +549,19 @@ contains
     type(time_state_t), intent(in) :: time
     class(bc_t), pointer :: b
     integer :: i
+    b => null()
 
     call this%bcs_vel_green%apply_vector(this%u%x, this%v%x, this%w%x, &
          this%dm_Xh%size(), time, strong=.true.)
 
-    call rotate_cyc(this%u%x, this%v%x, this%w%x, 1, this%c_Xh)
+    call rotate_cyc(this%u, this%v, this%w, 1, this%c_Xh)
     call this%gs_Xh%op(this%u, GS_OP_MIN, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
     call this%gs_Xh%op(this%v, GS_OP_MIN, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
     call this%gs_Xh%op(this%w, GS_OP_MIN, glb_cmd_event)
     call device_event_sync(glb_cmd_event)
-    call rotate_cyc(this%u%x, this%v%x, this%w%x, 0, this%c_Xh)
+    call rotate_cyc(this%u, this%v, this%w, 0, this%c_Xh)
 
     call this%bcs_vel_green%apply_vector(this%u%x, this%v%x, this%w%x, &
          this%dm_Xh%size(), time, strong=.true.)
@@ -574,15 +575,11 @@ contains
     call device_event_sync(glb_cmd_event)
     call rotate_cyc(this%u%x, this%v%x, this%w%x, 0, this%c_Xh)
 
-    if (NEKO_BCKND_DEVICE .eq. 1) then
-          call this%bcs_vel_green%apply_vector_device(this%u%x_d, &
-               this%v%x_d, this%w%x_d, time, strong=.true.)
-    end if
-    
     do i = 1, this%bcs_vel_green%size()
        b => this%bcs_vel_green%get(i)
        b%updated = .false.
     end do
+    nullify(b)
   end subroutine fluid_scheme_bc_apply_green_vel
 
 
@@ -592,6 +589,7 @@ contains
     type(time_state_t), intent(in) :: time
     integer :: i
     class(bc_t), pointer :: b
+    b => null()
 
     call this%bcs_prs_green%apply(this%p, time)
 
@@ -607,6 +605,7 @@ contains
        b => this%bcs_prs_green%get(i)
        b%updated = .false.
     end do
+    nullify(b)
   end subroutine fluid_scheme_bc_apply_green_prs
 
   !> Initialize a linear solver
