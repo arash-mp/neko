@@ -33,7 +33,7 @@ contains
         u_g, v_g, w_g, p_g, res_long_print, gravity_vec, &
         proj_prs_green, proj_vel_green, global_disp_rel, &
         global_body_vel, global_body_vel_lag, &
-        global_moving_frame_presc_vel)
+        global_moving_frame_presc_vel, weak_coupling)
 
     ! Inputs needed for setup
     type(json_file), target, intent(inout) :: params
@@ -62,6 +62,7 @@ contains
     logical :: fsi_pr_projection_reorthogonalize_basis
     real(kind=rp), intent(out) :: gravity_vec(3)
     logical, intent(out) :: res_long_print
+    logical, intent(out) :: weak_coupling
 
     type(json_file) :: body_sub
     integer :: i, j, k, m, n_bodies
@@ -94,6 +95,21 @@ contains
        call json_get_or_default(params, 'case.fluid.fsi.long_print', long_print, .false.)
        call json_get_or_default(params, 'case.fluid.fsi.results_long_print', res_long_print, .false.)
        call json_get_or_default(params, 'force_scale', force_scale, 1.0_rp)
+       call json_get_or_default(params, 'case.fluid.fsi.weak_coupling', weak_coupling, .false.)
+
+       if (.not. weak_coupling) then
+          call neko_log%message(" ")
+          call neko_log%message("--------------------------------------------")
+          call neko_log%message("FSI Coupling: Strong Coupling (Implicit FSI)")
+          call neko_log%message("--------------------------------------------")
+          call neko_log%message(" ")
+       else
+          call neko_log%message(" ")
+          call neko_log%message("------------------------------------------")
+          call neko_log%message("FSI Coupling: Weak Coupling (Explicit FSI)")
+          call neko_log%message("------------------------------------------")
+          call neko_log%message(" ")
+       end if
 
        call json_get_or_default(params, &
               'case.fluid.fsi.pressure_solver.projection_space_size', &

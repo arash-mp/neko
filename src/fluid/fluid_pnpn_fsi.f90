@@ -38,6 +38,7 @@ module fluid_pnpn_fsi
 
   type, public, extends(fluid_pnpn_t) :: fluid_pnpn_fsi_t
      logical :: if_fsi = .false.
+     logical :: weak_coupling = .false.
      logical :: res_long_print = .false.
      real(kind=rp) :: gravity_vec(3) = 0.0_rp
 
@@ -114,7 +115,7 @@ contains
          this%u_g, this%v_g, this%w_g, this%p_g, &
          this%res_long_print, this%gravity_vec, this%proj_prs_green, this%proj_vel_green, this%global_disp_rel, &
          this%global_body_vel, this%global_body_vel_lag, &
-         this%global_moving_frame_presc_vel)
+         this%global_moving_frame_presc_vel, this%weak_coupling)
 
     call this%chkp%add_fsi(this%global_disp_rel, this%global_body_vel, &
          this%global_body_vel_lag, &
@@ -214,26 +215,25 @@ contains
              dt * ab_coeffs(1) * this%fsi_bodies(i)%body_vel
        do j = 2, nadv
           this%fsi_bodies(i)%disp_rel = this%fsi_bodies(i)%disp_rel + &
-                dt * ab_coeffs(j) * this%fsi_bodies(i)%body_vel_lag(:, j)
+               dt * ab_coeffs(j) * this%fsi_bodies(i)%body_vel_lag(:, j)
        end do
     end do
 
-
     call this%calc_fsi_terms(time, beta, nadv)
-
 
     ! Standard fluid step
     start_time_s = MPI_WTIME()
 
     ! Fluid standard step, using final velocity from previous step,
     ! which includes the FSI correction and prescribed motions.
-    ! We advance the mesh only "here".
+    ! We advance the mesh only here.
     ! Also, we skip mesh update inside the fluid step here.
-    call this%step_ext(time, dt_controller, greens_function=.false., &
-         skip_ale_msh_vel_update=.true.)
+    call this%step_ext(time, dt_controller, greens_function = .false., &
+         skip_ale_msh_vel_update = .true.)
     end_time_s = MPI_WTIME()
     step_time_s = end_time_s - start_time_s
     total_elapsed_s = total_elapsed_s + step_time_s
+
     write(msg, '(A, E15.7, A, I0, A, E15.7)') "Standard step time (s):  ",&
          step_time_s, "  Step: ", time%tstep, "  time: ", time%t
     call neko_log%message(trim(msg))
@@ -260,83 +260,86 @@ contains
        end do
     end do
 
-    ! Green's Function Loop
-    do j = 1, this%nbodies_fsi
-       do k = 1, 6
+    ! Skip Green's function if weak_coupling is true
+    if (.not. this%weak_coupling) then
+       ! Green's Function Loop
+       do j = 1, this%nbodies_fsi
+          do k = 1, 6
+             ! Solve Green's function for active DOFs only.
+             col_g = this%fsi_dof_map(j, k)
+             if (col_g == 0) cycle
 
-          ! Solve Green's function for active DOFs only.
-          col_g = this%fsi_dof_map(j, k)
-          if (col_g == 0) cycle
+             ! Use the last impulse response fields for initial guess.
+             call field_copy(this%u, this%u_g(col_g))
+             call field_copy(this%v, this%v_g(col_g))
+             call field_copy(this%w, this%w_g(col_g))
+             call field_copy(this%p, this%p_g(col_g))
 
-          ! Use the last impulse response fields for initial guess.
-          call field_copy(this%u, this%u_g(col_g))
-          call field_copy(this%v, this%v_g(col_g))
-          call field_copy(this%w, this%w_g(col_g))
-          call field_copy(this%p, this%p_g(col_g))
+             ! Setup Perturbation
+             this%batch_ids(1) = this%fsi_bodies(j)%ale_id
+             this%batch_trans(:,1) = 0.0_rp
+             this%batch_ang(:,1) = 0.0_rp
 
-          ! Setup Perturbation
-          this%batch_ids(1) = this%fsi_bodies(j)%ale_id
-          this%batch_trans(:,1) = 0.0_rp
-          this%batch_ang(:,1) = 0.0_rp
+             if (k <= 3) then
+                ! transaltional DOF
+                this%batch_trans(k, 1) = 1.0_rp
+             else
+               ! rotational DOF
+                this%batch_ang(k-3, 1) = 1.0_rp
+             end if
 
-          if (k <= 3) then
-             ! transaltional DOF
-             this%batch_trans(k, 1) = 1.0_rp
-          else
-             ! rotational DOF
-             this%batch_ang(k-3, 1) = 1.0_rp
-          end if
+             ! Mode 1: Set rigid body vels to zero, then apply impulse.
+             call this%ale%update_mesh_velocity(this%c_Xh, time, &
+                  override_ids = this%batch_ids(1:1), &
+                  override_trans = this%batch_trans(:,1:1), &
+                  override_ang = this%batch_ang(:,1:1), &
+                  mode = 1)
 
-          ! Mode 1: Set rigid body vels to zero, then apply impulse.
-          call this%ale%update_mesh_velocity(this%c_Xh, time, &
-                override_ids = this%batch_ids(1:1), &
-                override_trans = this%batch_trans(:,1:1), &
-                override_ang = this%batch_ang(:,1:1), &
-                mode = 1)
+             start_time_g = MPI_WTIME()
+             call this%step_ext(time, dt_controller, greens_function = .true., &
+                  skip_ale_msh_vel_update = .true., proj_prs_green = this%proj_prs_green(col_g), &
+                  proj_vel_green = this%proj_vel_green(col_g))
 
-          start_time_g = MPI_WTIME()
+             end_time_g = MPI_WTIME()
+             step_time_g = end_time_g - start_time_g
+             total_elapsed_g = total_elapsed_g + step_time_g
 
-          call this%step_ext(time, dt_controller, greens_function=.true., &
-                skip_ale_msh_vel_update=.true., proj_prs_green = this%proj_prs_green(col_g), &
-                proj_vel_green = this%proj_vel_green(col_g))
+             write(msg, '(A, E15.7, A, I0, A, E15.7)') &
+                  "Green's step time (s):  ", step_time_g, "  Step: ", time%tstep, "  time: ", time%t
+             call neko_log%message(trim(msg))
+             call neko_log%message(' ')
 
-          end_time_g = MPI_WTIME()
-          step_time_g = end_time_g - start_time_g
-          total_elapsed_g = total_elapsed_g + step_time_g
+             ! Save Green's function response.
+             call field_copy(this%u_g(col_g), this%u)
+             call field_copy(this%v_g(col_g), this%v)
+             call field_copy(this%w_g(col_g), this%w)
+             call field_copy(this%p_g(col_g), this%p)
 
-
-          write(msg, '(A, E15.7, A, I0, A, E15.7)') &
-                "Green's step time (s):  "&
-                , step_time_g, "  Step: ", time%tstep, "  time: ", time%t
-          call neko_log%message(trim(msg))
-          call neko_log%message(' ')
-          ! Save Green's function response.
-          call field_copy(this%u_g(col_g), this%u)
-          call field_copy(this%v_g(col_g), this%v)
-          call field_copy(this%w_g(col_g), this%w)
-          call field_copy(this%p_g(col_g), this%p)
-
-          ! Fill M matrix with Impulse forces/tourques (F_g)
-          ! Here, we add the cross-coupling forces on all bodies, on all DOFs.
-          do i = 1, this%nbodies_fsi
-             call this%fsi_bodies(i)%force_monitor%compute_(time)
-             do k_row = 1, 6
-                row_g = this%fsi_dof_map(i, k_row)
-                if (row_g > 0) then
-                   if (k_row <= 3) then
-                      this%M_global(row_g, col_g) = &
-                       this%M_global(row_g, col_g) - &
-                       this%fsi_bodies(i)%force_monitor%total_force(k_row)
-                   else
-                      this%M_global(row_g, col_g) = &
-                       this%M_global(row_g, col_g) - &
-                       this%fsi_bodies(i)%force_monitor%total_torque(k_row-3)
+             ! Fill M matrix with Impulse forces/tourques (F_g)
+             ! Here, we add the cross-coupling forces on all bodies, on all DOFs.
+             do i = 1, this%nbodies_fsi
+                call this%fsi_bodies(i)%force_monitor%compute_(time)
+                do k_row = 1, 6
+                   row_g = this%fsi_dof_map(i, k_row)
+                   if (row_g > 0) then
+                      if (k_row <= 3) then
+                         this%M_global(row_g, col_g) = &
+                          this%M_global(row_g, col_g) - &
+                          this%fsi_bodies(i)%force_monitor%total_force(k_row)
+                      else
+                         this%M_global(row_g, col_g) = &
+                          this%M_global(row_g, col_g) - &
+                          this%fsi_bodies(i)%force_monitor%total_torque(k_row-3)
+                      end if
                    end if
-                end if
+                end do
              end do
           end do
        end do
-    end do
+    else
+       call neko_log%message("Weak coupling enabled: Skipping Green's function fluid feedback.")
+       step_time_g = 0.0_dp
+    end if
 
     call neko_log%message(' ')
     write(msg, '(A, E15.7, A, I0, A, E15.7)') &
@@ -352,29 +355,30 @@ contains
     ! Calculate all FSI corrections: M_global * X_sol = B_global
     if (this%total_active_dofs > 0) then
        call linsolve_dense(this%total_active_dofs, this%M_global, &
-             this%B_global, this%X_sol)
+            this%B_global, this%X_sol)
     end if
 
-    ! Restore Standard Fields
+    ! Restore standard fields (this is the final state for weak coupling)
     call field_copy(this%u, this%u_s)
     call field_copy(this%v, this%v_s)
     call field_copy(this%w, this%w_s)
     call field_copy(this%p, this%p_s)
 
-    ! Add FSI correction to the solution
+    ! Add FSI correction to the fluid solution only if strong coupling
     ! u = u_s + sum( X_sol(k) * u_g(k) )
-    if (this%total_active_dofs > 0) then
-       do idx_g = 1, this%total_active_dofs
-          call field_add2s2(this%u, this%u_g(idx_g), this%X_sol(idx_g), n)
-          call field_add2s2(this%v, this%v_g(idx_g), this%X_sol(idx_g), n)
-          call field_add2s2(this%w, this%w_g(idx_g), this%X_sol(idx_g), n)
-          call field_add2s2(this%p, this%p_g(idx_g), this%X_sol(idx_g), n)
-       end do
+    if (.not. this%weak_coupling) then
+       if (this%total_active_dofs > 0) then
+          do idx_g = 1, this%total_active_dofs
+             call field_add2s2(this%u, this%u_g(idx_g), this%X_sol(idx_g), n)
+             call field_add2s2(this%v, this%v_g(idx_g), this%X_sol(idx_g), n)
+             call field_add2s2(this%w, this%w_g(idx_g), this%X_sol(idx_g), n)
+             call field_add2s2(this%p, this%p_g(idx_g), this%X_sol(idx_g), n)
+          end do
+       end if
     end if
 
-
+    ! Structure Update
     do i = 1, this%nbodies_fsi
-
        do k = 1, 6
           row_g = this%fsi_dof_map(i, k)
           if (row_g > 0) then
@@ -383,6 +387,7 @@ contains
                   this%fsi_bodies(i)%body_vel_lag(k, 1)
           end if
        end do
+
        ! Update History
        do k = nadv, 2, -1
           this%fsi_bodies(i)%body_vel_lag(:, k) = &
@@ -394,8 +399,6 @@ contains
        this%batch_ids(i) = this%fsi_bodies(i)%ale_id
        this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
        this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
-
-
     end do
 
     ! Calculate Final Velocity (FSI + Prescribed)
@@ -411,7 +414,6 @@ contains
        this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
             this%temp_prescribed_vels(:, i)
     end do
-
 
     call fsi_prep_checkpoint(this%nbodies_fsi, this%fsi_bodies, this%global_disp_rel, &
          this%global_body_vel, this%global_body_vel_lag, &
@@ -445,19 +447,25 @@ contains
           call this%v_g(k)%free()
           call this%w_g(k)%free()
           call this%p_g(k)%free()
+       end do
+       deallocate(this%u_g, this%v_g, this%w_g, this%p_g)
+    end if
+
+    if (allocated(this%proj_prs_green)) then
+       do k = 1, this%total_active_dofs
           call this%proj_prs_green(k)%free()
           call this%proj_vel_green(k)%free()
        end do
-       deallocate(this%u_g, this%v_g, this%w_g, this%p_g)
        deallocate(this%proj_prs_green)
        deallocate(this%proj_vel_green)
-
     end if
+
     if (allocated(this%batch_ids)) deallocate(this%batch_ids)
     if (allocated(this%batch_trans)) deallocate(this%batch_trans)
     if (allocated(this%batch_ang)) deallocate(this%batch_ang)
     if (allocated(this%temp_prescribed_vels)) &
          deallocate(this%temp_prescribed_vels)
+
     call this%u_s%free()
     call this%v_s%free()
     call this%w_s%free()
@@ -505,8 +513,8 @@ contains
        this%fsi_bodies(i)%moving_frame_presc_acc = 0.0_rp
        do k = 0, nadv
           this%fsi_bodies(i)%moving_frame_presc_acc = &
-              this%fsi_bodies(i)%moving_frame_presc_acc + &
-              (beta(k) * this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
+               this%fsi_bodies(i)%moving_frame_presc_acc + &
+               (beta(k) * this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
        end do
     end do
 
