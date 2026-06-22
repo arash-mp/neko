@@ -33,7 +33,7 @@
 !> Gather-scatter
 module gather_scatter
   use neko_config, only : NEKO_BCKND_DEVICE, NEKO_BCKND_SX, NEKO_BCKND_HIP, &
-       NEKO_BCKND_CUDA, NEKO_BCKND_OPENCL, NEKO_DEVICE_MPI
+       NEKO_BCKND_CUDA, NEKO_BCKND_OPENCL, NEKO_BCKND_METAL, NEKO_DEVICE_MPI
   use gs_bcknd, only : gs_bcknd_t, GS_BCKND_CPU, GS_BCKND_SX, GS_BCKND_DEV
   use gs_device, only : gs_device_t
   use gs_sx, only : gs_sx_t
@@ -61,8 +61,8 @@ module gather_scatter
   use utils, only : neko_error, linear_index
   use logger, only : neko_log, LOG_SIZE
   use profiler, only : profiler_start_region, profiler_end_region
-  use device, only : device_memcpy, HOST_TO_DEVICE, device_sync, device_free, &
-       device_map, device_deassociate
+  use device, only : device_memcpy, HOST_TO_DEVICE, device_sync, device_map, &
+       device_unmap
   use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR
   !$ use omp_lib, only : omp_get_thread_num
   implicit none
@@ -280,6 +280,8 @@ contains
           bcknd_str = '        cuda'
        else if (NEKO_BCKND_OPENCL .eq. 1) then
           bcknd_str = '      opencl'
+       else if (NEKO_BCKND_METAL .eq. 1) then
+          bcknd_str = '       metal'
        end if
     case (GS_BCKND_SX)
        allocate(gs_sx_t::gs%bcknd)
@@ -327,8 +329,7 @@ contains
                    strtgy_time(i) = (MPI_Wtime() - strtgy_time(i)) / 100d0
                 end do
 
-                call device_deassociate(tmp)
-                call device_free(tmp_d)
+                call device_unmap(tmp, tmp_d)
                 deallocate(tmp)
 
                 c%nb_strtgy = strtgy(minloc(strtgy_time, 1))
