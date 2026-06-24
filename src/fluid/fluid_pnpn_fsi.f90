@@ -113,7 +113,8 @@ contains
          this%total_active_dofs, &
          this%M_global, this%B_global, this%X_sol, &
          this%u_g, this%v_g, this%w_g, this%p_g, &
-         this%res_long_print, this%gravity_vec, this%proj_prs_green, this%proj_vel_green, this%global_disp_rel, &
+         this%res_long_print, this%gravity_vec, this%proj_prs_green, &
+         this%proj_vel_green, this%global_disp_rel, &
          this%global_body_vel, this%global_body_vel_lag, &
          this%global_moving_frame_presc_vel, this%weak_coupling)
 
@@ -234,7 +235,7 @@ contains
     step_time_s = end_time_s - start_time_s
     total_elapsed_s = total_elapsed_s + step_time_s
 
-    write(msg, '(A, E15.7, A, I0, A, E15.7)') "Standard step time (s):  ",&
+    write(msg, '(A, E15.7, A, I0, A, E15.7)') "Standard step time (s):  ", &
          step_time_s, "  Step: ", time%tstep, "  time: ", time%t
     call neko_log%message(trim(msg))
     call neko_log%message(' ')
@@ -245,7 +246,7 @@ contains
     call field_copy(this%w_s, this%w)
     call field_copy(this%p_s, this%p)
 
-    ! Compute fluid forces/tourques
+    ! Compute fluid forces/torques
     do i = 1, this%nbodies_fsi
        call this%fsi_bodies(i)%force_monitor%compute_(time)
        F_fluid(1:3) = this%fsi_bodies(i)%force_monitor%total_force
@@ -297,7 +298,8 @@ contains
 
              start_time_g = MPI_WTIME()
              call this%step_ext(time, dt_controller, greens_function = .true., &
-                  skip_ale_msh_vel_update = .true., proj_prs_green = this%proj_prs_green(col_g), &
+                  skip_ale_msh_vel_update = .true., &
+                  proj_prs_green = this%proj_prs_green(col_g), &
                   proj_vel_green = this%proj_vel_green(col_g))
 
              end_time_g = MPI_WTIME()
@@ -305,7 +307,8 @@ contains
              total_elapsed_g = total_elapsed_g + step_time_g
 
              write(msg, '(A, E15.7, A, I0, A, E15.7)') &
-                  "Green's step time (s):  ", step_time_g, "  Step: ", time%tstep, "  time: ", time%t
+                  "Green's step time (s):  ", step_time_g, "  Step: ", &
+                  time%tstep, "  time: ", time%t
              call neko_log%message(trim(msg))
              call neko_log%message(' ')
 
@@ -315,7 +318,7 @@ contains
              call field_copy(this%w_g(col_g), this%w)
              call field_copy(this%p_g(col_g), this%p)
 
-             ! Fill M matrix with Impulse forces/tourques (F_g)
+             ! Fill M matrix with Impulse forces/torques (F_g)
              ! Here, we add the cross-coupling forces on all bodies, on all DOFs.
              do i = 1, this%nbodies_fsi
                 call this%fsi_bodies(i)%force_monitor%compute_(time)
@@ -324,12 +327,12 @@ contains
                    if (row_g > 0) then
                       if (k_row <= 3) then
                          this%M_global(row_g, col_g) = &
-                          this%M_global(row_g, col_g) - &
-                          this%fsi_bodies(i)%force_monitor%total_force(k_row)
+                              this%M_global(row_g, col_g) - &
+                              this%fsi_bodies(i)%force_monitor%total_force(k_row)
                       else
                          this%M_global(row_g, col_g) = &
-                          this%M_global(row_g, col_g) - &
-                          this%fsi_bodies(i)%force_monitor%total_torque(k_row-3)
+                              this%M_global(row_g, col_g) - &
+                              this%fsi_bodies(i)%force_monitor%total_torque(k_row-3)
                       end if
                    end if
                 end do
@@ -352,7 +355,9 @@ contains
     call neko_log%message(trim(msg))
     call neko_log%message(' ')
 
-    ! Calculate all FSI corrections: M_global * X_sol = B_global
+    ! Calculate all FSI corrections: M_global * X_sol = B_global.
+    ! With current algorithm, the correction is actually just 
+    ! the velocity change compared to the previous time step.
     if (this%total_active_dofs > 0) then
        call linsolve_dense(this%total_active_dofs, this%M_global, &
             this%B_global, this%X_sol)
@@ -382,7 +387,8 @@ contains
        do k = 1, 6
           row_g = this%fsi_dof_map(i, k)
           if (row_g > 0) then
-             ! Corrected fsi_body velocity
+             ! Corrected fsi_body velocity.
+             ! Note that body_vel_lag(k, 1) = body_vel(k).
              this%fsi_bodies(i)%body_vel(k) = this%X_sol(row_g) + &
                   this%fsi_bodies(i)%body_vel_lag(k, 1)
           end if
@@ -415,9 +421,11 @@ contains
             this%temp_prescribed_vels(:, i)
     end do
 
-    call fsi_prep_checkpoint(this%nbodies_fsi, this%fsi_bodies, this%global_disp_rel, &
-         this%global_body_vel, this%global_body_vel_lag, &
-         this%global_moving_frame_presc_vel)
+    call fsi_prep_checkpoint(this%nbodies_fsi, this%fsi_bodies, &
+              this%global_disp_rel, &
+              this%global_body_vel, &
+              this%global_body_vel_lag, &
+              this%global_moving_frame_presc_vel)
 
     call this%log_fsi_results(time)
     call this%ale%log_pivot(time)
@@ -521,9 +529,11 @@ contains
     ! Here we fill the M_global and B_global
     ! using the contributuon from strucutre and also
     ! bodies' inertial motion from previous time steps.
-    call assemble_structural_inertial_terms(this%nbodies_fsi, this%fsi_bodies, &
+    call assemble_structural_inertial_terms(this%nbodies_fsi, &
+         this%fsi_bodies, &
          this%fsi_dof_map, this%M_global, this%B_global, &
-         this%ale%body_rot_matrices, time, gamma, beta, nadv, this%gravity_vec)
+         this%ale%body_rot_matrices, &
+         time, gamma, beta, nadv, this%gravity_vec)
 
   end subroutine assemble_fsi_structural_inertial_terms
 
@@ -642,7 +652,5 @@ contains
             mode = 0)
     end if
   end subroutine fluid_fsi_restart
-
-
 
 end module fluid_pnpn_fsi
