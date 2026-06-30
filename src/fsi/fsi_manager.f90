@@ -33,7 +33,8 @@ contains
         u_g, v_g, w_g, p_g, res_long_print, gravity_vec, &
         proj_prs_green, proj_vel_green, global_disp_rel, &
         global_body_vel, global_body_vel_lag, &
-        global_moving_frame_presc_vel, weak_coupling)
+        global_moving_frame_presc_vel, weak_coupling, &
+        non_linear_correction_term)
 
     ! Inputs needed for setup
     type(json_file), target, intent(inout) :: params
@@ -63,6 +64,7 @@ contains
     real(kind=rp), intent(out) :: gravity_vec(3)
     logical, intent(out) :: res_long_print
     logical, intent(out) :: weak_coupling
+    logical, intent(out) :: non_linear_correction_term
 
     type(json_file) :: body_sub
     integer :: i, j, k, m, n_bodies
@@ -96,6 +98,7 @@ contains
        call json_get_or_default(params, 'case.fluid.fsi.results_long_print', res_long_print, .false.)
        call json_get_or_default(params, 'force_scale', force_scale, 1.0_rp)
        call json_get_or_default(params, 'case.fluid.fsi.weak_coupling', weak_coupling, .false.)
+       call json_get_or_default(params, 'case.fluid.fsi.non_linear_correction_term', non_linear_correction_term, .false.)
 
        if (.not. weak_coupling) then
           call neko_log%message(" ")
@@ -146,6 +149,8 @@ contains
        write(log_buf, '(A,ES13.6)') ' Force Scale     : ', force_scale
        call neko_log%message(log_buf)
        write(log_buf, '(A,I0)') ' Number of Bodies: ', nbodies_fsi
+       call neko_log%message(log_buf)
+       write(log_buf, '(A,L1)') ' Non-Linear Corr.: ', non_linear_correction_term
        call neko_log%message(log_buf)
        call neko_log%message(' ')
 
@@ -431,6 +436,7 @@ contains
 
           if (allocated(X_sol)) deallocate(X_sol)
           allocate(X_sol(total_active_dofs))
+          X_sol = 0.0_rp
 
           if (allocated(u_g)) deallocate(u_g)
           if (allocated(v_g)) deallocate(v_g)
@@ -529,6 +535,7 @@ contains
        x_out(i) = b(i) / A(i,i)
     end do
   end subroutine linsolve_dense
+  
   !> Flattens FSI body arrays into global 1D/2D arrays for checkpointing
   subroutine fsi_prep_checkpoint(nbodies_fsi, bodies, global_disp_rel, &
        global_body_vel, global_body_vel_lag, &

@@ -2,12 +2,13 @@ module fsi_dynamics
   use force_torque, only : force_torque_t
   use num_types, only : rp
   use time_state, only : time_state_t
-
+  use logger, only : neko_log
   implicit none
   private
 
   public :: assemble_structural_inertial_terms
   public :: apply_parallel_axis_theorem
+  public :: add_fsi_non_linear_matrices
 
   !> single FSI body properties
   type, public :: fsi_body_t
@@ -77,6 +78,7 @@ contains
 
     real(kind=rp) :: M_local(6,6), B_local(6)
     real(kind=rp) :: C_skew(3,3), Wf_skew(3,3), Ws_skew(3,3), I3(3,3)
+!    character(len=2048) :: msg
 
     dt = time%dt
     M_global = 0.0_rp
@@ -125,6 +127,14 @@ contains
        ! Rotate Inertia Tensor and Center of Mass (com) Offset to Global Frame
        I_P = matmul(R_mat, matmul(I_body, R_T))
 
+!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG I_P(1,:): ", I_P(1,1), I_P(1,2), I_P(1,3)
+!       call neko_log%message(trim(msg))
+!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG I_P(2,:): ", I_P(2,1), I_P(2,2), I_P(2,3)
+!       call neko_log%message(trim(msg))
+!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG I_P(3,:): ", I_P(3,1), I_P(3,2), I_P(3,3)
+!       call neko_log%message(trim(msg))
+
+
        ! skew-symmetric matrices for cross-products
        C_skew = skew_tensor(c)
        Wf_skew = skew_tensor(w_f)
@@ -132,13 +142,25 @@ contains
 
        ! BDF-k History terms for acceleration
        V_hist = beta(0) * bodies(i)%body_vel_guess
+
+!       k=0
+!       write(msg, '(A, I0, A, ES23.15)') "beta(", k, ") = ", beta(k)
+!       call neko_log%message(trim(msg))
+
        do k = 1, nadv
           V_hist = V_hist + beta(k)*bodies(i)%body_vel_lag(:, k)
+ !         write(msg, '(A, I0, A, ES23.15)') "beta(", k, ") = ", beta(k)
+ !         call neko_log%message(trim(msg))
        end do
 
        ! History acceleration (Evaluated with current guess)
        a_rel_s = V_hist(1:3) / dt !< Linear acceleration
        alpha_rel_s = V_hist(4:6) / dt !< Angular acceleration
+
+!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG a_rel_s: ", a_rel_s(1), a_rel_s(2), a_rel_s(3)
+!       call neko_log%message(trim(msg))
+!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG alpha_rel_s: ", alpha_rel_s(1), alpha_rel_s(2), alpha_rel_s(3)
+!       call neko_log%message(trim(msg))
 
        ! Initialize local matrices for this body
        M_local = 0.0_rp
@@ -233,6 +255,9 @@ contains
        B_local(4:6) = B_local(4:6) - matmul(I_P, alpha_rel_s)
        M_local(4:6, 4:6) = M_local(4:6, 4:6) + gamma * I_P
 
+!       write(msg, '(A, 3(ES23.15, 1X))') "I_p * alpha_ref: ", matmul(I_P, alpha_rel_s)
+!       call neko_log%message(trim(msg))
+
        ! Torque Term 3: Gyroscopic Rotational Inertia
        B_local(4:6) = B_local(4:6) - matmul(I_P, cross(w_f, w_s))
        M_local(4:6, 4:6) = M_local(4:6, 4:6) + matmul(I_P, Wf_skew)
@@ -290,6 +315,64 @@ contains
     end do
 
   end subroutine assemble_structural_inertial_terms
+  
+  !> Computes and maps the Non-Linear terms for FSI
+  subroutine add_fsi_non_linear_matrices(nbodies_fsi, bodies, fsi_dof_map, &
+       M_global, X_sol, rot_matrices)
+    integer, intent(in) :: nbodies_fsi
+    type(fsi_body_t), intent(in) :: bodies(:)
+    integer, intent(in) :: fsi_dof_map(:,:)
+    real(kind=rp), intent(inout) :: M_global(:,:)
+    real(kind=rp), intent(in) :: X_sol(:)
+    real(kind=rp), intent(in) :: rot_matrices(:,:,:)
+
+    integer :: i, j, k, row_g, col_g
+    real(kind=rp) :: R_mat(3,3), R_T(3,3), I_body(3,3), I_P(3,3)
+    real(kind=rp) :: c(3), d_omega(3)
+    real(kind=rp) :: C_skew(3,3), dW_skew(3,3)
+    real(kind=rp) :: M_local(6,6)
+
+    do i = 1, nbodies_fsi
+       ! Extract d_omega from X_sol
+       d_omega = 0.0_rp
+       do k = 4, 6
+          row_g = fsi_dof_map(i, k)
+          if (row_g .gt. 0) d_omega(k-3) = X_sol(row_g)
+       end do
+
+       ! If no active rotational DOFs or correction is exactly zero, skip
+       if (all(d_omega .eq. 0.0_rp)) cycle
+
+       R_mat = rot_matrices(:,:, bodies(i)%ale_id)
+       R_T = transpose(R_mat)
+       c = matmul(R_mat, bodies(i)%local_offset_com)
+       I_body = bodies(i)%I_body_tensor
+       I_P = matmul(R_mat, matmul(I_body, R_T))
+
+       dW_skew = skew_tensor(d_omega)
+       C_skew = skew_tensor(c)
+
+       M_local = 0.0_rp
+       ! Term 12 Force Non-linear: -m * [dW_skew] * [C_skew]
+       M_local(1:3, 4:6) = -bodies(i)%mass * matmul(dW_skew, C_skew)
+       
+       ! Term 4 Torque Non-linear: + [dW_skew] * I_P
+       M_local(4:6, 4:6) = matmul(dW_skew, I_P)
+
+       ! Map only the modified Non-Linear blocks to M_global
+       do j = 1, 6
+          row_g = fsi_dof_map(i, j)
+          if (row_g .gt. 0) then
+             do k = 4, 6 ! Only columns 4-6 are modified by non-linear rotation terms
+                col_g = fsi_dof_map(i, k)
+                if (col_g .gt. 0) then
+                   M_global(row_g, col_g) = M_global(row_g, col_g) + M_local(j, k)
+                end if
+             end do
+          end if
+       end do
+    end do
+  end subroutine add_fsi_non_linear_matrices
 
   !> Computes the standard 3D cross product of two vectors
   pure function cross(a, b) result(c)

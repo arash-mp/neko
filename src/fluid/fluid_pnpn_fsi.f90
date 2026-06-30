@@ -1,7 +1,8 @@
 module fluid_pnpn_fsi
-  use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms
-  use fsi_manager, only: fsi_manager_init, linsolve_dense, fsi_prep_checkpoint, &
-       fsi_restart_restore
+  use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms, &
+       add_fsi_non_linear_matrices
+  use fsi_manager, only: fsi_manager_init, linsolve_dense, &
+       fsi_prep_checkpoint, fsi_restart_restore
   use fluid_pnpn, only : fluid_pnpn_t
   use force_torque, only : force_torque_t
   use field, only : field_t
@@ -39,6 +40,7 @@ module fluid_pnpn_fsi
   type, public, extends(fluid_pnpn_t) :: fluid_pnpn_fsi_t
      logical :: if_fsi = .false.
      logical :: weak_coupling = .false.
+     logical :: non_linear_correction_term = .false.
      logical :: res_long_print = .false.
      real(kind=rp) :: gravity_vec(3) = 0.0_rp
 
@@ -84,6 +86,8 @@ module fluid_pnpn_fsi
      procedure, pass(this) :: calc_fsi_terms => &
            assemble_fsi_structural_inertial_terms
      procedure, pass(this) :: log_fsi_results => fluid_fsi_log_results
+     procedure, pass(this) :: inquire_frame_prescribed_motion => &
+          fluid_fsi_inquire_frame_prescribed_motion
   end type fluid_pnpn_fsi_t
 
 contains
@@ -116,7 +120,8 @@ contains
          this%res_long_print, this%gravity_vec, this%proj_prs_green, &
          this%proj_vel_green, this%global_disp_rel, &
          this%global_body_vel, this%global_body_vel_lag, &
-         this%global_moving_frame_presc_vel, this%weak_coupling)
+         this%global_moving_frame_presc_vel, this%weak_coupling, &
+         this%non_linear_correction_term)
 
     call this%chkp%add_fsi(this%global_disp_rel, this%global_body_vel, &
          this%global_body_vel_lag, &
@@ -176,6 +181,11 @@ contains
     real(kind=dp), save :: total_elapsed_s = 0.0_dp
     real(kind=dp), save :: total_elapsed_g = 0.0_dp
 
+    ! Fixed-Point Iteration variables
+    real(kind=rp), allocatable :: M_linear(:,:), X_prev(:)
+    real(kind=rp) :: nr_residual
+    integer :: nr_iter, max_nr_iter
+
     dt = time%dt
     n = this%dm_Xh%size()
     nadv = this%ext_bdf%nadv
@@ -220,17 +230,32 @@ contains
        end do
     end do
 
-    call this%calc_fsi_terms(time, beta, nadv)
-
+    ! Add prescribed frame motion terms.
+    ! I should double check if it is the right place to put this. I think it is.
+    ! But, should become sure.
+    call this%inquire_frame_prescribed_motion(time, beta, nadv)
+    
     ! Standard fluid step
     start_time_s = MPI_WTIME()
 
     ! Fluid standard step, using final velocity from previous step,
     ! which includes the FSI correction and prescribed motions.
     ! We advance the mesh only here.
-    ! Also, we skip mesh update inside the fluid step here.
+    ! We should not skip the mesh velocity here, since we need to update the 
+    ! rotation matrix.
+    ! I think I can move compute_rotationm matrics inside advance_mesh. I need to 
+    ! remember if there was any reason that I put it there at first place.
+    ! Calling update_mesh_velocity here should be totally harmless.
     call this%step_ext(time, dt_controller, greens_function = .false., &
-         skip_ale_msh_vel_update = .true.)
+         skip_ale_msh_vel_update = .false.)
+
+    ! Add FSI structural terms at current time step.
+    ! Rotation matrix etc should be updated at this point.
+    ! I moved this after the above step_ext, since the rotation matrix should for 
+    ! the current time step. 
+    ! Need to verify more.
+    call this%calc_fsi_terms(time, beta, nadv)
+
     end_time_s = MPI_WTIME()
     step_time_s = end_time_s - start_time_s
     total_elapsed_s = total_elapsed_s + step_time_s
@@ -356,11 +381,54 @@ contains
     call neko_log%message(' ')
 
     ! Calculate all FSI corrections: M_global * X_sol = B_global.
-    ! With current algorithm, the correction is actually just 
+    ! With current algorithm, the correction is actually just
     ! the velocity change compared to the previous time step.
+    ! In case of non_linear_correction_term, X_sol contains values 
+    ! from the previous time step, 
+    ! providing an initial guess.
     if (this%total_active_dofs > 0) then
-       call linsolve_dense(this%total_active_dofs, this%M_global, &
-            this%B_global, this%X_sol)
+       allocate(M_linear(this%total_active_dofs, this%total_active_dofs))
+       allocate(X_prev(this%total_active_dofs))
+
+       ! Save the linear matrix
+       M_linear = this%M_global 
+       
+       max_nr_iter = 1
+       if (this%non_linear_correction_term) then
+          max_nr_iter = 20
+          call neko_log%message("  --- Fixed-point Iteration ---")
+       end if
+
+       do nr_iter = 1, max_nr_iter
+          ! Reset matrix to linear base
+          this%M_global = M_linear
+
+          if (this%non_linear_correction_term) then
+             call add_fsi_non_linear_matrices(this%nbodies_fsi, &
+                  this%fsi_bodies, this%fsi_dof_map, this%M_global, &
+                  this%X_sol, this%ale%body_rot_matrices)
+          end if
+
+          X_prev = this%X_sol
+
+          call linsolve_dense(this%total_active_dofs, this%M_global, &
+               this%B_global, this%X_sol)
+              
+          if (this%non_linear_correction_term) then
+
+             nr_residual = maxval(abs(this%X_sol - X_prev))
+             
+             write(msg, '(A, I2, A, ES13.6)') "    Iter: ", &
+                  nr_iter, " | Max Residual: ", nr_residual
+             call neko_log%message(trim(msg))
+             if (nr_residual < 1e-14_rp) exit
+          end if
+       end do
+       
+       if (this%non_linear_correction_term) call neko_log%message(' ')
+
+       deallocate(M_linear)
+       deallocate(X_prev)
     end if
 
     ! Restore standard fields (this is the final state for weak coupling)
@@ -482,7 +550,7 @@ contains
 
   end subroutine fluid_fsi_free
 
-  subroutine assemble_fsi_structural_inertial_terms(this, time, beta, nadv)
+  subroutine fluid_fsi_inquire_frame_prescribed_motion(this, time, beta, nadv)
     class(fluid_pnpn_fsi_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
     real(kind=rp), intent(in) :: beta(0:3)
@@ -525,6 +593,17 @@ contains
                (beta(k) * this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
        end do
     end do
+  end subroutine fluid_fsi_inquire_frame_prescribed_motion
+
+  subroutine assemble_fsi_structural_inertial_terms(this, time, beta, nadv)
+    class(fluid_pnpn_fsi_t), intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    real(kind=rp), intent(in) :: beta(0:3)
+    real(kind=rp) :: gamma
+    integer, intent(in) :: nadv
+    integer :: i, k
+
+    gamma = beta(0) / time%dt
 
     ! Here we fill the M_global and B_global
     ! using the contributuon from strucutre and also
