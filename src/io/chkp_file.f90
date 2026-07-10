@@ -115,6 +115,13 @@ contains
     real(kind=rp), pointer :: fsi_body_vel(:) => null()
     real(kind=rp), pointer :: fsi_body_vel_lag(:,:) => null()
     real(kind=rp), pointer :: fsi_moving_frame_presc_vel(:,:) => null()
+    type(field_t), pointer :: fsi_subiter_mesh_x_lag(:) => null()
+    type(field_t), pointer :: fsi_subiter_mesh_y_lag(:) => null()
+    type(field_t), pointer :: fsi_subiter_mesh_z_lag(:) => null()
+    real(kind=rp), pointer :: fsi_subiter_pivot(:,:,:) => null()
+    real(kind=rp), pointer :: fsi_subiter_ghost(:,:,:,:) => null()
+    real(kind=rp), pointer :: fsi_subiter_disp(:,:,:) => null()
+    integer :: fsi_subiter_nlag
     real(kind=rp), pointer :: dtlag(:), tlag(:)
     type(mesh_t), pointer :: msh
     type(MPI_Status) :: status
@@ -122,9 +129,13 @@ contains
     integer (kind=MPI_OFFSET_KIND) :: mpi_offset, byte_offset
     integer(kind=i8) :: n_glb_dofs, dof_offset
     logical :: write_lag, write_scalar, write_dtlag
-    logical :: write_ale, write_fsi
+    logical :: write_ale, write_fsi, write_fsi_subiter
+    logical :: write_fsi_body_acc
+    real(kind=rp), pointer :: fsi_body_acc(:) => null()
+    logical :: write_fsi_frame_acc
+    real(kind=rp), pointer :: fsi_frame_acc(:) => null()
     logical :: write_scalarlag, write_abvel
-    integer :: i
+    integer :: i, jlag
 
     if (present(t)) then
        time = real(t, kind = dp)
@@ -228,6 +239,33 @@ contains
           optional_fields = optional_fields + 64
           write_fsi = .true.
        end if       
+
+       ! Newmark previous accelerations. These exist only for 
+       ! sub-iteration + Newmark path
+       write_fsi_body_acc = .false.
+       if (write_fsi .and. associated(data%fsi_body_acc)) then
+          fsi_body_acc => data%fsi_body_acc
+          write_fsi_body_acc = .true.
+       end if
+
+       write_fsi_frame_acc = .false.
+       if (write_fsi .and. associated(data%fsi_frame_acc)) then
+          fsi_frame_acc => data%fsi_frame_acc
+          write_fsi_frame_acc = .true.
+       end if
+
+       write_fsi_subiter = .false.
+       if (associated(data%fsi_subiter_mesh_x_lag)) then
+          fsi_subiter_mesh_x_lag => data%fsi_subiter_mesh_x_lag
+          fsi_subiter_mesh_y_lag => data%fsi_subiter_mesh_y_lag
+          fsi_subiter_mesh_z_lag => data%fsi_subiter_mesh_z_lag
+          fsi_subiter_pivot => data%fsi_subiter_pivot
+          fsi_subiter_ghost => data%fsi_subiter_ghost
+          fsi_subiter_disp => data%fsi_subiter_disp
+          fsi_subiter_nlag = data%fsi_subiter_nlag
+          optional_fields = optional_fields + 128
+          write_fsi_subiter = .true.
+       end if
 
     class default
        call neko_error('Invalid data')
@@ -531,6 +569,54 @@ contains
             int(MPI_REAL_PREC_SIZE, i8)
     end if
 
+    if (write_fsi_subiter) then
+       do jlag = 1, fsi_subiter_nlag
+          byte_offset = mpi_offset + dof_offset * int(MPI_REAL_PREC_SIZE, i8)
+          call MPI_File_write_at_all(fh, byte_offset, fsi_subiter_mesh_x_lag(jlag)%x, &
+               size(fsi_subiter_mesh_x_lag(jlag)%x), MPI_REAL_PRECISION, status, ierr)
+          mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
+       end do
+       do jlag = 1, fsi_subiter_nlag
+          byte_offset = mpi_offset + dof_offset * int(MPI_REAL_PREC_SIZE, i8)
+          call MPI_File_write_at_all(fh, byte_offset, fsi_subiter_mesh_y_lag(jlag)%x, &
+               size(fsi_subiter_mesh_y_lag(jlag)%x), MPI_REAL_PRECISION, status, ierr)
+          mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
+       end do
+       do jlag = 1, fsi_subiter_nlag
+          byte_offset = mpi_offset + dof_offset * int(MPI_REAL_PREC_SIZE, i8)
+          call MPI_File_write_at_all(fh, byte_offset, fsi_subiter_mesh_z_lag(jlag)%x, &
+               size(fsi_subiter_mesh_z_lag(jlag)%x), MPI_REAL_PRECISION, status, ierr)
+          mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
+       end do
+
+       call MPI_File_write_at_all(fh, mpi_offset, fsi_subiter_pivot, &
+            size(fsi_subiter_pivot), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_subiter_pivot), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       call MPI_File_write_at_all(fh, mpi_offset, fsi_subiter_ghost, &
+            size(fsi_subiter_ghost), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_subiter_ghost), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       call MPI_File_write_at_all(fh, mpi_offset, fsi_subiter_disp, &
+            size(fsi_subiter_disp), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_subiter_disp), i8) * int(MPI_REAL_PREC_SIZE, i8)
+
+       ! Written only when the Newmark registered them
+       if (write_fsi_body_acc) then
+          call MPI_File_write_at_all(fh, mpi_offset, fsi_body_acc, &
+               size(fsi_body_acc), MPI_REAL_PRECISION, status, ierr)
+          mpi_offset = mpi_offset + &
+               int(size(fsi_body_acc), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       end if
+       if (write_fsi_frame_acc) then
+          call MPI_File_write_at_all(fh, mpi_offset, fsi_frame_acc, &
+               size(fsi_frame_acc), MPI_REAL_PRECISION, status, ierr)
+          mpi_offset = mpi_offset + &
+               int(size(fsi_frame_acc), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       end if
+    end if
+
     call MPI_File_close(fh, ierr)
 
     if (ierr .ne. MPI_SUCCESS) then
@@ -578,6 +664,13 @@ contains
     real(kind=rp), pointer :: fsi_body_vel(:) => null()
     real(kind=rp), pointer :: fsi_body_vel_lag(:,:) => null()
     real(kind=rp), pointer :: fsi_moving_frame_presc_vel(:,:) => null()
+    type(field_t), pointer :: fsi_subiter_mesh_x_lag(:) => null()
+    type(field_t), pointer :: fsi_subiter_mesh_y_lag(:) => null()
+    type(field_t), pointer :: fsi_subiter_mesh_z_lag(:) => null()
+    real(kind=rp), pointer :: fsi_subiter_pivot(:,:,:) => null()
+    real(kind=rp), pointer :: fsi_subiter_ghost(:,:,:,:) => null()
+    real(kind=rp), pointer :: fsi_subiter_disp(:,:,:) => null()
+    integer :: fsi_subiter_nlag, jlag
     real(kind=rp), allocatable :: x_coord(:,:,:,:)
     real(kind=rp), allocatable :: y_coord(:,:,:,:)
     real(kind=rp), allocatable :: z_coord(:,:,:,:)
@@ -587,9 +680,13 @@ contains
     integer :: glb_nelv, gdim, lx, have_lag, have_scalar, nel
     integer :: optional_fields, have_dtlag
     integer :: have_abvel, have_scalarlag
-    integer :: have_ale, have_fsi
+    integer :: have_ale, have_fsi, have_fsi_subiter
+    real(kind=rp), pointer :: fsi_body_acc(:) => null()
+    real(kind=rp), pointer :: fsi_frame_acc(:) => null()
     logical :: read_lag, read_scalar, read_dtlag, read_abvel, read_scalarlag
-    logical :: read_ale, read_fsi
+    logical :: read_ale, read_fsi, read_fsi_subiter
+    logical :: read_fsi_body_acc
+    logical :: read_fsi_frame_acc
     real(kind=dp) :: tol
     real(kind=rp) :: center_x, center_y, center_z
     integer :: i, e
@@ -690,6 +787,30 @@ contains
           fsi_moving_frame_presc_vel => data%fsi_moving_frame_presc_vel
           read_fsi = .true.
        end if
+
+       read_fsi_body_acc = .false.
+       if (associated(data%fsi_body_acc)) then
+          fsi_body_acc => data%fsi_body_acc
+          read_fsi_body_acc = .true.
+       end if
+
+       read_fsi_frame_acc = .false.
+       if (associated(data%fsi_frame_acc)) then
+          fsi_frame_acc => data%fsi_frame_acc
+          read_fsi_frame_acc = .true.
+       end if
+
+       read_fsi_subiter = .false.
+       if (associated(data%fsi_subiter_mesh_x_lag)) then
+          fsi_subiter_mesh_x_lag => data%fsi_subiter_mesh_x_lag
+          fsi_subiter_mesh_y_lag => data%fsi_subiter_mesh_y_lag
+          fsi_subiter_mesh_z_lag => data%fsi_subiter_mesh_z_lag
+          fsi_subiter_pivot => data%fsi_subiter_pivot
+          fsi_subiter_ghost => data%fsi_subiter_ghost
+          fsi_subiter_disp => data%fsi_subiter_disp
+          fsi_subiter_nlag = data%fsi_subiter_nlag
+          read_fsi_subiter = .true.
+       end if
        chkp => data
 
     class default
@@ -714,6 +835,7 @@ contains
     have_scalarlag = mod(optional_fields,32)/16
     have_ale = mod(optional_fields,64)/32
     have_fsi = mod(optional_fields,128)/64
+    have_fsi_subiter = mod(optional_fields,256)/128
 
 
     if ( ( glb_nelv .ne. msh%glb_nelv ) .or. &
@@ -962,6 +1084,53 @@ contains
        mpi_offset = mpi_offset + &
             int(size(fsi_moving_frame_presc_vel), i8) * &
             int(MPI_REAL_PREC_SIZE, i8)
+    end if
+
+    if (read_fsi_subiter .and. have_fsi_subiter .eq. 1) then
+       do jlag = 1, fsi_subiter_nlag
+          byte_offset = mpi_offset + dof_offset * int(MPI_REAL_PREC_SIZE, i8)
+          call this%read_field(fh, byte_offset, fsi_subiter_mesh_x_lag(jlag)%x, nel)
+          mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
+       end do
+       do jlag = 1, fsi_subiter_nlag
+          byte_offset = mpi_offset + dof_offset * int(MPI_REAL_PREC_SIZE, i8)
+          call this%read_field(fh, byte_offset, fsi_subiter_mesh_y_lag(jlag)%x, nel)
+          mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
+       end do
+       do jlag = 1, fsi_subiter_nlag
+          byte_offset = mpi_offset + dof_offset * int(MPI_REAL_PREC_SIZE, i8)
+          call this%read_field(fh, byte_offset, fsi_subiter_mesh_z_lag(jlag)%x, nel)
+          mpi_offset = mpi_offset + n_glb_dofs * int(MPI_REAL_PREC_SIZE, i8)
+       end do
+
+       call MPI_File_read_at_all(fh, mpi_offset, fsi_subiter_pivot, &
+            size(fsi_subiter_pivot), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_subiter_pivot), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       call MPI_File_read_at_all(fh, mpi_offset, fsi_subiter_ghost, &
+            size(fsi_subiter_ghost), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_subiter_ghost), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       call MPI_File_read_at_all(fh, mpi_offset, fsi_subiter_disp, &
+            size(fsi_subiter_disp), MPI_REAL_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + &
+            int(size(fsi_subiter_disp), i8) * int(MPI_REAL_PREC_SIZE, i8)
+
+       ! Read only when Newmark path
+       if (read_fsi_body_acc) then
+          call MPI_File_read_at_all(fh, mpi_offset, fsi_body_acc, &
+               size(fsi_body_acc), MPI_REAL_PRECISION, status, ierr)
+          mpi_offset = mpi_offset + &
+               int(size(fsi_body_acc), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       end if
+       if (read_fsi_frame_acc) then
+          call MPI_File_read_at_all(fh, mpi_offset, fsi_frame_acc, &
+               size(fsi_frame_acc), MPI_REAL_PRECISION, status, ierr)
+          mpi_offset = mpi_offset + &
+               int(size(fsi_frame_acc), i8) * int(MPI_REAL_PREC_SIZE, i8)
+       end if
+
+       chkp%fsi_subiter_restored = .true.
     end if
 
     call MPI_File_close(fh, ierr)

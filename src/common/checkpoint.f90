@@ -119,6 +119,24 @@ module checkpoint
      real(kind=rp), pointer :: fsi_body_vel(:) => null()
      real(kind=rp), pointer :: fsi_body_vel_lag(:,:) => null()
      real(kind=rp), pointer :: fsi_moving_frame_presc_vel(:,:) => null()
+     !> Newmark previous-acceleration (sub-iteration + Newmark only).
+     real(kind=rp), pointer :: fsi_body_acc(:) => null()
+     !> Newmark prescribed-frame previous-acceleration.
+     real(kind=rp), pointer :: fsi_frame_acc(:) => null()
+
+     !> FSI sub-iteration BDF-k position histories.
+     integer :: fsi_subiter_nlag = 0
+     type(field_t), pointer :: fsi_subiter_mesh_x_lag(:) => null()
+     type(field_t), pointer :: fsi_subiter_mesh_y_lag(:) => null()
+     type(field_t), pointer :: fsi_subiter_mesh_z_lag(:) => null()
+     real(kind=rp), pointer :: fsi_subiter_pivot(:,:,:) => &
+          null() !< (3,nlag,nb)
+     real(kind=rp), pointer :: fsi_subiter_ghost(:,:,:,:) => &
+          null() !< (3,nlag,2,nb)
+     real(kind=rp), pointer :: fsi_subiter_disp(:,:,:) => &
+          null() !< (6,nlag,nb)
+     logical :: fsi_subiter_restored = .false.
+
      
    contains
      procedure, pass(this) :: init => chkp_init
@@ -129,6 +147,7 @@ module checkpoint
      procedure, pass(this) :: add_scalar => chkp_add_scalar
      procedure, pass(this) :: add_ale => chkp_add_ale
      procedure, pass(this) :: add_fsi => chkp_add_fsi
+     procedure, pass(this) :: add_fsi_subiter => chkp_add_fsi_subiter
      procedure, pass(this) :: restart_time => chkp_restart_time
      procedure, pass(this) :: set_time_state => chkp_set_time_state
      procedure, pass(this) :: free => chkp_free
@@ -187,9 +206,17 @@ contains
     ! FSI cleanup
     if (associated(this%fsi_disp_rel)) nullify(this%fsi_disp_rel)
     if (associated(this%fsi_body_vel)) nullify(this%fsi_body_vel)
+    if (associated(this%fsi_body_acc)) nullify(this%fsi_body_acc)
+    if (associated(this%fsi_frame_acc)) nullify(this%fsi_frame_acc)
     if (associated(this%fsi_body_vel_lag)) nullify(this%fsi_body_vel_lag)
     if (associated(this%fsi_moving_frame_presc_vel)) &
          nullify(this%fsi_moving_frame_presc_vel)
+    if (associated(this%fsi_subiter_mesh_x_lag)) nullify(this%fsi_subiter_mesh_x_lag)
+    if (associated(this%fsi_subiter_mesh_y_lag)) nullify(this%fsi_subiter_mesh_y_lag)
+    if (associated(this%fsi_subiter_mesh_z_lag)) nullify(this%fsi_subiter_mesh_z_lag)
+    if (associated(this%fsi_subiter_pivot)) nullify(this%fsi_subiter_pivot)
+    if (associated(this%fsi_subiter_ghost)) nullify(this%fsi_subiter_ghost)
+    if (associated(this%fsi_subiter_disp)) nullify(this%fsi_subiter_disp)
 
     if (associated(this%abx1)) nullify(this%abx1)
     if (associated(this%abx2)) nullify(this%abx2)
@@ -329,6 +356,19 @@ contains
             end do
          end if
        end associate
+
+       ! FSI sub-iteration BDF mesh-coordinate histories
+       if (associated(this%fsi_subiter_mesh_x_lag)) then
+          do i = 1, this%fsi_subiter_nlag
+             call this%fsi_subiter_mesh_x_lag(i)%copy_from(DEVICE_TO_HOST, &
+                  sync = .false.)
+             call this%fsi_subiter_mesh_y_lag(i)%copy_from(DEVICE_TO_HOST, &
+                  sync = .false.)
+             call this%fsi_subiter_mesh_z_lag(i)%copy_from(DEVICE_TO_HOST, &
+                  sync = .false.)
+          end do
+       end if
+
        call device_sync(glb_cmd_queue)
     end if
 
@@ -549,19 +589,50 @@ contains
 
   !> Add FSI kinematics to checkpointing
   subroutine chkp_add_fsi(this, disp_rel, body_vel, body_vel_lag, &
-       moving_frame_presc_vel)
+       moving_frame_presc_vel, body_acc, frame_acc)
     class(chkp_t), intent(inout) :: this
 
     real(kind=rp), target, intent(in) :: disp_rel(:)
     real(kind=rp), target, intent(in) :: body_vel(:)
     real(kind=rp), target, intent(in) :: body_vel_lag(:,:)
     real(kind=rp), target, intent(in) :: moving_frame_presc_vel(:,:)
-    
+    !> Newmark previous-acceleration.
+    real(kind=rp), target, intent(in), optional :: body_acc(:)
+    !> Newmark prescribed-frame previous-acceleration
+    real(kind=rp), target, intent(in), optional :: frame_acc(:)
+
     this%fsi_disp_rel => disp_rel
     this%fsi_body_vel => body_vel
     this%fsi_body_vel_lag => body_vel_lag
     this%fsi_moving_frame_presc_vel => moving_frame_presc_vel
+    if (present(body_acc)) this%fsi_body_acc => body_acc
+    if (present(frame_acc)) this%fsi_frame_acc => frame_acc
   end subroutine chkp_add_fsi
+
+  !> Add the FSI sub-iteration BDF-k position histories to checkpointing.
+  !> @param nlag number of BDF lag levels).
+  !> @param mesh_x_lag,mesh_y_lag,mesh_z_lag  mesh coordinate histories
+  !> @param pivot pivot position history
+  !> @param ghost rotation-tracker position history
+  !> @param disp relative-displacement history
+  subroutine chkp_add_fsi_subiter(this, nlag, mesh_x_lag, mesh_y_lag, &
+       mesh_z_lag, pivot, ghost, disp)
+    class(chkp_t), intent(inout) :: this
+    integer, intent(in) :: nlag
+    type(field_t), target, intent(in) :: mesh_x_lag(:), mesh_y_lag(:), &
+         mesh_z_lag(:)
+    real(kind=rp), target, intent(in) :: pivot(:,:,:)
+    real(kind=rp), target, intent(in) :: ghost(:,:,:,:)
+    real(kind=rp), target, intent(in) :: disp(:,:,:)
+
+    this%fsi_subiter_nlag = nlag
+    this%fsi_subiter_mesh_x_lag => mesh_x_lag
+    this%fsi_subiter_mesh_y_lag => mesh_y_lag
+    this%fsi_subiter_mesh_z_lag => mesh_z_lag
+    this%fsi_subiter_pivot => pivot
+    this%fsi_subiter_ghost => ghost
+    this%fsi_subiter_disp => disp
+  end subroutine chkp_add_fsi_subiter
 
   !> Return restart time from a loaded checkpoint
   pure function chkp_restart_time(this) result(rtime)

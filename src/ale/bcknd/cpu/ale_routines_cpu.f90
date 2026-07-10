@@ -35,7 +35,7 @@ module ale_routines_cpu
   use num_types, only : rp
   use field, only : field_t
   use coefs, only : coef_t
-  use math, only : cfill, glimax, rzero
+  use math, only : cfill, glimax, rzero, cmult2, add2s2, copy
   use field_series, only : field_series_t
   use time_state, only : time_state_t
   use ab_time_scheme, only : ab_time_scheme_t
@@ -51,7 +51,9 @@ module ale_routines_cpu
   private
 
   public :: add_kinematics_to_mesh_velocity_cpu
-  public :: update_ale_mesh_cpu
+  public :: update_ale_mesh_ab_cpu
+  public :: update_ale_mesh_bdf_cpu
+  public :: update_ale_mesh_cn_cpu
   public :: compute_cheap_dist_v2_cpu
 
 contains
@@ -343,8 +345,8 @@ contains
   end subroutine add_kinematics_to_mesh_velocity_cpu
 
   !> Updates mesh position by integrating mesh velocity in time using AB (CPU)
-  subroutine update_ale_mesh_cpu(c_Xh, wm_x, wm_y, wm_z, wm_x_lag, wm_y_lag, &
-       wm_z_lag, time, nadv, scheme_type)
+  subroutine update_ale_mesh_ab_cpu(c_Xh, wm_x, wm_y, wm_z, wm_x_lag, wm_y_lag, &
+       wm_z_lag, time, nadv)
     type(coef_t), intent(inout) :: c_Xh
     type(field_t), intent(in) :: wm_x, wm_y, wm_z
     type(field_series_t), intent(in) :: wm_x_lag, wm_y_lag, wm_z_lag
@@ -352,18 +354,13 @@ contains
     type(ab_time_scheme_t) :: ab_scheme_obj
     integer, intent(in) :: nadv
     integer :: i, j, n
-    character(len=*), intent(in) :: scheme_type
     real(kind=rp) :: ab_coeffs(4), dt_history(10)
 
     call rzero(ab_coeffs, 4)
-    if (trim(scheme_type) .eq. 'ab') then
-       dt_history(1) = time%dt
-       dt_history(2) = time%dtlag(1)
-       dt_history(3) = time%dtlag(2)
-       call ab_scheme_obj%compute_coeffs(ab_coeffs, dt_history, nadv)
-    else
-       call neko_error("ALE: Unknown mesh time-integration scheme")
-    end if
+    dt_history(1) = time%dt
+    dt_history(2) = time%dtlag(1)
+    dt_history(3) = time%dtlag(2)
+    call ab_scheme_obj%compute_coeffs(ab_coeffs, dt_history, nadv)
 
     n = c_Xh%dof%size()
 
@@ -385,6 +382,65 @@ contains
        end do
 
     end do
-  end subroutine update_ale_mesh_cpu
+  end subroutine update_ale_mesh_ab_cpu
+
+  !> BDF-k mesh reposition:
+  !> x^{n+1} = (dt/beta_0)*wm - sum_{j=1}^{nadv} (beta_j/beta_0) * x^{n+1-j}.
+  !> gamma = dt / beta(0)
+  subroutine update_ale_mesh_bdf_cpu(c_Xh, wm_x, wm_y, wm_z, &
+       mesh_x_lag, mesh_y_lag, mesh_z_lag, gamma, beta, nadv)
+    type(coef_t), intent(inout) :: c_Xh
+    type(field_t), intent(in) :: wm_x, wm_y, wm_z
+    type(field_t), intent(in) :: mesh_x_lag(:), mesh_y_lag(:), mesh_z_lag(:)
+    real(kind=rp), intent(in) :: gamma, beta(0:3)
+    integer, intent(in) :: nadv
+    integer :: j, n
+    real(kind=rp) :: inv_b0, gamma_j
+
+    n = c_Xh%dof%size()
+    inv_b0 = 1.0_rp / beta(0)
+
+    call cmult2(c_Xh%dof%x, wm_x%x, gamma, n)
+    call cmult2(c_Xh%dof%y, wm_y%x, gamma, n)
+    call cmult2(c_Xh%dof%z, wm_z%x, gamma, n)
+    do j = 1, nadv
+       gamma_j = -beta(j) * inv_b0
+       call add2s2(c_Xh%dof%x, mesh_x_lag(j)%x, gamma_j, n)
+       call add2s2(c_Xh%dof%y, mesh_y_lag(j)%x, gamma_j, n)
+       call add2s2(c_Xh%dof%z, mesh_z_lag(j)%x, gamma_j, n)
+    end do
+  end subroutine update_ale_mesh_bdf_cpu
+
+  !> CN mesh reposition:
+  !> x^{n+1} = x^n + (dt/2) * (wm^{n+1} + wm^n).
+  !> mesh_x_n/mesh_y_n/mesh_z_n hold x^n (= mesh_*_lag(1)); wm_*_prev hold wm^n.
+  !> The current mesh coordinates are fully overwritten (recomputed from x^n),
+  !> so the routine is safe to call repeatedly within the FSI sub-iteration.
+  subroutine update_ale_mesh_cn_cpu(c_Xh, wm_x, wm_y, wm_z, &
+       wm_x_prev, wm_y_prev, wm_z_prev, mesh_x_n, mesh_y_n, mesh_z_n, dt)
+    type(coef_t), intent(inout) :: c_Xh
+    type(field_t), intent(in) :: wm_x, wm_y, wm_z
+    type(field_t), intent(in) :: wm_x_prev, wm_y_prev, wm_z_prev
+    type(field_t), intent(in) :: mesh_x_n, mesh_y_n, mesh_z_n
+    real(kind=rp), intent(in) :: dt
+    integer :: n
+    real(kind=rp) :: half_dt
+
+    n = c_Xh%dof%size()
+    half_dt = 0.5_rp * dt
+
+    ! x^{n+1} = x^n + (dt/2) wm^{n+1} + (dt/2) wm^n
+    call copy(c_Xh%dof%x, mesh_x_n%x, n)
+    call add2s2(c_Xh%dof%x, wm_x%x, half_dt, n)
+    call add2s2(c_Xh%dof%x, wm_x_prev%x, half_dt, n)
+
+    call copy(c_Xh%dof%y, mesh_y_n%x, n)
+    call add2s2(c_Xh%dof%y, wm_y%x, half_dt, n)
+    call add2s2(c_Xh%dof%y, wm_y_prev%x, half_dt, n)
+
+    call copy(c_Xh%dof%z, mesh_z_n%x, n)
+    call add2s2(c_Xh%dof%z, wm_z%x, half_dt, n)
+    call add2s2(c_Xh%dof%z, wm_z_prev%x, half_dt, n)
+  end subroutine update_ale_mesh_cn_cpu
 
 end module ale_routines_cpu

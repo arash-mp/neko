@@ -31,7 +31,7 @@
 ! POSSIBILITY OF SUCH DAMAGE.
 !
 
-!> Defines data structures and algorithms for configuring, calculating,
+!> Defines data structures for configuring, calculating,
 !> and time-integrating the rigid-body motion (translation and rotation)
 !> of objects in an ALE simulation.
 !> CPU-only module.
@@ -121,26 +121,19 @@ module ale_rigid_kinematics
      real(kind=rp) :: center(3) = 0.0_rp
   end type body_kinematics_t
 
-  !> State history for time-integration of pivots
-  type, public :: pivot_state_t
+  !> State history for a tracked geometric point.
+  type, public :: tracked_point_t
      real(kind=rp) :: pos(3) = 0.0_rp
-     real(kind=rp) :: vel_lag(3, 3) = 0.0_rp
      real(kind=rp) :: vel(3) = 0.0_rp
-
-  end type pivot_state_t
-
-  !> Type for a tracked point linked to a body
-  type, public :: point_tracker_t
-     real(kind=rp) :: pos(3) = 0.0_rp
      real(kind=rp) :: vel_lag(3, 3) = 0.0_rp
      integer :: body_id = 0
-  end type point_tracker_t
+  end type tracked_point_t
 
 contains
 
   !> Initialize pivot state
   subroutine init_pivot_state(pivot, body_conf)
-    type(pivot_state_t), intent(out) :: pivot
+    type(tracked_point_t), intent(out) :: pivot
     type(ale_body_t), intent(in) :: body_conf
     pivot%pos = body_conf%rot_center
     pivot%vel_lag = 0.0_rp
@@ -193,7 +186,7 @@ contains
   !> Updates the point tracker's position and velocity history using
   !> AB time integration based on the current velocity.
   subroutine advance_point_tracker(tracker, current_vel, time, nadv)
-    type(point_tracker_t), intent(inout) :: tracker
+    type(tracked_point_t), intent(inout) :: tracker
     real(kind=rp), intent(in) :: current_vel(3)
     type(time_state_t), intent(in) :: time
     integer, intent(in) :: nadv
@@ -291,7 +284,7 @@ contains
   !> Updates pivot location
   subroutine update_pivot_location(pivot, pivot_loc, pivot_vel, time, &
        nadv, body_conf)
-    type(pivot_state_t), intent(inout) :: pivot
+    type(tracked_point_t), intent(inout) :: pivot
     real(kind=rp), intent(out) :: pivot_loc(3)
     real(kind=rp), intent(in) :: pivot_vel(3)
     type(time_state_t), intent(in) :: time

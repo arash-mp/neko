@@ -55,14 +55,17 @@ module ale_manager
   use file, only : file_t
   use logger, only : neko_log, LOG_SIZE
   use advection, only : advection_t
-  use ale_rigid_kinematics, only : ale_config_t, pivot_state_t, &
-       point_tracker_t, body_kinematics_t, &
+  use ale_rigid_kinematics, only : ale_config_t, tracked_point_t, &
+       body_kinematics_t, &
        init_pivot_state, update_pivot_location, &
        compute_body_kinematics_built_in, ab_integrate_point_pos
+  use ale_scheme, only : ale_scheme_t
+  use ale_scheme_fctry, only : ale_scheme_factory
   use ale_routines_cpu, only : add_kinematics_to_mesh_velocity_cpu, &
-       update_ale_mesh_cpu, compute_cheap_dist_v2_cpu
+       update_ale_mesh_ab_cpu, compute_cheap_dist_v2_cpu, update_ale_mesh_bdf_cpu
   use ale_routines_device, only : add_kinematics_to_mesh_velocity_device, &
-       update_ale_mesh_device, compute_cheap_dist_device
+       update_ale_mesh_ab_device, compute_cheap_dist_device, &
+       update_ale_mesh_bdf_device
   use utils, only : neko_error
   use neko_config, only : NEKO_BCKND_DEVICE, NEKO_BCKND_HIP, NEKO_BCKND_CUDA
   use mpi_f08, only : MPI_WTIME, MPI_Barrier
@@ -89,7 +92,6 @@ module ale_manager
 
   public :: compute_stiffness_ale
   public :: add_kinematics_to_mesh_velocity
-  public :: update_ale_mesh
   public :: log_rot_angles
   public :: log_pivot
 
@@ -97,6 +99,7 @@ module ale_manager
      ! Default
      logical :: active = .false.
      logical :: has_moving_boundary = .false.
+     class(ale_scheme_t), allocatable :: scheme
 
      type(bc_list_t) :: bc_list
      type(zero_dirichlet_t) :: bc_moving
@@ -114,11 +117,16 @@ module ale_manager
      type(field_series_t) :: wm_y_lag
      type(field_series_t) :: wm_z_lag
 
+     !> Frozen previous-step mesh velocity wm^n, used by the implicit CN
+     !> (Newmark) mesh reposition. 
+     type(field_t) :: wm_x_prev, wm_y_prev, wm_z_prev
+     logical :: has_wm_prev = .false.
+
      !> Reference initial grid to calculate the rotation accurately
      type(field_t) :: x_ref, y_ref, z_ref
 
      !> Pivot states for each body
-     type(pivot_state_t), allocatable :: ale_pivot(:)
+     type(tracked_point_t), allocatable :: ale_pivot(:)
      type(body_kinematics_t), allocatable :: body_kin(:)
 
      !> Base shape fields for mesh movement (Laplace solution for each body)
@@ -140,7 +148,7 @@ module ale_manager
      ! Rotation matrices
      real(kind=rp), allocatable :: body_rot_matrices(:,:,:)
 
-     type(point_tracker_t), allocatable :: trackers(:)
+     type(tracked_point_t), allocatable :: trackers(:)
      integer :: n_trackers = 0
 
      procedure(user_ale_mesh_velocity_intf), nopass, pointer :: &
@@ -155,7 +163,7 @@ module ale_manager
      procedure, pass(this) :: free => ale_manager_free
      procedure, pass(this) :: mesh_preview
      procedure, pass(this) :: solve_base_mesh_displacement
-     procedure, pass(this) :: advance_mesh
+     procedure, pass(this) :: advance_mesh_explicit
      procedure, pass(this) :: update_mesh_velocity
      procedure, pass(this) :: set_pivot_restart
      procedure, pass(this) :: sync_chkp
@@ -165,8 +173,15 @@ module ale_manager
      procedure, pass(this) :: prep_checkpoint => set_pivot_basis_for_checkpoint
      procedure, pass(this) :: ghost_tracker_coord_step
      procedure, pass(this) :: log_rot_angles
+     procedure, pass(this) :: log_frame_health
      procedure, pass(this) :: log_pivot
      procedure, pass(this) :: register_checkpoint_fields
+     procedure, pass(this) :: select_scheme
+     !> FSI sub-iteration (BDF/CN) mesh kinematics routines
+     procedure, pass(this) :: advance_mesh_implicit
+     procedure, pass(this) :: step_body_kinematics_implicit
+     !> Snapshot the current mesh velocity as wm^n for the CN scheme.
+     procedure, pass(this) :: snapshot_mesh_velocity
   end type ale_manager_t
 
   type(ale_manager_t), public, pointer :: neko_ale => null()
@@ -233,6 +248,9 @@ contains
           end if
        end if
        neko_ale => this
+
+       ! For ALE-Only and Green's function approach for FSI.
+       call ale_scheme_factory(this%scheme, 'ab')
     end if
 
     call neko_log%section("ALE Initialization")
@@ -843,6 +861,69 @@ contains
     call neko_log%end_section()
   end subroutine ale_manager_init
 
+  !> Select the mesh position-integration scheme.
+  !> 'bdf' and 'cn' are accepted only when the case file has actually selected
+  !> the FSI sub-iteration scheme.
+  subroutine select_scheme(this, mode, params)
+    class(ale_manager_t), intent(inout) :: this
+    character(len=*), intent(in) :: mode
+    type(json_file), intent(inout) :: params
+    character(len=:), allocatable :: scheme_str, coupling_str
+    logical :: is_subiteration
+    select case (trim(mode))
+    case ('ab')
+       call ale_scheme_factory(this%scheme, 'ab')
+    case ('bdf', 'cn')
+       call json_get(params, 'case.fluid.scheme', scheme_str)
+       call json_get(params, 'case.fluid.fsi.coupling', coupling_str)
+       is_subiteration = (trim(scheme_str) .eq. 'pnpn_fsi_subiteration') .or. &
+            (trim(scheme_str) .eq. 'pnpn_fsi' .and. &
+             trim(coupling_str) .eq. 'subiteration')
+       if (.not. is_subiteration) then
+          call neko_error("ALE '" // trim(mode) // "' mesh kinematics is " // &
+               "only for the FSI sub-iteration scheme " // &
+               "(case.fluid.scheme='pnpn_fsi', " // &
+               "case.fluid.fsi.coupling='subiteration')")
+       end if
+       call ale_scheme_factory(this%scheme, trim(mode))
+       if (trim(mode) .eq. 'cn' .and. .not. this%has_wm_prev) then
+          if (.not. (associated(this%wm_x) .and. associated(this%wm_y) .and. &
+               associated(this%wm_z))) then
+             call neko_error("ale_manager: 'cn' scheme selected before the " // &
+                  "mesh-velocity fields were initialised")
+          end if
+          call this%wm_x_prev%init(this%wm_x%dof, 'wm_x_prev')
+          call this%wm_y_prev%init(this%wm_y%dof, 'wm_y_prev')
+          call this%wm_z_prev%init(this%wm_z%dof, 'wm_z_prev')
+          this%has_wm_prev = .true.
+          ! Seed wm^n with the current (initial) mesh velocity so the first
+          ! CN step already has a valid previous-step mesh velocity.
+          call this%snapshot_mesh_velocity()
+       end if
+    case default
+       call neko_error("ale_manager: unknown ALE scheme '" // &
+            trim(mode) // "' (expected 'ab', 'bdf' or 'cn')")
+    end select
+  end subroutine select_scheme
+
+  !> Snapshot the current mesh velocity wm^{n+1} as the frozen wm^n used by
+  !> the CN reposition on the next step.
+  subroutine snapshot_mesh_velocity(this)
+    class(ale_manager_t), intent(inout) :: this
+    integer :: n
+    if (.not. this%has_wm_prev) return
+    n = this%wm_x%dof%size()
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_copy(this%wm_x_prev%x_d, this%wm_x%x_d, n)
+       call device_copy(this%wm_y_prev%x_d, this%wm_y%x_d, n)
+       call device_copy(this%wm_z_prev%x_d, this%wm_z%x_d, n)
+    else
+       call copy(this%wm_x_prev%x, this%wm_x%x, n)
+       call copy(this%wm_y_prev%x, this%wm_y%x, n)
+       call copy(this%wm_z_prev%x, this%wm_z%x, n)
+    end if
+  end subroutine snapshot_mesh_velocity
+
   !> Solves the Laplace equation to determine the base shape (phi)
   !> for each body.
   !> It finds a smooth blending function for mesh deformation.
@@ -1299,8 +1380,8 @@ contains
 
   end subroutine update_mesh_velocity
 
-  !> Main routine to advance the mesh in time
-  subroutine advance_mesh(this, coef, time, nadv)
+  !> Main routine to explicitly advance the mesh coords in time.
+  subroutine advance_mesh_explicit(this, coef, time, nadv)
     class(ale_manager_t), intent(inout) :: this
     type(coef_t), intent(inout) :: coef
     type(time_state_t), intent(in) :: time
@@ -1329,16 +1410,100 @@ contains
     call coef%update_B_history()
 
     ! Update mesh coordinates
-    call update_ale_mesh(coef, this%wm_x, this%wm_y, this%wm_z, &
-         this%wm_x_lag, this%wm_y_lag, this%wm_z_lag, &
-         time, nadv, "ab")
+    call this%scheme%reposition_mesh(coef, this%wm_x, this%wm_y, this%wm_z, &
+         time, nadv, wm_x_lag = this%wm_x_lag, wm_y_lag = this%wm_y_lag, &
+         wm_z_lag = this%wm_z_lag)
 
     ! Update internal history of mesh velocity.
-    call this%wm_x_lag%update()
-    call this%wm_y_lag%update()
-    call this%wm_z_lag%update()
+    call this%scheme%commit_history(this%wm_x_lag, this%wm_y_lag, &
+         this%wm_z_lag)
+
     call profiler_end_region('ALE update mesh')
-  end subroutine advance_mesh
+  end subroutine advance_mesh_explicit
+
+  !> Implicit mesh reposition:
+  !> BDF: x^{n+1} = (dt*wm - sum_j beta_j x^{n+1-j}) / beta_0
+  !> CN : x^{n+1} = x^n + (dt/2)(wm^{n+1} + wm^n)
+  subroutine advance_mesh_implicit(this, c_Xh, time, beta, nadv, &
+       mesh_x_lag, mesh_y_lag, mesh_z_lag)
+    class(ale_manager_t), intent(inout) :: this
+    type(coef_t), intent(inout) :: c_Xh
+    type(time_state_t), intent(in) :: time
+    real(kind=rp), intent(in) :: beta(0:3)
+    integer, intent(in) :: nadv
+    !> mesh-coordinate history; mesh_x_lag(j) holds x^{n+1-j}.
+    type(field_t), intent(in) :: mesh_x_lag(:), mesh_y_lag(:), mesh_z_lag(:)
+
+    if (this%has_wm_prev) then
+       call this%scheme%reposition_mesh(c_Xh, this%wm_x, this%wm_y, this%wm_z, &
+            time, nadv, mesh_x_lag = mesh_x_lag, mesh_y_lag = mesh_y_lag, &
+            mesh_z_lag = mesh_z_lag, beta = beta, &
+            wm_x_prev = this%wm_x_prev, wm_y_prev = this%wm_y_prev, &
+            wm_z_prev = this%wm_z_prev)
+    else
+       call this%scheme%reposition_mesh(c_Xh, this%wm_x, this%wm_y, this%wm_z, &
+            time, nadv, mesh_x_lag = mesh_x_lag, mesh_y_lag = mesh_y_lag, &
+            mesh_z_lag = mesh_z_lag, beta = beta)
+    end if
+
+  end subroutine advance_mesh_implicit
+
+  !> Implicit (BDF-k or CN) update of one body's pivot, its two rotation
+  !> trackers, and its rotation matrix.
+  subroutine step_body_kinematics_implicit(this, body_idx, time, beta, nadv, &
+       pvel, omega_tot, pivot_hist, ghost_hist, pvel_prev, omega_tot_prev)
+    class(ale_manager_t), intent(inout) :: this
+    integer, intent(in) :: body_idx
+    type(time_state_t), intent(in) :: time
+    real(kind=rp), intent(in) :: beta(0:3)
+    integer, intent(in) :: nadv
+    real(kind=rp), intent(in) :: pvel(3), omega_tot(3)
+    real(kind=rp), intent(in) :: pivot_hist(:,:) !< (3, n_lag)
+    real(kind=rp), intent(in) :: ghost_hist(:,:,:) !< (3, n_lag, 2)
+    !> Previous-step pivot / angular velocity for the CN scheme.
+    real(kind=rp), intent(in), optional :: pvel_prev(3), omega_tot_prev(3)
+    integer :: g, h
+    real(kind=rp) :: arm(3), tvel(3), cw(3), tvel_prev(3), cw_prev(3)
+    logical :: use_cn
+
+    use_cn = present(pvel_prev) .and. present(omega_tot_prev)
+
+    ! pivot:  d(pivot)/dt = pvel
+    if (use_cn) then
+       call this%scheme%integrate_point(this%ale_pivot(body_idx)%pos, pvel, &
+            time, nadv, hist = pivot_hist, vel_prev = pvel_prev)
+    else
+       call this%scheme%integrate_point(this%ale_pivot(body_idx)%pos, pvel, &
+            time, nadv, beta = beta, hist = pivot_hist)
+    end if
+
+    do g = 1, 2
+       h = this%ghost_handles(g, body_idx)
+
+       arm = ghost_hist(:, 1, g) - pivot_hist(:, 1)
+
+       cw(1) = omega_tot(2) * arm(3) - omega_tot(3) * arm(2)
+       cw(2) = omega_tot(3) * arm(1) - omega_tot(1) * arm(3)
+       cw(3) = omega_tot(1) * arm(2) - omega_tot(2) * arm(1)
+
+       tvel = pvel + cw
+
+       if (use_cn) then
+          cw_prev(1) = omega_tot_prev(2) * arm(3) - omega_tot_prev(3) * arm(2)
+          cw_prev(2) = omega_tot_prev(3) * arm(1) - omega_tot_prev(1) * arm(3)
+          cw_prev(3) = omega_tot_prev(1) * arm(2) - omega_tot_prev(2) * arm(1)
+          tvel_prev = pvel_prev + cw_prev
+          call this%scheme%integrate_point(this%trackers(h)%pos, tvel, &
+               time, nadv, hist = ghost_hist(:, :, g), vel_prev = tvel_prev)
+       else
+          call this%scheme%integrate_point(this%trackers(h)%pos, tvel, &
+               time, nadv, beta = beta, hist = ghost_hist(:, :, g))
+       end if
+    end do
+
+    call this%compute_rotation_matrix(body_idx, time)
+
+  end subroutine step_body_kinematics_implicit
 
   ! Compute mesh stiffness with per-body gain/decay from stiff_geom.
   subroutine compute_stiffness_ale(coef, params)
@@ -1520,25 +1685,7 @@ contains
     end if
   end subroutine add_kinematics_to_mesh_velocity
 
-  ! Updates mesh position by integrating mesh velocity in time using AB scheme.
-  subroutine update_ale_mesh(c_Xh, wm_x, wm_y, wm_z, wm_x_lag, wm_y_lag, &
-       wm_z_lag, time, nadv, scheme_)
-    type(coef_t), intent(inout) :: c_Xh
-    type(field_t), intent(in) :: wm_x, wm_y, wm_z
-    type(field_series_t), intent(in) :: wm_x_lag, wm_y_lag, wm_z_lag
-    type(time_state_t), intent(in) :: time
-    integer, intent(in) :: nadv
-    character(len=*), intent(in) :: scheme_
-    if (NEKO_BCKND_DEVICE .eq. 1) then
-       call update_ale_mesh_device(c_Xh, wm_x, wm_y, wm_z, &
-            wm_x_lag, wm_y_lag, wm_z_lag, time, nadv, scheme_)
-    else
-       call update_ale_mesh_cpu(c_Xh, wm_x, wm_y, wm_z, &
-            wm_x_lag, wm_y_lag, wm_z_lag, time, nadv, scheme_)
-    end if
-  end subroutine update_ale_mesh
-
-
+  !> Frees all resources associated with the ALE manager.
   subroutine ale_manager_free(this)
     class(ale_manager_t), intent(inout), target :: this
     integer :: i
@@ -1559,6 +1706,12 @@ contains
     call this%wm_x_lag%free()
     call this%wm_y_lag%free()
     call this%wm_z_lag%free()
+    if (this%has_wm_prev) then
+       call this%wm_x_prev%free()
+       call this%wm_y_prev%free()
+       call this%wm_z_prev%free()
+       this%has_wm_prev = .false.
+    end if
     call this%x_ref%free()
     call this%y_ref%free()
     call this%z_ref%free()
@@ -1575,6 +1728,7 @@ contains
     if (allocated(this%ghost_handles)) deallocate(this%ghost_handles)
     if (allocated(this%body_rot_matrices)) deallocate(this%body_rot_matrices)
     if (allocated(this%trackers)) deallocate(this%trackers)
+    if (allocated(this%scheme)) deallocate(this%scheme)
     if (associated(neko_ale, this)) nullify(neko_ale)
 
   end subroutine ale_manager_free
@@ -1943,6 +2097,7 @@ contains
     call sync_mesh_preview_step(coef, dummy_field)
     call fout%sample(t_state%t)
 
+    call this%log_frame_health(t_state)
     write(log_buf, '(A,I0, A,ES23.15, A,ES18.11)') &
          "Initial Mesh and Mass matrix saved!  Step: ", step, " | Time:", &
          t_state%t, " | Min Jac: ", min_jac
@@ -1955,7 +2110,7 @@ contains
        t_state%t = t_start + (step * dt)
        nadv = min(step, nadv_sim)
 
-       call this%advance_mesh(coef, t_state, nadv)
+       call this%advance_mesh_explicit(coef, t_state, nadv)
        call coef%recompute_metrics()
 
 
@@ -1987,11 +2142,11 @@ contains
           call sync_mesh_preview_step(coef, dummy_field)
           call fout%sample(t_state%t)
 
+          call this%log_frame_health(t_state)
           write(log_buf, '(A,I0, A,ES23.15, A,ES18.11)') &
                "Mesh and Mass matrix saved!  Step: ", step, " | Time:", &
                t_state%t, " | Min Jac:", min_jac
           call neko_log%message(trim(log_buf))
-
        end if
 
        call this%update_mesh_velocity(coef, t_state)
@@ -2039,7 +2194,7 @@ contains
     real(kind=rp), intent(in) :: initial_pos(3)
     integer, intent(in) :: body_id
     integer :: handle
-    type(point_tracker_t), allocatable :: tmp(:)
+    type(tracked_point_t), allocatable :: tmp(:)
 
     handle = -100
     if (.not. this%active) return
@@ -2172,6 +2327,90 @@ contains
     end do
 
   end subroutine log_rot_angles
+
+  !> Logs rigid-frame health diagnostics for all or selected bodies:
+  !> arm1_len, arm2_len = |G_k - P|, the two ghost moment arms
+  !> arm_angle_deg = angle between the two arms
+  !> det_R = det of the reconstructed rotation matrix
+  !> orthonormality_err = max|R^T R - I|
+  !> can be called in user%compute.
+  !> eg: call neko_ale%log_frame_health(time, body_idxs)
+  subroutine log_frame_health(this, time, body_idxs)
+    class(ale_manager_t), intent(in) :: this
+    type(time_state_t), intent(in) :: time
+    integer, optional, intent(in) :: body_idxs(:)
+
+    integer :: i, idx, n_log, hx, hy, ii, jj
+    real(kind=rp) :: P(3), Gx(3), Gy(3), arm1(3), arm2(3)
+    real(kind=rp) :: len1, len2, cos_ang, ang_deg
+    real(kind=rp) :: R(3,3), RtR(3,3), det_R, ortho_err
+    character(len=512) :: log_buf
+    real(kind=rp), parameter :: rad_to_deg = 180.0_rp / pi
+
+    if (.not. this%active) return
+    if (.not. this%has_moving_boundary) return
+
+    if (present(body_idxs)) then
+       n_log = size(body_idxs)
+    else
+       n_log = this%config%nbodies
+    end if
+
+    call neko_log%message(" ")
+    call neko_log%message("---------Frame health log---------")
+    call neko_log%message("variable, time step, time, body, " // &
+         "arm1_len, arm2_len, arm_angle_deg, det_R, orthonormality_err")
+
+    ! If body_idxs is provided, only log those. Otherwise, log all.
+    do i = 1, n_log
+
+       if (present(body_idxs)) then
+          idx = body_idxs(i)
+       else
+          idx = i
+       end if
+
+       hx = this%ghost_handles(1, idx)
+       hy = this%ghost_handles(2, idx)
+       P  = this%ale_pivot(idx)%pos
+       Gx = this%get_tracker_pos(hx)
+       Gy = this%get_tracker_pos(hy)
+       arm1 = Gx - P
+       arm2 = Gy - P
+       len1 = sqrt(sum(arm1**2))
+       len2 = sqrt(sum(arm2**2))
+
+       cos_ang = sum(arm1 * arm2) / max(len1 * len2, tiny(1.0_rp))
+       cos_ang = max(-1.0_rp, min(1.0_rp, cos_ang))
+       ang_deg = acos(cos_ang) * rad_to_deg
+
+       ! Rotation-matrix health: det (proper rotation => +1) and the
+       ! orthonormality residual max|R^T R - I|.
+       R = this%body_rot_matrices(:,:,idx)
+       det_R = R(1,1) * (R(2,2)*R(3,3) - R(2,3)*R(3,2)) &
+             - R(1,2) * (R(2,1)*R(3,3) - R(2,3)*R(3,1)) &
+             + R(1,3) * (R(2,1)*R(3,2) - R(2,2)*R(3,1))
+       RtR = matmul(transpose(R), R)
+       ortho_err = 0.0_rp
+       do ii = 1, 3
+          do jj = 1, 3
+             if (ii == jj) then
+                ortho_err = max(ortho_err, abs(RtR(ii,jj) - 1.0_rp))
+             else
+                ortho_err = max(ortho_err, abs(RtR(ii,jj)))
+             end if
+          end do
+       end do
+
+       write(log_buf, '(A, I0, A, ES23.15, A, A, A, 5(ES17.10, :, 2X))') &
+            "Frame_health     ", time%tstep, "  ", time%t, "  ", &
+            trim(this%config%bodies(idx)%name), "  ", &
+            len1, len2, ang_deg, det_R, ortho_err
+       call neko_log%message(trim(log_buf))
+
+    end do
+
+  end subroutine log_frame_health
 
   !> Logs pivot positions for all or selected bodies.
   !> can be called in user%compute.

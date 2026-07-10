@@ -40,7 +40,7 @@ module ale_routines_device
   use ab_time_scheme, only : ab_time_scheme_t
   use mesh, only : mesh_t
   use utils, only : neko_error
-  use device_math, only : device_add2s2
+  use device_math, only : device_add2s2, device_cmult2, device_copy
   use zero_dirichlet, only : zero_dirichlet_t
   use math, only : rzero, glimax, cfill
   use gather_scatter, only : GS_OP_MIN
@@ -56,7 +56,9 @@ module ale_routines_device
   private
 
   public :: add_kinematics_to_mesh_velocity_device
-  public :: update_ale_mesh_device
+  public :: update_ale_mesh_ab_device
+  public :: update_ale_mesh_bdf_device
+  public :: update_ale_mesh_cn_device
   public :: compute_cheap_dist_device
 
   type, bind(c) :: kinematics_params_t
@@ -261,8 +263,8 @@ contains
 
 
   !> Update ALE Mesh
-  subroutine update_ale_mesh_device(c_Xh, wm_x, wm_y, wm_z, wm_x_lag, &
-        wm_y_lag, wm_z_lag, time, nadv, scheme_type)
+  subroutine update_ale_mesh_ab_device(c_Xh, wm_x, wm_y, wm_z, wm_x_lag, &
+        wm_y_lag, wm_z_lag, time, nadv)
 
     type(coef_t), intent(inout) :: c_Xh
     type(field_t), intent(in) :: wm_x, wm_y, wm_z
@@ -271,18 +273,13 @@ contains
     type(ab_time_scheme_t) :: ab_scheme_obj
     integer, intent(in) :: nadv
     integer :: j, n
-    character(len=*), intent(in) :: scheme_type
     real(kind=rp) :: ab_coeffs(4), dt_history(10), factor
 
     call rzero(ab_coeffs, 4)
-    if (trim(scheme_type) .eq. 'ab') then
-       dt_history(1) = time%dt
-       dt_history(2) = time%dtlag(1)
-       dt_history(3) = time%dtlag(2)
-       call ab_scheme_obj%compute_coeffs(ab_coeffs, dt_history, nadv)
-    else
-       call neko_error("ALE: Unknown mesh time-integration scheme")
-    end if
+    dt_history(1) = time%dt
+    dt_history(2) = time%dtlag(1)
+    dt_history(3) = time%dtlag(2)
+    call ab_scheme_obj%compute_coeffs(ab_coeffs, dt_history, nadv)
 
     n = c_Xh%dof%size()
 
@@ -299,6 +296,65 @@ contains
        call device_add2s2(c_Xh%dof%y_d, wm_y_lag%lf(j - 1)%x_d, factor, n)
        call device_add2s2(c_Xh%dof%z_d, wm_z_lag%lf(j - 1)%x_d, factor, n)
     end do
-  end subroutine update_ale_mesh_device
+  end subroutine update_ale_mesh_ab_device
+
+  !> BDF-k mesh reposition:
+  !> x^{n+1} = (dt/beta_0)*wm - sum_{j=1}^{nadv} (beta_j/beta_0) * x^{n+1-j}.
+  !> gamma = dt / beta(0)
+  subroutine update_ale_mesh_bdf_device(c_Xh, wm_x, wm_y, wm_z, &
+       mesh_x_lag, mesh_y_lag, mesh_z_lag, gamma, beta, nadv)
+    type(coef_t), intent(inout) :: c_Xh
+    type(field_t), intent(in) :: wm_x, wm_y, wm_z
+    type(field_t), intent(in) :: mesh_x_lag(:), mesh_y_lag(:), mesh_z_lag(:)
+    real(kind=rp), intent(in) :: gamma, beta(0:3)
+    integer, intent(in) :: nadv
+    integer :: j, n
+    real(kind=rp) :: inv_b0, gamma_j
+ 
+    n = c_Xh%dof%size()
+    inv_b0 = 1.0_rp / beta(0)
+
+    call device_cmult2(c_Xh%dof%x_d, wm_x%x_d, gamma, n)
+    call device_cmult2(c_Xh%dof%y_d, wm_y%x_d, gamma, n)
+    call device_cmult2(c_Xh%dof%z_d, wm_z%x_d, gamma, n)
+    do j = 1, nadv
+       gamma_j = -beta(j) * inv_b0
+       call device_add2s2(c_Xh%dof%x_d, mesh_x_lag(j)%x_d, gamma_j, n)
+       call device_add2s2(c_Xh%dof%y_d, mesh_y_lag(j)%x_d, gamma_j, n)
+       call device_add2s2(c_Xh%dof%z_d, mesh_z_lag(j)%x_d, gamma_j, n)
+    end do
+  end subroutine update_ale_mesh_bdf_device
+
+  !> CN mesh reposition:
+  !> x^{n+1} = x^n + (dt/2) * (wm^{n+1} + wm^n).
+  !> mesh_x_n/mesh_y_n/mesh_z_n hold x^n (= mesh_*_lag(1)); wm_*_prev hold wm^n.
+  !> The current mesh coordinates are fully overwritten (recomputed from x^n),
+  !> so the routine is safe to call repeatedly within the FSI sub-iteration.
+  subroutine update_ale_mesh_cn_device(c_Xh, wm_x, wm_y, wm_z, &
+       wm_x_prev, wm_y_prev, wm_z_prev, mesh_x_n, mesh_y_n, mesh_z_n, dt)
+    type(coef_t), intent(inout) :: c_Xh
+    type(field_t), intent(in) :: wm_x, wm_y, wm_z
+    type(field_t), intent(in) :: wm_x_prev, wm_y_prev, wm_z_prev
+    type(field_t), intent(in) :: mesh_x_n, mesh_y_n, mesh_z_n
+    real(kind=rp), intent(in) :: dt
+    integer :: n
+    real(kind=rp) :: half_dt
+
+    n = c_Xh%dof%size()
+    half_dt = 0.5_rp * dt
+
+    ! x^{n+1} = x^n + (dt/2) wm^{n+1} + (dt/2) wm^n
+    call device_copy(c_Xh%dof%x_d, mesh_x_n%x_d, n)
+    call device_add2s2(c_Xh%dof%x_d, wm_x%x_d, half_dt, n)
+    call device_add2s2(c_Xh%dof%x_d, wm_x_prev%x_d, half_dt, n)
+
+    call device_copy(c_Xh%dof%y_d, mesh_y_n%x_d, n)
+    call device_add2s2(c_Xh%dof%y_d, wm_y%x_d, half_dt, n)
+    call device_add2s2(c_Xh%dof%y_d, wm_y_prev%x_d, half_dt, n)
+
+    call device_copy(c_Xh%dof%z_d, mesh_z_n%x_d, n)
+    call device_add2s2(c_Xh%dof%z_d, wm_z%x_d, half_dt, n)
+    call device_add2s2(c_Xh%dof%z_d, wm_z_prev%x_d, half_dt, n)
+  end subroutine update_ale_mesh_cn_device
 
 end module ale_routines_device

@@ -44,9 +44,15 @@ module fsi_dynamics
      real(kind=rp) :: body_vel(6)
      real(kind=rp) :: body_vel_guess(6)
      real(kind=rp) :: body_vel_lag(6, 3)
+     !> Previous-step acceleration, used only by the Newmark structure
+     !> integrator (constant average acceleration). Ignored for the BDF path.
+     real(kind=rp) :: body_acc(6) = 0.0_rp
 
-     ! Stores the prescribed velocity of the moving frame
+     ! The prescribed velocity of the moving frame
      real(kind=rp) :: moving_frame_presc_acc(6) = 0.0_rp
+     !> Previous-step prescribed-frame acceleration, used only by the
+     !> Newmark (CN-consistent) frame-acceleration recurrence. Not checkpointed
+     real(kind=rp) :: moving_frame_presc_acc_prev(6) = 0.0_rp
      real(kind=rp) :: moving_frame_presc_vel(6, 0:3) = 0.0_rp
 
      type(force_torque_t) :: force_monitor
@@ -56,7 +62,7 @@ contains
 
   subroutine assemble_structural_inertial_terms(nbodies_fsi, bodies, &
        fsi_dof_map, M_global, B_global, rot_matrices, &
-       time, gamma, beta, nadv, gravity_vec)
+       time, gamma, beta, nadv, gravity_vec, accel_hist)
 
     integer, intent(in) :: nbodies_fsi
     type(fsi_body_t), intent(inout) :: bodies(:)
@@ -67,6 +73,10 @@ contains
     real(kind=rp), intent(in) :: gravity_vec(3)
     real(kind=rp) :: dt, gamma, beta(0:3)
     integer, intent(in) :: nadv
+    !> Per-body history acceleration a_hist for the
+    !> Newmark integrator, such that a^{n+1} = gamma*v_guess + a_hist with
+    !> gamma = 2/dt.
+    real(kind=rp), intent(in), optional :: accel_hist(:, :)
 
     integer :: i, j, k, row_g, col_g
     real(kind=rp) :: m, m_disp
@@ -74,7 +84,7 @@ contains
     real(kind=rp) :: c(3), r_rel(3), r_cb(3)
     real(kind=rp) :: v_s(3), w_s(3)
     real(kind=rp) :: a_f(3), alpha_f(3), w_f(3)
-    real(kind=rp) :: a_rel_s(3), alpha_rel_s(3), V_hist(6)
+    real(kind=rp) :: a_rel_s(3), alpha_rel_s(3), V_hist(6), a_full(6)
 
     real(kind=rp) :: M_local(6,6), B_local(6)
     real(kind=rp) :: C_skew(3,3), Wf_skew(3,3), Ws_skew(3,3), I3(3,3)
@@ -140,22 +150,26 @@ contains
        Wf_skew = skew_tensor(w_f)
        Ws_skew = skew_tensor(w_s)
 
-       ! BDF-k History terms for acceleration
-       V_hist = beta(0) * bodies(i)%body_vel_guess
-
-!       k=0
-!       write(msg, '(A, I0, A, ES23.15)') "beta(", k, ") = ", beta(k)
-!       call neko_log%message(trim(msg))
-
-       do k = 1, nadv
-          V_hist = V_hist + beta(k)*bodies(i)%body_vel_lag(:, k)
- !         write(msg, '(A, I0, A, ES23.15)') "beta(", k, ") = ", beta(k)
- !         call neko_log%message(trim(msg))
-       end do
+       ! Relative (body) acceleration a^{n+1} evaluated at the current velocity
+       ! guess. In both schemes it has the form  a = gamma * v_guess + a_hist,
+       ! where gamma = d(a)/d(v_guess) is passed in and used in the Jacobian M.
+       if (present(accel_hist)) then
+          ! Newmark: a_hist = -g^n
+          ! gamma = 2/dt.
+          a_full = gamma * bodies(i)%body_vel_guess + accel_hist(:, i)
+       else
+          ! BDF-k: V_hist = beta(0)*v_guess + sum_{k>=1} beta(k)*v_lag(k),
+          ! a = V_hist/dt, gamma = beta(0)/dt.
+          V_hist = beta(0) * bodies(i)%body_vel_guess
+          do k = 1, nadv
+             V_hist = V_hist + beta(k) * bodies(i)%body_vel_lag(:, k)
+          end do
+          a_full = V_hist / dt
+       end if
 
        ! History acceleration (Evaluated with current guess)
-       a_rel_s = V_hist(1:3) / dt !< Linear acceleration
-       alpha_rel_s = V_hist(4:6) / dt !< Angular acceleration
+       a_rel_s = a_full(1:3) !< Linear acceleration
+       alpha_rel_s = a_full(4:6) !< Angular acceleration
 
 !       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG a_rel_s: ", a_rel_s(1), a_rel_s(2), a_rel_s(3)
 !       call neko_log%message(trim(msg))

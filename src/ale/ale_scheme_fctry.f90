@@ -1,4 +1,4 @@
-! Copyright (c) 2025, The Neko Authors
+! Copyright (c) 2026 The Neko Authors
 ! All rights reserved.
 !
 ! Redistribution and use in source and binary forms, with or without
@@ -30,45 +30,41 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-!> Factory for all fluid schemes
-submodule (fluid_scheme_base) fluid_base_fctry
-  use fluid_pnpn, only : fluid_pnpn_t
-  use fluid_pnpn_fsi_greens, only : fluid_pnpn_fsi_greens_t
-  use fluid_pnpn_fsi_subiteration, only : fluid_pnpn_fsi_subiter_t 
-  use fluid_scheme_compressible_euler, only : fluid_scheme_compressible_euler_t
-  use utils, only : neko_type_error
 
-  character(len=20) :: FLUID_KNOWN_TYPES(4) = [character(len=20) :: &
-       "pnpn", "compressible", "pnpn_fsi_greens", "pnpn_fsi_subiteration"]
+!> Factory for the ALE mesh position-integration scheme.
+!> 'ab' -> ale_scheme_ab_t (Adams-Bashforth; prescribed ALE / Green's)
+!> 'bdf' -> ale_scheme_bdf_t (implicit BDF-k; FSI sub-iteration)
+!> 'cn' -> ale_scheme_cn_t (implicit Crank-Nicolson; Newmark FSI sub-iteration)
+module ale_scheme_fctry
+  use ale_scheme, only : ale_scheme_t
+  use ale_scheme_ab, only : ale_scheme_ab_t
+  use ale_scheme_bdf, only : ale_scheme_bdf_t
+  use ale_scheme_cn, only : ale_scheme_cn_t
+  use utils, only : neko_error
+  implicit none
+  private
+
+  public :: ale_scheme_factory
 
 contains
 
-  !> Initialise a fluid scheme
-  module subroutine fluid_scheme_base_factory(object, type_name)
-    class(fluid_scheme_base_t), intent(inout), allocatable :: object
-    character(len=*) :: type_name
+  subroutine ale_scheme_factory(scheme, mode)
+    class(ale_scheme_t), allocatable, intent(inout) :: scheme
+    character(len=*), intent(in) :: mode
 
-    if (allocated(object)) then
-       call object%free()
-       deallocate(object)
-    end if
+    if (allocated(scheme)) deallocate(scheme)
 
-    select case (trim(type_name))
-    case ('pnpn')
-       allocate(fluid_pnpn_t::object)
-    
-    case ('pnpn_fsi_greens')
-       allocate(fluid_pnpn_fsi_greens_t::object)
-       
-    case ('pnpn_fsi_subiteration')
-       allocate(fluid_pnpn_fsi_subiter_t::object)
-
-    case ('compressible')
-       allocate(fluid_scheme_compressible_euler_t::object)
+    select case (trim(mode))
+    case ('ab')
+       allocate(ale_scheme_ab_t :: scheme)
+    case ('bdf')
+       allocate(ale_scheme_bdf_t :: scheme)
+    case ('cn')
+       allocate(ale_scheme_cn_t :: scheme)
     case default
-       call neko_type_error("fluid scheme base", type_name, FLUID_KNOWN_TYPES)
+       call neko_error("ale_scheme_factory: unknown ALE scheme '" // &
+            trim(mode) // "' (expected 'ab', 'bdf' or 'cn')")
     end select
+  end subroutine ale_scheme_factory
 
-  end subroutine fluid_scheme_base_factory
-
-end submodule fluid_base_fctry
+end module ale_scheme_fctry

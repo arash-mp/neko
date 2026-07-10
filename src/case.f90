@@ -155,6 +155,7 @@ contains
     real(kind=rp), allocatable :: real_vals(:)
     type(vector_t), pointer :: vec
     character(len=:), allocatable :: string_val, name, file_format
+    character(len=:), allocatable :: fluid_scheme_type, fsi_coupling
     character(len=NEKO_FNAME_LEN) :: lb_file, lb_name, lb_path, lb_ext
     integer :: output_dir_len
     integer :: precision, layout
@@ -294,7 +295,23 @@ contains
     ! Setup fluid scheme
     !
     call json_get(this%params, 'case.fluid.scheme', string_val)
-    call fluid_scheme_base_factory(this%fluid, trim(string_val))
+
+    fluid_scheme_type = trim(string_val)
+    if (trim(string_val) .eq. 'pnpn_fsi') then
+       call json_get(this%params, 'case.fluid.fsi.coupling', &
+            fsi_coupling)
+       select case (trim(fsi_coupling))
+       case ('greens')
+          fluid_scheme_type = 'pnpn_fsi_greens'
+       case ('subiteration')
+          fluid_scheme_type = 'pnpn_fsi_subiteration'
+       case default
+          call neko_error("Unknown case.fluid.fsi.coupling '" // &
+               trim(fsi_coupling) // &
+               "' (expected 'greens' or 'subiteration')")
+       end select
+    end if
+    call fluid_scheme_base_factory(this%fluid, trim(fluid_scheme_type))
 
     call json_get_or_lookup(this%params, 'case.numerics.polynomial_order', lx)
     lx = lx + 1 ! add 1 to get number of gll points

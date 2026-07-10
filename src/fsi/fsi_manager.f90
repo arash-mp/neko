@@ -33,8 +33,8 @@ contains
         u_g, v_g, w_g, p_g, res_long_print, gravity_vec, &
         proj_prs_green, proj_vel_green, global_disp_rel, &
         global_body_vel, global_body_vel_lag, &
-        global_moving_frame_presc_vel, weak_coupling, &
-        non_linear_correction_term)
+        global_moving_frame_presc_vel, skip_greens_solve, &
+        non_linear_correction_term, global_body_acc, global_frame_acc)
 
     ! Inputs needed for setup
     type(json_file), target, intent(inout) :: params
@@ -63,7 +63,7 @@ contains
     logical :: fsi_pr_projection_reorthogonalize_basis
     real(kind=rp), intent(out) :: gravity_vec(3)
     logical, intent(out) :: res_long_print
-    logical, intent(out) :: weak_coupling
+    logical, intent(out) :: skip_greens_solve
     logical, intent(out) :: non_linear_correction_term
 
     type(json_file) :: body_sub
@@ -75,6 +75,7 @@ contains
     real(kind=rp), allocatable :: temp_vec(:)
     character(len=:), allocatable :: temp_str
     integer, allocatable :: temp_vec_int(:)
+    character(len=20) :: coupling_mode
     integer :: temp_vec_int6(6)
     logical :: log_forces, long_print
 
@@ -82,6 +83,10 @@ contains
     real(kind=rp), allocatable, intent(inout) :: global_body_vel(:)
     real(kind=rp), allocatable, intent(inout) :: global_body_vel_lag(:,:)
     real(kind=rp), allocatable, intent(inout) :: global_moving_frame_presc_vel(:,:)
+    !> Newmark previous-acceleration.
+    real(kind=rp), allocatable, intent(inout), optional :: global_body_acc(:)
+    !> Newmark prescribed-frame previous-acceleration.
+    real(kind=rp), allocatable, intent(inout), optional :: global_frame_acc(:)
 
     center_dummy = 0.0_rp
 
@@ -97,20 +102,37 @@ contains
        call json_get_or_default(params, 'case.fluid.fsi.long_print', long_print, .false.)
        call json_get_or_default(params, 'case.fluid.fsi.results_long_print', res_long_print, .false.)
        call json_get_or_default(params, 'force_scale', force_scale, 1.0_rp)
-       call json_get_or_default(params, 'case.fluid.fsi.weak_coupling', weak_coupling, .false.)
+       call json_get_or_default(params, 'case.fluid.fsi.skip_greens_solve', skip_greens_solve, .false.)
        call json_get_or_default(params, 'case.fluid.fsi.non_linear_correction_term', non_linear_correction_term, .false.)
 
-       if (.not. weak_coupling) then
-          call neko_log%message(" ")
-          call neko_log%message("--------------------------------------------")
-          call neko_log%message("FSI Coupling: Strong Coupling (Implicit FSI)")
-          call neko_log%message("--------------------------------------------")
-          call neko_log%message(" ")
+       call json_get(params, 'case.fluid.fsi.coupling', temp_str)
+       if (trim(temp_str) .eq. 'subiteration') then
+         skip_greens_solve = .true.
+         coupling_mode = "subiteration"
+       elseif (trim(temp_str) .eq. 'greens') then
+         coupling_mode = "greens"
        else
+         call neko_error("FSI: Unknown coupling mode: " // trim(temp_str) // &
+                ". Must be 'subiteration' or 'greens'.")
+       end if
+        
+       if ( (.not. skip_greens_solve) .and. coupling_mode == "greens" ) then
           call neko_log%message(" ")
-          call neko_log%message("------------------------------------------")
-          call neko_log%message("FSI Coupling: Weak Coupling (Explicit FSI)")
-          call neko_log%message("------------------------------------------")
+          call neko_log%message("-----------------------------------------------------")
+          call neko_log%message("FSI Coupling: Greens + Strong Coupling (Implicit FSI)")
+          call neko_log%message("-----------------------------------------------------")
+          call neko_log%message(" ")
+       else if ( (skip_greens_solve) .and. coupling_mode == "greens" ) then
+          call neko_log%message(" ")
+          call neko_log%message("---------------------------------------------------")
+          call neko_log%message("FSI Coupling: Greens + Weak Coupling (Explicit FSI)")
+          call neko_log%message("---------------------------------------------------")
+          call neko_log%message(" ")
+       else if (coupling_mode == "subiteration") then
+          call neko_log%message(" ")
+          call neko_log%message("-----------------------------------------------------")
+          call neko_log%message("FSI Coupling: Subiteration")
+          call neko_log%message("-----------------------------------------------------")
           call neko_log%message(" ")
        end if
 
@@ -120,7 +142,7 @@ contains
 
        call json_get_or_default(params, &
               'case.fluid.fsi.pressure_solver.projection_hold_steps', &
-              fsi_pr_projection_activ_step, 3)
+              fsi_pr_projection_activ_step, 5)
 
        call json_get_or_default(params, &
               'case.fluid.fsi.pressure_solver.projection_reorthogonalize_basis', &
@@ -142,6 +164,9 @@ contains
 
        call params%info('case.fluid.fsi.bodies', n_children = n_bodies)
        nbodies_fsi = n_bodies
+       if (nbodies_fsi == 0) then
+          call neko_error("FSI: 'case.fluid.fsi.bodies' is empty (no FSI bodies defined)")
+       end if
 
        ! Global FSI Logging
        write(log_buf, '(A,3(ES13.6,1X))') ' Gravity Vector  : ', gravity_vec
@@ -165,6 +190,18 @@ contains
 
        if (allocated(global_body_vel)) deallocate(global_body_vel)
        allocate(global_body_vel(6 * nbodies_fsi))
+
+       if (present(global_body_acc)) then
+          if (allocated(global_body_acc)) deallocate(global_body_acc)
+          allocate(global_body_acc(6 * nbodies_fsi))
+          global_body_acc = 0.0_rp
+       end if
+
+       if (present(global_frame_acc)) then
+          if (allocated(global_frame_acc)) deallocate(global_frame_acc)
+          allocate(global_frame_acc(6 * nbodies_fsi))
+          global_frame_acc = 0.0_rp
+       end if
 
        if (allocated(global_body_vel_lag)) deallocate(global_body_vel_lag)
        allocate(global_body_vel_lag(6 * nbodies_fsi, &
@@ -539,13 +576,17 @@ contains
   !> Flattens FSI body arrays into global 1D/2D arrays for checkpointing
   subroutine fsi_prep_checkpoint(nbodies_fsi, bodies, global_disp_rel, &
        global_body_vel, global_body_vel_lag, &
-       global_moving_frame_presc_vel)
+       global_moving_frame_presc_vel, global_body_acc, global_frame_acc)
     integer, intent(in) :: nbodies_fsi
     type(fsi_body_t), intent(in) :: bodies(:)
     real(kind=rp), intent(inout) :: global_disp_rel(:)
     real(kind=rp), intent(inout) :: global_body_vel(:)
     real(kind=rp), intent(inout) :: global_body_vel_lag(:,:)
     real(kind=rp), intent(inout) :: global_moving_frame_presc_vel(:,:)
+    !> Newmark previous-acceleration
+    real(kind=rp), intent(inout), optional :: global_body_acc(:)
+    !> Newmark prescribed-frame previous-acceleration
+    real(kind=rp), intent(inout), optional :: global_frame_acc(:)
 
     integer :: i, idx_base
 
@@ -565,19 +606,33 @@ contains
 
        global_moving_frame_presc_vel(idx_base + 1 : idx_base + 6, :) = &
             bodies(i)%moving_frame_presc_vel(1:6, :)
+
+       if (present(global_body_acc)) then
+          global_body_acc(idx_base + 1 : idx_base + 6) = &
+               bodies(i)%body_acc(1:6)
+       end if
+
+       if (present(global_frame_acc)) then
+          global_frame_acc(idx_base + 1 : idx_base + 6) = &
+               bodies(i)%moving_frame_presc_acc_prev(1:6)
+       end if
     end do
   end subroutine fsi_prep_checkpoint
 
   !> Restores FSI body arrays from global arrays after restart read
   subroutine fsi_restart_restore(nbodies_fsi, bodies, global_disp_rel, &
        global_body_vel, global_body_vel_lag, &
-       global_moving_frame_presc_vel)
+       global_moving_frame_presc_vel, global_body_acc, global_frame_acc)
     integer, intent(in) :: nbodies_fsi
     type(fsi_body_t), intent(inout) :: bodies(:)
     real(kind=rp), intent(in) :: global_disp_rel(:)
     real(kind=rp), intent(in) :: global_body_vel(:)
     real(kind=rp), intent(in) :: global_body_vel_lag(:,:)
     real(kind=rp), intent(in) :: global_moving_frame_presc_vel(:,:)
+    !> Newmark previous-acceleration
+    real(kind=rp), intent(in), optional :: global_body_acc(:)
+    !> Newmark prescribed-frame previous-acceleration
+    real(kind=rp), intent(in), optional :: global_frame_acc(:)
 
     integer :: i, idx_base
 
@@ -596,6 +651,16 @@ contains
 
        bodies(i)%moving_frame_presc_vel(1:6, :) = &
             global_moving_frame_presc_vel(idx_base + 1 : idx_base + 6, :)
+
+       if (present(global_body_acc)) then
+          bodies(i)%body_acc(1:6) = &
+               global_body_acc(idx_base + 1 : idx_base + 6)
+       end if
+
+       if (present(global_frame_acc)) then
+          bodies(i)%moving_frame_presc_acc_prev(1:6) = &
+               global_frame_acc(idx_base + 1 : idx_base + 6)
+       end if
     end do
   end subroutine fsi_restart_restore
 end module fsi_manager

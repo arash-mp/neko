@@ -3,6 +3,11 @@ libneko_la_LDFLAGS = -release ${PACKAGE_VERSION}
 neko_fortran_SOURCES = \
 	ale/ale_rigid_kinematics.f90\
 	ale/ale_manager.f90\
+	ale/ale_scheme.f90\
+	ale/ale_scheme_ab.f90\
+	ale/ale_scheme_bdf.f90\
+	ale/ale_scheme_cn.f90\
+	ale/ale_scheme_fctry.f90\
 	ale/bcknd/cpu/ale_routines_cpu.f90\
 	ale/bcknd/device/ale_routines_device.F90\
 	api/neko_api.f90\
@@ -278,7 +283,8 @@ neko_fortran_SOURCES = \
 	fluid/fluid_scheme_compressible_euler.f90\
 	fluid/fluid_aux.f90\
 	fluid/fluid_pnpn.f90\
-	fluid/fluid_pnpn_fsi.f90\
+	fluid/fluid_pnpn_fsi_greens.f90\
+	fluid/fluid_pnpn_fsi_subiteration.f90\	
 	fluid/fluid_base_fctry.f90\
 	fluid/fluid_pnpn_bc_fctry.f90\
 	fluid/euler_bc_fctry.f90\

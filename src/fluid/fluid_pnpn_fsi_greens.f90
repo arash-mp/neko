@@ -1,4 +1,36 @@
-module fluid_pnpn_fsi
+! Copyright (c) 2026, The Neko Authors
+! All rights reserved.
+!
+! Redistribution and use in source and binary forms, with or without
+! modification, are permitted provided that the following conditions
+! are met:
+!
+!   * Redistributions of source code must retain the above copyright
+!     notice, this list of conditions and the following disclaimer.
+!
+!   * Redistributions in binary form must reproduce the above
+!     copyright notice, this list of conditions and the following
+!     disclaimer in the documentation and/or other materials provided
+!     with the distribution.
+!
+!   * Neither the name of the authors nor the names of its
+!     contributors may be used to endorse or promote products derived
+!     from this software without specific prior written permission.
+!
+! THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+! "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+! LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+! FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+! COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+! INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+! BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+! LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+! CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+! LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+! POSSIBILITY OF SUCH DAMAGE.
+!
+module fluid_pnpn_fsi_greens
   use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms, &
        add_fsi_non_linear_matrices
   use fsi_manager, only: fsi_manager_init, linsolve_dense, &
@@ -37,9 +69,13 @@ module fluid_pnpn_fsi
   implicit none
   private
 
-  type, public, extends(fluid_pnpn_t) :: fluid_pnpn_fsi_t
+  ! Green's method of Fischer, P., Schmitt, M., & Tomboulides, A. (2017). 
+  ! Recent developments in spectral element simulations of moving-domain problems
+  ! Recent progress and modern challenges in 
+  ! applied mathematics, modeling and computational science, 213-244.
+  type, public, extends(fluid_pnpn_t) :: fluid_pnpn_fsi_greens_t
      logical :: if_fsi = .false.
-     logical :: weak_coupling = .false.
+     logical :: skip_greens_solve = .false.
      logical :: non_linear_correction_term = .false.
      logical :: res_long_print = .false.
      real(kind=rp) :: gravity_vec(3) = 0.0_rp
@@ -86,14 +122,14 @@ module fluid_pnpn_fsi
      procedure, pass(this) :: calc_fsi_terms => &
            assemble_fsi_structural_inertial_terms
      procedure, pass(this) :: log_fsi_results => fluid_fsi_log_results
-     procedure, pass(this) :: inquire_frame_prescribed_motion => &
-          fluid_fsi_inquire_frame_prescribed_motion
-  end type fluid_pnpn_fsi_t
+     procedure, pass(this) :: query_frame_prescribed_motion => &
+          fluid_fsi_query_frame_prescribed_motion
+  end type fluid_pnpn_fsi_greens_t
 
 contains
 
   subroutine fluid_fsi_init(this, msh, lx, params, user, chkp)
-    class(fluid_pnpn_fsi_t), target, intent(inout) :: this
+    class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
     type(mesh_t), target, intent(inout) :: msh
     integer, intent(in) :: lx
     type(json_file), target, intent(inout) :: params
@@ -111,7 +147,7 @@ contains
     call this%w_s%init(this%dm_Xh, 'w_s')
     call this%p_s%init(this%dm_Xh, 'p_s')
 
-    ! Init fsi_manager to parse JSON and setup matrices
+    ! Init fsi_manager
     call fsi_manager_init(params, msh, this%ale, this%c_Xh, this%dm_Xh, &
          this%if_fsi, this%nbodies_fsi, this%fsi_bodies, this%fsi_dof_map, &
          this%total_active_dofs, &
@@ -120,7 +156,7 @@ contains
          this%res_long_print, this%gravity_vec, this%proj_prs_green, &
          this%proj_vel_green, this%global_disp_rel, &
          this%global_body_vel, this%global_body_vel_lag, &
-         this%global_moving_frame_presc_vel, this%weak_coupling, &
+         this%global_moving_frame_presc_vel, this%skip_greens_solve, &
          this%non_linear_correction_term)
 
     call this%chkp%add_fsi(this%global_disp_rel, this%global_body_vel, &
@@ -166,14 +202,14 @@ contains
 
 
   subroutine fluid_fsi_step(this, time, dt_controller)
-    class(fluid_pnpn_fsi_t), target, intent(inout) :: this
+    class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
     type(ab_time_scheme_t) :: ab_scheme_obj
     character(len=1000) :: msg
 
     real(kind=rp) :: ab_coeffs(4), dt_history(10)
-    real(kind=rp) :: beta(0:3), dt
+    real(kind=rp) :: beta(0:3)
     integer :: nadv, n, i, j, k, row_g, col_g, k_row, idx_g
     real(kind=rp) :: F_fluid(6)
     real(kind=dp) :: start_time_s, end_time_s, step_time_s
@@ -186,7 +222,6 @@ contains
     real(kind=rp) :: nr_residual
     integer :: nr_iter, max_nr_iter
 
-    dt = time%dt
     n = this%dm_Xh%size()
     nadv = this%ext_bdf%nadv
 
@@ -221,19 +256,18 @@ contains
     ! have consistency with how the pivot and mesh is updated.
     ! Otherwise (I think) we will have drift between displacement
     ! and pivot point.
+    ! disp_rel <- disp_rel + dt*ab_coeffs(1)*body_vel
+    !      + sum_{j=2}^{nadv} dt*ab_coeffs(j)*body_vel_lag(:,j)
     do i = 1, this%nbodies_fsi
-       this%fsi_bodies(i)%disp_rel = this%fsi_bodies(i)%disp_rel + &
-             dt * ab_coeffs(1) * this%fsi_bodies(i)%body_vel
-       do j = 2, nadv
-          this%fsi_bodies(i)%disp_rel = this%fsi_bodies(i)%disp_rel + &
-               dt * ab_coeffs(j) * this%fsi_bodies(i)%body_vel_lag(:, j)
-       end do
+       call this%ale%scheme%integrate_6dof(this%fsi_bodies(i)%disp_rel, &
+            this%fsi_bodies(i)%body_vel, time, nadv, &
+            v6_lag = this%fsi_bodies(i)%body_vel_lag, ab_coeffs = ab_coeffs)
     end do
 
     ! Add prescribed frame motion terms.
     ! I should double check if it is the right place to put this. I think it is.
     ! But, should become sure.
-    call this%inquire_frame_prescribed_motion(time, beta, nadv)
+    call this%query_frame_prescribed_motion(time, beta, nadv)
     
     ! Standard fluid step
     start_time_s = MPI_WTIME()
@@ -243,8 +277,9 @@ contains
     ! We advance the mesh only here.
     ! We should not skip the mesh velocity here, since we need to update the 
     ! rotation matrix.
-    ! I think I can move compute_rotationm matrics inside advance_mesh. I need to 
-    ! remember if there was any reason that I put it there at first place.
+    ! I think I can move compute_rotationm matrics inside advance_mesh_explicit. 
+    ! I need to remember if there was any reason that 
+    ! I put it there at first place.
     ! Calling update_mesh_velocity here should be totally harmless.
     call this%step_ext(time, dt_controller, greens_function = .false., &
          skip_ale_msh_vel_update = .false.)
@@ -286,8 +321,8 @@ contains
        end do
     end do
 
-    ! Skip Green's function if weak_coupling is true
-    if (.not. this%weak_coupling) then
+    ! Skip Green's function if skip_greens_solve is true
+    if (.not. this%skip_greens_solve) then
        ! Green's Function Loop
        do j = 1, this%nbodies_fsi
           do k = 1, 6
@@ -353,11 +388,13 @@ contains
                       if (k_row <= 3) then
                          this%M_global(row_g, col_g) = &
                               this%M_global(row_g, col_g) - &
-                              this%fsi_bodies(i)%force_monitor%total_force(k_row)
+                              this%fsi_bodies(i)%&
+                              force_monitor%total_force(k_row)
                       else
                          this%M_global(row_g, col_g) = &
                               this%M_global(row_g, col_g) - &
-                              this%fsi_bodies(i)%force_monitor%total_torque(k_row-3)
+                              this%fsi_bodies(i)%&
+                              force_monitor%total_torque(k_row-3)
                       end if
                    end if
                 end do
@@ -365,7 +402,8 @@ contains
           end do
        end do
     else
-       call neko_log%message("Weak coupling enabled: Skipping Green's function fluid feedback.")
+       call neko_log%message("Weak coupling enabled: " // &
+            "Skipping Green's function fluid feedback.")
        step_time_g = 0.0_dp
     end if
 
@@ -439,7 +477,7 @@ contains
 
     ! Add FSI correction to the fluid solution only if strong coupling
     ! u = u_s + sum( X_sol(k) * u_g(k) )
-    if (.not. this%weak_coupling) then
+    if (.not. this%skip_greens_solve) then
        if (this%total_active_dofs > 0) then
           do idx_g = 1, this%total_active_dofs
              call field_add2s2(this%u, this%u_g(idx_g), this%X_sol(idx_g), n)
@@ -502,7 +540,7 @@ contains
   end subroutine fluid_fsi_step
 
   subroutine fluid_fsi_free(this)
-    class(fluid_pnpn_fsi_t), intent(inout) :: this
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
     integer :: i, k
 
     if (allocated(this%fsi_bodies)) then
@@ -546,12 +584,14 @@ contains
     call this%v_s%free()
     call this%w_s%free()
     call this%p_s%free()
+
+    ! Free the base fluid_pnpn_t
     call this%fluid_pnpn_t%free()
 
   end subroutine fluid_fsi_free
 
-  subroutine fluid_fsi_inquire_frame_prescribed_motion(this, time, beta, nadv)
-    class(fluid_pnpn_fsi_t), intent(inout) :: this
+  subroutine fluid_fsi_query_frame_prescribed_motion(this, time, beta, nadv)
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
     real(kind=rp), intent(in) :: beta(0:3)
     real(kind=rp) :: gamma
@@ -593,10 +633,10 @@ contains
                (beta(k) * this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
        end do
     end do
-  end subroutine fluid_fsi_inquire_frame_prescribed_motion
+  end subroutine fluid_fsi_query_frame_prescribed_motion
 
   subroutine assemble_fsi_structural_inertial_terms(this, time, beta, nadv)
-    class(fluid_pnpn_fsi_t), intent(inout) :: this
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
     real(kind=rp), intent(in) :: beta(0:3)
     real(kind=rp) :: gamma
@@ -617,7 +657,7 @@ contains
   end subroutine assemble_fsi_structural_inertial_terms
 
   subroutine fluid_fsi_log_results(this, time)
-    class(fluid_pnpn_fsi_t), intent(in) :: this
+    class(fluid_pnpn_fsi_greens_t), intent(in) :: this
     type(time_state_t), intent(in) :: time
     character(len=1024) :: msg
     character(len=128) :: fmt_res
@@ -695,7 +735,7 @@ contains
   end subroutine fluid_fsi_log_results
 
   subroutine fluid_fsi_restart(this, chkp)
-    class(fluid_pnpn_fsi_t), target, intent(inout) :: this
+    class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
     type(chkp_t), intent(inout) :: chkp
     type(time_state_t) :: t_restart
     real(kind=rp) :: dtlag(10), tlag(10)
@@ -706,7 +746,9 @@ contains
 
     n = this%u%dof%size()
 
+    ! Restart the base fluid_pnpn_t
     call this%fluid_pnpn_t%restart(chkp)
+
     ! Restore FSI specific arrays
     if (this%if_fsi .and. this%nbodies_fsi > 0) then
        call fsi_restart_restore(this%nbodies_fsi, this%fsi_bodies, &
@@ -732,4 +774,4 @@ contains
     end if
   end subroutine fluid_fsi_restart
 
-end module fluid_pnpn_fsi
+end module fluid_pnpn_fsi_greens

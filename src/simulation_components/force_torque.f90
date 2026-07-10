@@ -61,7 +61,7 @@ module force_torque
   use comm, only : NEKO_COMM
   use device, only : device_memcpy, HOST_TO_DEVICE
   use ale_manager, only : neko_ale
-  use ale_rigid_kinematics, only : pivot_state_t
+  use ale_rigid_kinematics, only : tracked_point_t
   use utils, only : neko_error
   use mesh, only : mesh_t  
   implicit none
@@ -99,8 +99,7 @@ module force_torque
      type(dirichlet_t) :: bc
      character(len=80) :: print_format
      logical :: full_log = .true.
-     ! Pointer to the live pivot state inside ale_manager
-     type(pivot_state_t), pointer :: pivot_link => null()
+     type(tracked_point_t), pointer :: pivot_link => null()
      logical :: moving_center = .false.
      logical :: update_normals = .false.
      character(len=64) :: linked_body_name = 'NOT_LINKED'

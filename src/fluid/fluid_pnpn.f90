@@ -219,6 +219,9 @@ module fluid_pnpn
      !> Extended step allowing Green's function mode (Custom signature).
      procedure, pass(this) :: step_ext => fluid_pnpn_step_ext
 
+     !> Assemble the explicit (EXT/BDF history) RHS.
+     procedure, pass(this) :: assemble_rhs => fluid_pnpn_assemble_rhs
+
      !> Restart from a previous solution.
      procedure, pass(this) :: restart => fluid_pnpn_restart
      !> Set up boundary conditions.
@@ -685,6 +688,93 @@ contains
 
   end subroutine fluid_pnpn_free
 
+  !> Assemble the explicit right-hand side (source + Neumann + advection +
+  !> EXT extrapolation + BDF history) and the extrapolated velocity (u_e) for
+  !> the standard Pn/Pn solve. This depends only on previous-time-step data
+  !> and the current mesh (x^n); it is independent of the implicit (LHS) solve.
+  subroutine fluid_pnpn_assemble_rhs(this, time)
+    class(fluid_pnpn_t), target, intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    integer :: n
+
+    if (this%freeze) return
+
+    n = this%dm_Xh%size()
+
+    associate(u => this%u, v => this%v, w => this%w, &
+         u_e => this%u_e, v_e => this%v_e, w_e => this%w_e, &
+         Xh => this%Xh, c_Xh => this%c_Xh, dm_Xh => this%dm_Xh, &
+         ulag => this%ulag, vlag => this%vlag, wlag => this%wlag, &
+         sumab => this%sumab, makeoifs => this%makeoifs, &
+         makeabf => this%makeabf, makebdf => this%makebdf, &
+         oifs => this%oifs, rho => this%rho, &
+         f_x => this%f_x, f_y => this%f_y, f_z => this%f_z, &
+         dt => time%dt, ext_bdf => this%ext_bdf, ale => this%ale)
+
+      ! Extrapolate the velocity.
+      call sumab%compute_fluid(u_e, v_e, w_e, u, v, w, &
+           ulag, vlag, wlag, ext_bdf%advection_coeffs%x, ext_bdf%nadv)
+
+      ! Compute the source terms (this initialises f_x/f_y/f_z).
+      call this%source_term%compute(time)
+
+      ! Add Neumann bc contributions to the RHS.
+      call this%bcs_vel%apply_vector(f_x%x, f_y%x, f_z%x, &
+           dm_Xh%size(), time, strong = .false.)
+
+      if (ale%active) then
+         if (oifs) then
+            call neko_error("ALE is not yet supported " // &
+                 "with OIFS time integration.")
+         end if
+         !> adds div.(u_i*wm) to RHS
+         call this%adv%compute_ale(u, v, w, &
+              ale%wm_x, ale%wm_y, ale%wm_z, &
+              f_x, f_y, f_z, &
+              Xh, c_Xh, dm_Xh%size())
+      end if
+
+      if (oifs) then
+         ! Add the advection operators to the right-hand-side.
+         call this%adv%compute(u, v, w, &
+              this%advx, this%advy, this%advz, &
+              Xh, c_Xh, dm_Xh%size(), dt)
+
+         call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1, &
+              this%abx2, this%aby2, this%abz2, &
+              f_x%x, f_y%x, f_z%x, &
+              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
+
+         call makeoifs%compute_fluid(this%advx%x, this%advy%x, this%advz%x, &
+              f_x%x, f_y%x, f_z%x, &
+              rho%x(1,1,1,1), dt, n)
+      else
+         ! Add the advection operators to the right-hand-side.
+         call this%adv%compute(u, v, w, &
+              f_x, f_y, f_z, &
+              Xh, c_Xh, dm_Xh%size())
+
+         call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1, &
+              this%abx2, this%aby2, this%abz2, &
+              f_x%x, f_y%x, f_z%x, &
+              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
+
+         ! Add the RHS contributions coming from the BDF scheme. B/Blag/Blaglag
+         ! are the mass-matrix history (geometry at x^n, x^{n-1}, x^{n-2}).
+         call makebdf%compute_fluid(ulag, vlag, wlag, f_x%x, f_y%x, f_z%x, &
+              u, v, w, c_Xh%B, c_Xh%Blag, c_Xh%Blaglag, rho%x(1,1,1,1), dt, &
+              ext_bdf%diffusion_coeffs%x, ext_bdf%ndiff, n)
+      end if
+
+      ! Commit u^n into the velocity lag history.
+      call ulag%update()
+      call vlag%update()
+      call wlag%update()
+
+    end associate
+
+  end subroutine fluid_pnpn_assemble_rhs
+
   !> Advance fluid simulation in time.
   !! @param t The time value.
   !! @param tstep The current interation.
@@ -702,14 +792,23 @@ contains
 
   !> The actual step.
   subroutine fluid_pnpn_step_ext(this, time, dt_controller, greens_function, &
-       skip_ale_msh_vel_update, proj_prs_green, proj_vel_green)
+       skip_ale_msh_vel_update, proj_prs_green, proj_vel_green, &
+       skip_rhs_assembly, skip_ale_advance, skip_projection)
     class(fluid_pnpn_t), target, intent(inout) :: this
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
     logical, optional, intent(in) :: greens_function
     logical, intent(in), optional :: skip_ale_msh_vel_update
+    !> FSI sub-iteration controls (all default to .false.):
+    !>  skip_rhs_assembly : f / u_e were assembled by the caller (assemble_rhs)
+    !>  skip_ale_advance : the caller repositioned the mesh; do NOT advance it
+    !>  (but metrics are still recomputed below)
+    !>   skip_projection : do not update the solution-projection bases
+    logical, intent(in), optional :: skip_rhs_assembly
+    logical, intent(in), optional :: skip_ale_advance
+    logical, intent(in), optional :: skip_projection
     logical :: skip_ale_mesh_vel_update
-    logical :: is_greens
+    logical :: is_greens, skip_rhs, skip_ale_adv, skip_proj
     integer :: n
     type(ksp_monitor_t) :: ksp_results(4)
     integer :: iter
@@ -732,6 +831,13 @@ contains
     if (present(skip_ale_msh_vel_update)) then
        skip_ale_mesh_vel_update = skip_ale_msh_vel_update
     end if
+
+    skip_rhs = .false.
+    if (present(skip_rhs_assembly)) skip_rhs = skip_rhs_assembly
+    skip_ale_adv = .false.
+    if (present(skip_ale_advance)) skip_ale_adv = skip_ale_advance
+    skip_proj = .false.
+    if (present(skip_projection)) skip_proj = skip_projection
 
     call profiler_start_region('Fluid', 1)
     associate(u => this%u, v => this%v, w => this%w, p => this%p, &
@@ -761,84 +867,17 @@ contains
          call field_cfill(u_e, 0.0_rp)
          call field_cfill(v_e, 0.0_rp)
          call field_cfill(w_e, 0.0_rp)
-
-      else !< Standard N-S solve procedure
-
-         ! Extrapolate the velocity if it's not done in nut_field estimation
-         call sumab%compute_fluid(u_e, v_e, w_e, u, v, w, &
-              ulag, vlag, wlag, ext_bdf%advection_coeffs%x, ext_bdf%nadv)
-
-         ! Compute the source terms
-         call this%source_term%compute(time)
-
-         ! Add Neumann bc contributions to the RHS
-         call this%bcs_vel%apply_vector(f_x%x, f_y%x, f_z%x, &
-              this%dm_Xh%size(), time, strong = .false.)
-
-         if (this%ale%active) then
-            if (oifs) then
-               call neko_error("ALE is not yet supported " // &
-                 "with OIFS time integration.")
-            end if
-            !> adds div.(u_i*wm) to RHS
-            call this%adv%compute_ale(u, v, w, &
-              ale%wm_x, ale%wm_y, ale%wm_z, &
-              f_x, f_y, f_z, &
-              Xh, c_Xh, dm_Xh%size())
-         end if
-
-
-         if (oifs) then
-            ! Add the advection operators to the right-hand-side.
-            call this%adv%compute(u, v, w, &
-              this%advx, this%advy, this%advz, &
-              Xh, this%c_Xh, dm_Xh%size(), dt)
-
-            ! At this point the RHS contains the sum of the advection operator and
-            ! additional source terms, evaluated using the velocity field from the
-            ! previous time-step. Now, this value is used in the explicit time
-            ! scheme to advance both terms in time.
-
-            call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1,&
-              this%abx2, this%aby2, this%abz2, &
-              f_x%x, f_y%x, f_z%x, &
-              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
-
-            ! Now, the source terms from the previous time step are added to the RHS.
-            call makeoifs%compute_fluid(this%advx%x, this%advy%x, this%advz%x, &
-                 f_x%x, f_y%x, f_z%x, &
-                 rho%x(1,1,1,1), dt, n)
-         else
-            ! Add the advection operators to the right-hand-side.
-            call this%adv%compute(u, v, w, &
-                 f_x, f_y, f_z, &
-                 Xh, this%c_Xh, dm_Xh%size())
-
-            ! At this point the RHS contains the sum of the advection operator and
-            ! additional source terms, evaluated using the velocity field from the
-            ! previous time-step. Now, this value is used in the explicit time
-            ! scheme to advance both terms in time.
-
-            call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1,&
-              this%abx2, this%aby2, this%abz2, &
-              f_x%x, f_y%x, f_z%x, &
-              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
-
-         ! Add the RHS contributions coming from the BDF scheme.
-         ! Blag and Blaglag are history of B matrices, mainly used for ALE.
-         ! For a normal simulation (no moving mesh), Blag and Blaglag
-         ! are just the initial B matrix, filled at initialization.
-         call makebdf%compute_fluid(ulag, vlag, wlag, f_x%x, f_y%x, f_z%x, &
-              u, v, w, c_Xh%B, c_Xh%Blag, c_Xh%Blaglag, rho%x(1,1,1,1), dt, &
-              ext_bdf%diffusion_coeffs%x, ext_bdf%ndiff, n)
-
-         end if
+      else if (.not. skip_rhs) then
+         !< Standard N-S RHS.
+         call this%assemble_rhs(time)
       end if
 
       ! ALE Mesh Update
       if (this%ale%active .and. (.not. is_greens)) then
-         ! Advance Mesh (Moves points, updates B history, updates wm_lags)
-         call this%ale%advance_mesh(c_Xh, time, ext_bdf%nadv)
+         ! Advance Mesh (Moves points, updates B history, updates wm_lags).
+         if (.not. skip_ale_adv) then
+            call this%ale%advance_mesh_explicit(c_Xh, time, ext_bdf%nadv)
+         end if
 
          call profiler_start_region('ALE recompute metrics')
          ! Update Metrics
@@ -848,14 +887,6 @@ contains
          call this%adv%recompute_metrics(c_Xh, .true.)
          call profiler_end_region('ALE recompute metrics')
       end if
-
-      ! Update lag terms (only for standard solve)
-      if ((.not. is_greens)) then
-         call ulag%update()
-         call vlag%update()
-         call wlag%update()
-      end if
-
 
       call this%update_material_properties(time)
 
@@ -904,7 +935,7 @@ contains
          ! Solve Stokes System
          call this%solve_stokes_step(time, dt_controller, ksp_results, iter, &
               greens_function = is_greens, proj_prs_green = proj_prs_green, &
-              proj_vel_green = proj_vel_green)
+              proj_vel_green = proj_vel_green, skip_projection = skip_proj)
 
          call fluid_step_info(time, ksp_results, &
               this%full_stress_formulation, this%strict_convergence, &
@@ -1459,15 +1490,18 @@ contains
   end subroutine fluid_pnpn_write_boundary_conditions
 
   subroutine fluid_pnpn_solve_stokes_step(this, time, dt_controller, &
-     ksp_results, iter, greens_function, proj_prs_green, proj_vel_green)
+     ksp_results, iter, greens_function, proj_prs_green, proj_vel_green, &
+     skip_projection)
     class(fluid_pnpn_t), target, intent(inout) :: this
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
     type(ksp_monitor_t), intent(out) :: ksp_results(4)
     integer, intent(in) :: iter
     logical, intent(in), optional :: greens_function
+    !> Skip updating the solution-projection bases 
+    logical, intent(in), optional :: skip_projection
     integer :: n
-    logical :: is_greens
+    logical :: is_greens, skip_proj
     ! Pointer variables for split projection selection
     class(projection_t), pointer :: active_proj_p
     class(projection_vel_t), pointer :: active_proj_v
@@ -1476,6 +1510,8 @@ contains
     ! Default: Not Green's function mode (standard mode)
     is_greens = .false.
     if (present(greens_function)) is_greens = greens_function
+    skip_proj = .false.
+    if (present(skip_projection)) skip_proj = skip_projection
 
     ! Select the correct projection space
     if (is_greens) then
@@ -1499,7 +1535,7 @@ contains
 
       ! Do projections only on the actual solutions of the tstep
       ! not intermediate solutions from the subiterations.
-      if (iter .eq. 1) then
+      if ((iter .eq. 1) .and. (.not. skip_proj)) then
          call active_proj_p%pre_solving(p_res%x, time%tstep, c_Xh, n, &
               dt_controller, Ax = Ax_prs, gs_h = gs_Xh, &
               bclst = this%bclst_dp, string = 'Pressure')
@@ -1517,9 +1553,9 @@ contains
 
       call profiler_end_region('Pressure_solve', 3)
 
-      if (iter .eq. 1) then
+      if ((iter .eq. 1) .and. (.not. skip_proj)) then
          call active_proj_p%post_solving(dp%x, Ax_prs, c_Xh, &
-                 this%bclst_dp, gs_Xh, n, time%tstep, dt_controller)
+              this%bclst_dp, gs_Xh, n, time%tstep, dt_controller)
       end if
 
       ! Update the pressure with the increment. Demean if necessary.
@@ -1557,9 +1593,9 @@ contains
 
       call profiler_end_region('Velocity_residual', 19)
 
-      if (iter .eq. 1) then
+      if ((iter .eq. 1) .and. (.not. skip_proj)) then
          call active_proj_v%pre_solving(u_res%x, v_res%x, w_res%x, &
-                 time%tstep, c_Xh, n, dt_controller, 'Velocity')
+              time%tstep, c_Xh, n, dt_controller, 'Velocity')
       end if
 
       call this%pc_vel%update()
@@ -1579,7 +1615,7 @@ contains
          ksp_results(4)%name = 'Z-Velocity'
       end if
 
-      if (iter .eq. 1) then
+      if ((iter .eq. 1) .and. (.not. skip_proj)) then
          call active_proj_v%post_solving(du%x, dv%x, dw%x, Ax_vel, c_Xh, &
               this%bclst_du, this%bclst_dv, this%bclst_dw, gs_Xh, n, time%tstep, &
               dt_controller)
