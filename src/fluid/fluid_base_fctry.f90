@@ -35,7 +35,7 @@ submodule (fluid_scheme_base) fluid_base_fctry
   use fluid_pnpn, only : fluid_pnpn_t
   use fluid_pnpn_fsi_greens, only : fluid_pnpn_fsi_greens_t
   use fluid_pnpn_fsi_subiteration, only : fluid_pnpn_fsi_subiter_t 
-  use fluid_scheme_compressible_euler, only : fluid_scheme_compressible_euler_t
+  use fluid_scheme_compressible_ns, only : fluid_scheme_compressible_ns_t
   use utils, only : neko_type_error
 
   character(len=20) :: FLUID_KNOWN_TYPES(4) = [character(len=20) :: &
@@ -64,7 +64,7 @@ contains
        allocate(fluid_pnpn_fsi_subiter_t::object)
 
     case ('compressible')
-       allocate(fluid_scheme_compressible_euler_t::object)
+       allocate(fluid_scheme_compressible_ns_t::object)
     case default
        call neko_type_error("fluid scheme base", type_name, FLUID_KNOWN_TYPES)
     end select
