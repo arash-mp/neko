@@ -25,6 +25,7 @@ neko_fortran_SOURCES = \
 	io/buffer/buffer_4d_npar.F90\
 	common/log.f90\
 	comm/comm.F90\
+	comm/pfunit_comm_utils.F90\
 	comm/crystal_router.f90\
 	mesh/curve.f90\
 	comm/mpi_types.f90\
@@ -169,6 +170,7 @@ neko_fortran_SOURCES = \
 	io/nmsh_file.f90\
 	io/chkp_file.f90\
 	io/csv_file.f90\
+	io/hdf5_session.F90\
 	io/hdf5_file.F90\
 	io/vtkhdf_file.F90\
 	io/file.f90\
@@ -506,6 +508,7 @@ if ENABLE_HIP
 libneko_la_SOURCES += \
     ale/bcknd/device/hip/ale_kinematics.hip\
 	device/hip/check.hip\
+	device/hip/buffer.hip\
 	math/bcknd/device/hip/math.hip\
 	math/bcknd/device/hip/schwarz.hip\
 	math/bcknd/device/hip/tensor.hip\
@@ -572,6 +575,7 @@ if ENABLE_CUDA
 libneko_la_SOURCES += \
     ale/bcknd/device/cuda/ale_kinematics.cu\
 	device/cuda/check.cu\
+	device/cuda/buffer.cu\
 	device/cuda/nvtx_wrapper.cu\
 	math/bcknd/device/cuda/math.cu\
 	math/bcknd/device/cuda/schwarz.cu\
@@ -680,6 +684,7 @@ if ENABLE_OPENCL
 libneko_la_SOURCES += \
 	device/opencl/check.c\
 	device/opencl/jit.c\
+	device/opencl/buffer.c\
 	math/bcknd/device/opencl/math.c\
 	math/bcknd/device/opencl/schwarz.c\
 	math/bcknd/device/opencl/tensor.c\
@@ -741,6 +746,7 @@ METAL_OBJS = \
 	device/metal/metal.lo\
 	math/bcknd/device/metal/math.lo\
 	math/bcknd/device/metal/ax_helm.lo\
+	math/bcknd/device/metal/ax_helm_full.lo\
 	math/bcknd/device/metal/tensor.lo\
 	math/bcknd/device/metal/opr_cfl.lo\
 	math/bcknd/device/metal/opr_dudxyz.lo\
@@ -761,11 +767,15 @@ METAL_OBJS = \
 	common/bcknd/device/metal/rhs_maker.lo\
 	fluid/bcknd/device/metal/compressible_res.lo\
 	fluid/bcknd/device/metal/pnpn_res.lo\
-	fluid/bcknd/device/metal/compressible_ops.lo\
+	fluid/stress_formulation/bcknd/device/metal/pnpn_stress_res.lo\
+	fluid/bcknd/device/metal/compressible_ops_compute_max_wave_speed.lo\
+	fluid/bcknd/device/metal/compressible_ops_compute_entropy.lo\
+	fluid/bcknd/device/metal/compressible_ops_update.lo\
 	fluid/regularization/bcknd/device/metal/entropy_viscosity.lo\
 	filter/bcknd/device/metal/mappings.lo\
 	gs/bcknd/device/metal/gs.lo\
 	sem/bcknd/device/metal/coef.lo\
+	sem/bcknd/device/metal/local_interpolation.lo\
 	bc/bcknd/device/metal/dirichlet.lo\
 	bc/bcknd/device/metal/inflow.lo\
 	bc/bcknd/device/metal/zero_dirichlet.lo\
@@ -781,6 +791,7 @@ dist_noinst_DATA = \
 	device/metal/metal.m\
 	math/bcknd/device/metal/math.m\
 	math/bcknd/device/metal/ax_helm.m\
+	math/bcknd/device/metal/ax_helm_full.m\
 	math/bcknd/device/metal/tensor.m\
 	math/bcknd/device/metal/opr_cfl.m\
 	math/bcknd/device/metal/opr_dudxyz.m\
@@ -801,11 +812,15 @@ dist_noinst_DATA = \
 	common/bcknd/device/metal/rhs_maker.m\
 	fluid/bcknd/device/metal/compressible_res.m\
 	fluid/bcknd/device/metal/pnpn_res.m\
-	fluid/bcknd/device/metal/compressible_ops.m\
+	fluid/stress_formulation/bcknd/device/metal/pnpn_stress_res.m\
+	fluid/bcknd/device/metal/compressible_ops_compute_max_wave_speed.m\
+	fluid/bcknd/device/metal/compressible_ops_compute_entropy.m\
+	fluid/bcknd/device/metal/compressible_ops_update.m\
 	fluid/regularization/bcknd/device/metal/entropy_viscosity.m\
 	filter/bcknd/device/metal/mappings.m\
 	gs/bcknd/device/metal/gs.m\
 	sem/bcknd/device/metal/coef.m\
+	sem/bcknd/device/metal/local_interpolation.m\
 	bc/bcknd/device/metal/dirichlet.m\
 	bc/bcknd/device/metal/inflow.m\
 	bc/bcknd/device/metal/zero_dirichlet.m\
@@ -818,6 +833,7 @@ dist_noinst_DATA = \
 METAL_KERNELS = \
 	math/bcknd/device/metal/math_kernel.metal\
 	math/bcknd/device/metal/ax_helm_kernel.metal\
+	math/bcknd/device/metal/ax_helm_full_kernel.metal\
 	math/bcknd/device/metal/tensor_kernel.metal\
 	math/bcknd/device/metal/cfl_kernel.metal\
 	math/bcknd/device/metal/dudxyz_kernel.metal\
@@ -838,11 +854,15 @@ METAL_KERNELS = \
 	common/bcknd/device/metal/rhs_maker_kernel.metal\
 	fluid/bcknd/device/metal/compressible_res_kernel.metal\
 	fluid/bcknd/device/metal/pnpn_res_kernel.metal\
-	fluid/bcknd/device/metal/compressible_ops_kernel.metal\
+	fluid/stress_formulation/bcknd/device/metal/prs_stress_res_kernel.metal\
+	fluid/bcknd/device/metal/compressible_ops_compute_max_wave_speed_kernel.metal\
+	fluid/bcknd/device/metal/compressible_ops_compute_entropy_kernel.metal\
+	fluid/bcknd/device/metal/compressible_ops_update_kernel.metal\
 	fluid/regularization/bcknd/device/metal/entropy_viscosity_kernel.metal\
 	filter/bcknd/device/metal/mapping_kernels.metal\
 	gs/bcknd/device/metal/gs_kernels.metal\
 	sem/bcknd/device/metal/coef_kernel.metal\
+	sem/bcknd/device/metal/local_interpolation_kernel.metal\
 	bc/bcknd/device/metal/dirichlet_kernel.metal\
 	bc/bcknd/device/metal/inflow_kernel.metal\
 	bc/bcknd/device/metal/zero_dirichlet_kernel.metal\
@@ -1126,6 +1146,7 @@ EXTRA_DIST = \
 	source_terms/bcknd/device/hip/gradient_jump_penalty_kernel.h\
 	math/bcknd/device/metal/math_kernel.metal\
 	math/bcknd/device/metal/ax_helm_kernel.metal\
+	math/bcknd/device/metal/ax_helm_full_kernel.metal\
 	math/bcknd/device/metal/tensor_kernel.metal\
 	math/bcknd/device/metal/cfl_kernel.metal\
 	math/bcknd/device/metal/dudxyz_kernel.metal\
@@ -1146,11 +1167,15 @@ EXTRA_DIST = \
 	common/bcknd/device/metal/rhs_maker_kernel.metal\
 	fluid/bcknd/device/metal/compressible_res_kernel.metal\
 	fluid/bcknd/device/metal/pnpn_res_kernel.metal\
-	fluid/bcknd/device/metal/compressible_ops_kernel.metal\
+	fluid/stress_formulation/bcknd/device/metal/prs_stress_res_kernel.metal\
+	fluid/bcknd/device/metal/compressible_ops_compute_max_wave_speed_kernel.metal\
+	fluid/bcknd/device/metal/compressible_ops_compute_entropy_kernel.metal\
+	fluid/bcknd/device/metal/compressible_ops_update_kernel.metal\
 	fluid/regularization/bcknd/device/metal/entropy_viscosity_kernel.metal\
 	filter/bcknd/device/metal/mapping_kernels.metal\
 	gs/bcknd/device/metal/gs_kernels.metal\
 	sem/bcknd/device/metal/coef_kernel.metal\
+	sem/bcknd/device/metal/local_interpolation_kernel.metal\
 	bc/bcknd/device/metal/dirichlet_kernel.metal\
 	bc/bcknd/device/metal/inflow_kernel.metal\
 	bc/bcknd/device/metal/zero_dirichlet_kernel.metal\
@@ -1168,6 +1193,9 @@ EXTRA_DIST = \
 	device/opencl/check.h\
 	device/hip/check.h\
 	device/cuda/check.h\
+	device/cuda/buffer.h\
+	device/hip/buffer.h\
+	device/opencl/buffer.h\
 	comm/comm_nccl.h\
 	comm/comm.h\
 	common/neko_log.h
