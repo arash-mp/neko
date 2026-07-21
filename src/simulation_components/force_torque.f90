@@ -470,12 +470,13 @@ contains
   subroutine force_torque_compute(this, time)
     class(force_torque_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
-
-    real(kind=rp) :: dgtq(12) = 0.0_rp
+    real(kind=rp) :: dgtq(12)
     integer :: n_pts, temp_indices(6)
     type(field_t), pointer :: s11, s22, s33, s12, s13, s23
     character(len=1000) :: log_buf
     real(kind=rp) :: rot_offset(3)
+
+    dgtq = 0.0_rp
     n_pts = this%bc%msk(0)
 
 

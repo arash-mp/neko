@@ -67,7 +67,7 @@ module drag_torque
   use math, only : rzero, col3, vdot3, col2
   use space, only : space_t
   use num_types, only : rp
-  use utils, only : nonlinear_index
+  use utils, only : nonlinear_index, neko_error
   use iso_c_binding, only : c_ptr
   use neko_config, only : NEKO_BCKND_DEVICE
   use device, only : HOST_TO_DEVICE
@@ -75,7 +75,6 @@ module drag_torque
        device_col3, device_vdot3, device_rzero
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION
   use mpi_f08, only : MPI_ALLREDUCE, MPI_IN_PLACE, MPI_SUM
-  use utils, only : neko_error
   implicit none
   private
   !> Some functions to calculate the lift/drag and torque
