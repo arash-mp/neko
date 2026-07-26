@@ -40,6 +40,8 @@ in Neko. The list will be updated as new simcomps are added.
 - Probing of fields at selected points \ref simcomp_probes
 - Output of registered fields to a file \ref simcomp_field_writer
 - Computation of forces and torque on a surface \ref simcomp_force_torque
+- Computation of the wall shear stress on labelled zones \ref
+  simcomp_wall_shear_stress
 - Boundary operations on labelled zones \ref simcomp_boundary_operation
 - Total vector flux through labelled zones \ref simcomp_boundary_flux
 - Lagrangian particle tracking \ref simcomp_lagrangian_particles
@@ -617,6 +619,55 @@ When an object undergoes translational or rotational movement, it is often neces
 @attention For ALE simulations, the wall normal vectors are re-calculated at every time step to account for body movement and deformation. If the ALE module is not enabled, this calculation is performed only once during initialization.
 
 @note **Restarting Simulations:** When restarting an ALE simulation, the code automatically calculates the correct current position of the torque center at the restart time. Therefore, if the intended torque calculation point remains the same, the `center` array in the JSON file should **not** be modified between restarts. If you wish to calculate torque around a *new* point upon restart, the `center` array must specify the coordinates of that new point in the **original, undeformed mesh** (at \f$ t=0 \f$), not its current spatial location.
+
+### wall_shear_stress {#simcomp_wall_shear_stress}
+Computes the wall shear stress on one or more labelled boundary zones and registers the result in the field registry. With \f$ \hat{n} \f$ the unit normal pointing out of the fluid domain and \f$ S \f$ the strain rate tensor, the computed quantity is the tangential part of the traction that the fluid exerts on the wall, \f$ \tau = -2 \mu S \cdot \hat{n} + 2 \mu (\hat{n}^T S \hat{n}) \hat{n} \f$.
+The pressure contribution is purely wall normal and so drops out of the tangential projection. This is the same viscous traction that \ref simcomp_force_torque integrates into the viscous drag. The results are registered as `<computed_field>_x`, `_y`, `_z` and `_mag`, which are zero away from the marked zones.
+
+This simcomp does not write any output of its own. To get the fields onto disk, add a \ref simcomp_field_writer listing the field names to write them to an fld file.
+
+@attention For moving mesh (ALE) simulations: A \ref simcomp_field_writer with an `output_filename` writes to a separate fld series that (as for now) stores the mesh only in its first file, so later files would show the registered stresses on the undeformed geometry. For an ALE case, use a \ref simcomp_field_writer **without** an `output_filename`, so the fields are appended to the main fluid output (which re-writes the deformed mesh every step). On a static mesh this distinction does not matter and either `field_writer` form is fine.
+
+Mandatory fields for this simcomp are:
+- `zone_indices`: the labelled boundary zones to include.
+
+Optional fields for this simcomp are:
+- `computed_field`: base name of the registered fields. Default `"tau"`.
+- `fluid_name`: used to build the default viscosity field name. Default
+  `"fluid"`.
+- `viscosity_field`: the registered field used as \f$ \mu \f$. Default
+  `<fluid_name>_mu_tot`.
+- `components`: which of the four fields to register, given as a list of `"x"`,
+  `"y"`, `"z"` and `"mag"`, or as `"all"` (default). This only controls what is
+  stored, to save memory; the full traction vector is always computed.
+- `average_at_shared_nodes`: if `true`, makes the traction continuous across
+  element boundaries. Default `false`.
+
+~~~~~~~~~~~~~~~{.json}
+{
+  "type": "wall_shear_stress",
+  "name": "wss",
+  "zone_indices": [7],
+  "computed_field": "tau",
+  "components": ["x", "y", "mag"],
+  "average_at_shared_nodes": false,
+  "compute_control": "tsteps",
+  "compute_value": 10
+}
+~~~~~~~~~~~~~~~
+
+@note `<computed_field>_mag` is always the magnitude of the full traction
+vector, regardless of which components are registered.
+
+@attention When several zones are given to a single simcomp, they are computed into
+the same fields. To keep two walls apart, use one simcomp per wall with a
+different `computed_field` for each. Reusing the same `computed_field` in two
+simcomps is not supported, as each one zeroes the whole field before writing
+its own zone.
+
+@note For ALE simulations the wall normals are re-gathered at every time step
+to account for the moving mesh. If the ALE module is not enabled, they are
+gathered once during initialization.
 
 ### les_model {#simcomp_les_model}
 Computes a subgrid eddy viscosity field using an SGS model. **Note*:* The simcomp

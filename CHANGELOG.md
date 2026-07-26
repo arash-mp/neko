@@ -2,6 +2,8 @@
 
 ## Develop
 
+- Added wall shear stress (WSS) simcomp to compute WSS on selected zones
+  and register the computed fields in neko_registry.
 - Added opt-in zero-copy unified memory mapping for the HIP backend on AMD
   MI300A APUs: with `NEKO_HIP_ZEROCOPY=1` (and `HSA_XNACK=1`), mapped arrays
   alias their host allocation instead of being replicated on the device,
