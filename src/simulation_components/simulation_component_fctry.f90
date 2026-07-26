@@ -56,11 +56,12 @@ submodule (simulation_component) simulation_component_fctry
   use spectral_error, only : spectral_error_t
   use data_streamer_simcomp, only : data_streamer_simcomp_t
   use field_subsampler, only : field_subsampler_t
+  use wall_shear_stress_simcomp, only : wall_shear_stress_t
   use utils, only : neko_type_error, neko_type_registration_error
   implicit none
 
   ! List of all possible types created by the factory routine
-  character(len=20) :: SIMCOMPS_KNOWN_TYPES(22) = [character(len=20) :: &
+  character(len=20) :: SIMCOMPS_KNOWN_TYPES(23) = [character(len=20) :: &
        "boundary_operation", &
        "boundary_flux", &
        "lagrangian_particles", &
@@ -82,7 +83,8 @@ submodule (simulation_component) simulation_component_fctry
        "user_stats", &
        "spectral_error", &
        "data_streamer", &
-       "field_subsampler"]
+       "field_subsampler", &
+       "wall_shear_stress"]
 
 contains
 
@@ -171,6 +173,8 @@ contains
        allocate(data_streamer_simcomp_t::object)
     case ("field_subsampler")
        allocate(field_subsampler_t::object)
+    case ("wall_shear_stress")
+       allocate(wall_shear_stress_t::object)
     case default
        do i = 1, simcomp_registry_size
           if (trim(type_name) == &

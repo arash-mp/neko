@@ -263,6 +263,7 @@ neko_fortran_SOURCES = \
 	simulation_components/spatial_average.f90\
 	simulation_components/user_stats.f90\
 	simulation_components/field_writer.f90\
+	simulation_components/wall_shear_stress_simcomp.f90\
 	common/bcknd/cpu/rhs_maker_cpu.f90\
 	common/bcknd/sx/rhs_maker_sx.f90\
 	common/bcknd/device/rhs_maker_device.F90\
