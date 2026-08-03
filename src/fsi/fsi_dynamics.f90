@@ -220,15 +220,18 @@ contains
        B_local(1:3) = B_local(1:3) - m * a_rel_s
        M_local(1:3, 1:3) = M_local(1:3, 1:3) + m * gamma * I3
 
-       ! Term 3: Coriolis Acceleration
-       B_local(1:3) = B_local(1:3) - 2.0_rp * m * cross(w_f, v_s)
-       M_local(1:3, 1:3) = M_local(1:3, 1:3) + 2.0_rp * m * Wf_skew
-
-       ! Term 4: Tangential due to Displacement
-       B_local(1:3) = B_local(1:3) - m * cross(alpha_f, r_rel)
-
-       ! Term 5: Centripetal due to Displacement
-       B_local(1:3) = B_local(1:3) - m * cross(w_f, cross(w_f, r_rel))
+       ! ----------------------------------------------------------------------
+       ! REMOVED (single-frame kinematics): Force Terms 3, 4, 5.
+       ! These are the "r_rel transport" terms (Coriolis 2*w_f x v_rel,
+       ! tangential alpha_f x r_rel, centripetal w_f x (w_f x r_rel)).
+       ! They only arise when the body sits at an offset r_rel from a SEPARATE
+       ! frame origin that the frame rotates about. In this code the body
+       ! rotates about its OWN pivot (see add_kinematics_to_mesh_velocity_cpu),
+       ! so that offset is identically zero and these terms are non-physical.
+       ! Keeping them injected a spurious time-varying stiffness (-m*w_f^2)
+       ! into the relative DOFs. See derivation note (Sec. "Single-Frame
+       ! Correction").
+       ! ----------------------------------------------------------------------
 
        ! Term 6: Tangential Offset (Frame)
        B_local(1:3) = B_local(1:3) - m * cross(alpha_f, c)
@@ -237,9 +240,14 @@ contains
        B_local(1:3) = B_local(1:3) - m * cross(alpha_rel_s, c)
        M_local(1:3, 4:6) = M_local(1:3, 4:6) - m * gamma * C_skew
 
-       ! Term 8: Gyroscopic Offset
-       B_local(1:3) = B_local(1:3) - m * cross(cross(w_f, w_s), c)
-       M_local(1:3, 4:6) = M_local(1:3, 4:6) - m * matmul(C_skew, Wf_skew)
+       ! ----------------------------------------------------------------------
+       ! REMOVED (lab-frame omega): Force Term 8 = m * (w_f x w_rel) x c.
+       ! This came from the rotating-frame identity
+       !   alpha_tot = alpha_f + alpha_rel + w_f x w_rel.
+       ! Here w_f and w_rel are both stored in LAB components and differentiated
+       ! with plain BDF, so alpha_tot = alpha_f + alpha_rel EXACTLY, and the
+       ! w_f x w_rel cross term must NOT be added again. See derivation note.
+       ! ----------------------------------------------------------------------
 
        ! Term 9: Centripetal Offset (Frame)
        B_local(1:3) = B_local(1:3) - m * cross(w_f, cross(w_f, c))
@@ -272,9 +280,12 @@ contains
 !       write(msg, '(A, 3(ES23.15, 1X))') "I_p * alpha_ref: ", matmul(I_P, alpha_rel_s)
 !       call neko_log%message(trim(msg))
 
-       ! Torque Term 3: Gyroscopic Rotational Inertia
-       B_local(4:6) = B_local(4:6) - matmul(I_P, cross(w_f, w_s))
-       M_local(4:6, 4:6) = M_local(4:6, 4:6) + matmul(I_P, Wf_skew)
+       ! ----------------------------------------------------------------------
+       ! REMOVED (lab-frame omega): Torque Term 3 = I_P * (w_f x w_rel).
+       ! Same reason as Force Term 8: alpha_tot = alpha_f + alpha_rel exactly
+       ! when both angular velocities live in lab components, so this extra
+       ! I_P (w_f x w_rel) contribution is a double-count. See derivation note.
+       ! ----------------------------------------------------------------------
 
        ! Torque Term 4: Frame Gyroscopic
        B_local(4:6) = B_local(4:6) - cross(w_f, matmul(I_P, w_f))
@@ -299,17 +310,14 @@ contains
        B_local(4:6) = B_local(4:6) - m * cross(c, a_rel_s)
        M_local(4:6, 1:3) = M_local(4:6, 1:3) + m * gamma * C_skew
 
-       ! Torque Term 10: Coriolis Torque
-       B_local(4:6) = B_local(4:6) - 2.0_rp * m * cross(c, cross(w_f, v_s))
-       M_local(4:6, 1:3) = M_local(4:6, 1:3) + &
-            2.0_rp * m * matmul(C_skew, Wf_skew)
-
-       ! Torque Term 11: Displacement Tangential Torque
-       B_local(4:6) = B_local(4:6) - m * cross(c, cross(alpha_f, r_rel))
-
-       ! Torque Term 12: Displacement Centripetal Torque
-       B_local(4:6) = B_local(4:6) - &
-            m * cross(c, cross(w_f, cross(w_f, r_rel)))
+       ! ----------------------------------------------------------------------
+       ! REMOVED (single-frame kinematics): Torque Terms 10, 11, 12.
+       ! These are the pivot-offset torques of the removed r_rel transport
+       ! forces:  m*c x [ 2 w_f x v_rel ], m*c x [ alpha_f x r_rel ],
+       ! m*c x [ w_f x (w_f x r_rel) ]. They vanish for the same reason as
+       ! Force Terms 3, 4, 5: the body rotates about its own pivot, so there is
+       ! no r_rel offset from a separate frame origin. See derivation note.
+       ! ----------------------------------------------------------------------
 
        ! Map local matrices to global ones
        do j = 1, 6
