@@ -2,6 +2,9 @@
 
 ## Develop
 
+- Improved the performance of the AABB tree and the AABB element/process
+  finders: Morton-ordered bottom-up build, exact node-pool capacity, and a
+  bulk tree build instead of per-element insertion.
 - Hardened the CPU BiCGStab solver with scale-aware breakdown checks and correct
   handling of converged initial guesses and negative `omega` values.
 - *BREAKING* Changed all time-related variables to double precision. 
