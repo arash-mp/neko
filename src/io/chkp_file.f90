@@ -45,7 +45,7 @@ module chkp_file
   use math, only : rzero
   use interpolation, only : interpolator_t
   use neko_mpi_types, only : MPI_REAL_PREC_SIZE, MPI_INTEGER_SIZE, &
-       MPI_DOUBLE_PRECISION_SIZE, MPI_REAL_PREC_SIZE
+       MPI_DOUBLE_PRECISION_SIZE
   use global_interpolation, only : global_interpolation_t
   use logger, only : neko_log, NEKO_LOG_VERBOSE
   use comm, only : NEKO_COMM, pe_rank, MPI_REAL_PRECISION
@@ -108,7 +108,7 @@ contains
   subroutine chkp_file_write(this, data, t)
     class(chkp_file_t), intent(inout) :: this
     class(*), target, intent(in) :: data
-    real(kind=rp), intent(in), optional :: t
+    real(kind=dp), intent(in), optional :: t
     real(kind=dp) :: time
     character(len=5) :: id_str
     character(len=1024) :: fname
@@ -148,7 +148,7 @@ contains
     real(kind=rp), pointer :: fsi_subiter_ghost(:,:,:,:) => null()
     real(kind=rp), pointer :: fsi_subiter_disp(:,:,:) => null()
     integer :: fsi_subiter_nlag
-    real(kind=rp), pointer :: dtlag(:), tlag(:)
+    real(kind=dp), pointer :: dtlag(:), tlag(:)
     type(mesh_t), pointer :: msh
     type(MPI_Status) :: status
     type(MPI_File) :: fh
@@ -164,7 +164,7 @@ contains
     integer :: i, jlag
 
     if (present(t)) then
-       time = real(t, kind = dp)
+       time = t
     else
        time = 0.0_dp
     end if
@@ -403,11 +403,11 @@ contains
 
     if (write_dtlag) then
        call MPI_File_write_at_all(fh, mpi_offset, tlag, 10, &
-            MPI_REAL_PRECISION, status, ierr)
-       mpi_offset = mpi_offset + 10_i8 * int(MPI_REAL_PREC_SIZE, i8)
+            MPI_DOUBLE_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + 10_i8 * int(MPI_DOUBLE_PRECISION_SIZE, i8)
        call MPI_File_write_at_all(fh, mpi_offset, dtlag, 10, &
-            MPI_REAL_PRECISION, status, ierr)
-       mpi_offset = mpi_offset + 10_i8 * int(MPI_REAL_PREC_SIZE, i8)
+            MPI_DOUBLE_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + 10_i8 * int(MPI_DOUBLE_PRECISION_SIZE, i8)
     end if
 
     if (write_abvel) then
@@ -700,7 +700,7 @@ contains
     real(kind=rp), allocatable :: x_coord(:,:,:,:)
     real(kind=rp), allocatable :: y_coord(:,:,:,:)
     real(kind=rp), allocatable :: z_coord(:,:,:,:)
-    real(kind=rp), pointer :: dtlag(:), tlag(:)
+    real(kind=dp), pointer :: dtlag(:), tlag(:)
     integer (kind=MPI_OFFSET_KIND) :: mpi_offset, byte_offset
     integer(kind=i8) :: n_glb_dofs, dof_offset
     integer :: glb_nelv, gdim, lx, have_lag, have_scalar, nel
@@ -958,11 +958,11 @@ contains
 
     if (read_dtlag .and. have_dtlag .eq. 1) then
        call MPI_File_read_at_all(fh, mpi_offset, tlag, 10, &
-            MPI_REAL_PRECISION, status, ierr)
-       mpi_offset = mpi_offset + 10_i8 * int(MPI_REAL_PREC_SIZE, i8)
+            MPI_DOUBLE_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + 10_i8 * int(MPI_DOUBLE_PRECISION_SIZE, i8)
        call MPI_File_read_at_all(fh, mpi_offset, dtlag, 10, &
-            MPI_REAL_PRECISION, status, ierr)
-       mpi_offset = mpi_offset + 10_i8 * int(MPI_REAL_PREC_SIZE, i8)
+            MPI_DOUBLE_PRECISION, status, ierr)
+       mpi_offset = mpi_offset + 10_i8 * int(MPI_DOUBLE_PRECISION_SIZE, i8)
     end if
 
     if (read_abvel .and. have_abvel .eq. 1) then

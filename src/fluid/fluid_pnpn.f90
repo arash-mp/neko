@@ -1,4 +1,4 @@
-! Copyright (c) 2022-2025, The Neko Authors
+! Copyright (c) 2022-2026, The Neko Authors
 ! All rights reserved.
 !
 ! Redistribution and use in source and binary forms, with or without
@@ -60,7 +60,7 @@ module fluid_pnpn
   use json_module, only : json_file, json_core, json_value
   use json_utils, only : json_get, json_get_or_default, json_extract_item, &
        json_get_or_lookup, json_get_or_lookup_or_default
-  use ax_product, only : ax_t, ax_helm_factory
+  use ax_product, only : ax_t, ax_helm_allocator
   use field, only : field_t
   use dirichlet, only : dirichlet_t
   use shear_stress, only : shear_stress_t
@@ -316,7 +316,7 @@ contains
 
     if (this%full_stress_formulation) then
        ! Setup backend dependent Ax routines
-       call ax_helm_factory(this%Ax_vel, full_formulation = .true.)
+       call ax_helm_allocator(this%Ax_vel, type_name = "full")
 
        ! Setup backend dependent prs residual routines
        call pnpn_prs_res_stress_factory(this%prs_res)
@@ -325,7 +325,7 @@ contains
        call pnpn_vel_res_stress_factory(this%vel_res)
     else
        ! Setup backend dependent Ax routines
-       call ax_helm_factory(this%Ax_vel, full_formulation = .false.)
+       call ax_helm_allocator(this%Ax_vel, type_name = "standard")
 
        ! Setup backend dependent prs residual routines
        call pnpn_prs_res_factory(this%prs_res)
@@ -348,7 +348,7 @@ contains
     end if
 
     ! Setup Ax for the pressure
-    call ax_helm_factory(this%Ax_prs, full_formulation = .false.)
+    call ax_helm_allocator(this%Ax_prs, type_name = "standard")
 
 
     ! Setup backend dependent summation of AB/BDF
@@ -447,6 +447,9 @@ contains
 
     ! Initialize the advection factory
     call json_get_or_default(params, 'case.fluid.advection', advection, .true.)
+    ! OIFS integrates the advection term. With advection disabled, fall back to
+    ! the standard BDF history assembly.
+    this%oifs = this%oifs .and. advection
     call json_get(params, 'case.numerics', numerics_params)
     call advection_factory(this%adv, numerics_params, this%c_Xh, &
           this%ulag, this%vlag, this%wlag, &
@@ -741,7 +744,7 @@ contains
          ! Add the advection operators to the right-hand-side.
          call this%adv%compute(u, v, w, &
               this%advx, this%advy, this%advz, &
-              Xh, c_Xh, dm_Xh%size(), dt)
+              Xh, c_Xh, dm_Xh%size(), real(dt, kind=rp))
 
          call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1, &
               this%abx2, this%aby2, this%abz2, &
@@ -750,7 +753,7 @@ contains
 
          call makeoifs%compute_fluid(this%advx%x, this%advy%x, this%advz%x, &
               f_x%x, f_y%x, f_z%x, &
-              rho%x(1,1,1,1), dt, n)
+              rho%x(1,1,1,1), real(dt, kind=rp), n)
       else
          ! Add the advection operators to the right-hand-side.
          call this%adv%compute(u, v, w, &
@@ -765,7 +768,8 @@ contains
          ! Add the RHS contributions coming from the BDF scheme. B/Blag/Blaglag
          ! are the mass-matrix history (geometry at x^n, x^{n-1}, x^{n-2}).
          call makebdf%compute_fluid(ulag, vlag, wlag, f_x%x, f_y%x, f_z%x, &
-              u, v, w, c_Xh%B, c_Xh%Blag, c_Xh%Blaglag, rho%x(1,1,1,1), dt, &
+              u, v, w, c_Xh%B, c_Xh%Blag, c_Xh%Blaglag, rho%x(1,1,1,1), &
+              real(dt, kind=rp), &
               ext_bdf%diffusion_coeffs%x, ext_bdf%ndiff, n)
       end if
 
@@ -914,13 +918,13 @@ contains
          ! Compute pressure residual.
          call profiler_start_region('Pressure_residual', 18)
          call prs_res%compute(p, p_res,&
-           u, v, w, &
-           u_e, v_e, w_e, &
-           f_x, f_y, f_z, &
-           c_Xh, gs_Xh, &
-           this%bc_prs_surface, this%bc_sym_surface,&
-           Ax_prs, ext_bdf%diffusion_coeffs%x(1), dt, &
-           mu_tot, rho, event)
+              u, v, w, &
+              u_e, v_e, w_e, &
+              f_x, f_y, f_z, &
+              c_Xh, gs_Xh, &
+              this%bc_prs_surface, this%bc_sym_surface,&
+              Ax_prs, ext_bdf%diffusion_coeffs%x(1), real(dt, kind=rp), &
+              mu_tot, rho, event)
 
          ! De-mean the pressure residual when no strong pressure boundaries present
          if (.not. this%prs_dirichlet .and. NEKO_BCKND_DEVICE .eq. 1) then
@@ -952,10 +956,10 @@ contains
          ! Horrible mu hack?!
          call this%vol_flow%adjust( u, v, w, p, u_res, v_res, w_res, p_res, &
               c_Xh, gs_Xh, ext_bdf, rho%x(1,1,1,1), mu_tot, &
-              dt, time, this%bclst_dp, this%bclst_du, this%bclst_dv, &
-              this%bclst_dw, this%bclst_vel_res, Ax_vel, Ax_prs, this%ksp_prs, &
-              this%ksp_vel, this%pc_prs, this%pc_vel, this%ksp_prs%max_iter, &
-              this%ksp_vel%max_iter)
+              real(dt, kind=rp), time, this%bclst_dp, this%bclst_du, &
+              this%bclst_dv, this%bclst_dw, this%bclst_vel_res, Ax_vel, &
+              Ax_prs, this%ksp_prs, this%ksp_vel, this%pc_prs, this%pc_vel, &
+              this%ksp_prs%max_iter, this%ksp_vel%max_iter)
       end if
 
       ! Update mesh velocities for ALE
@@ -1098,10 +1102,10 @@ contains
              type is (symmetry_t)
                 ! Symmetry has 3 internal bcs, but only one actually contains
                 ! markings.
-                ! Symmetry's apply_scalar doesn't do anything, so we need to mark
-                ! individual nested bcs to the du,dv,dw, whereas the vel_res can
-                ! just get symmetry as a whole, because on this list we call
-                ! apply_vector.
+                ! Symmetry's apply_scalar doesn't do anything, so we need to
+                ! mark individual nested bcs to the du,dv,dw, whereas the
+                ! vel_res can just get symmetry as a whole, because on this
+                ! list we call apply_vector.
                 ! Additionally we have to mark the special surface bc for p.
                 call this%bclst_vel_res%append(bc_i)
                 call this%bc_du%mark_facets(bc_i%bc_x%marked_facet)
@@ -1583,7 +1587,7 @@ contains
            this%f_x, this%f_y, this%f_z, &
            c_Xh, msh, this%Xh, &
            this%mu_tot, this%rho, this%ext_bdf%diffusion_coeffs%x(1), &
-           time%dt, n)
+           real(time%dt, kind=rp), n)
 
       call rotate_cyc(u_res, v_res, w_res, 1, c_Xh)
       call gs_Xh%op(u_res%x, v_res%x, w_res%x, n, GS_OP_ADD, &
