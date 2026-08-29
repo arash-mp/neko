@@ -336,8 +336,8 @@ contains
 
     call this%bc%init_base(this%coef)
     ! Use msh_ptr instead of this%case%msh
-    call this%bc%mark_zone(msh_ptr%labeled_zones(this%zone_id)) 
-    call this%bc%finalize(only_facets = .true.)
+    call this%bc%mark_zone(msh_ptr%labeled_zones(this%zone_id))
+    call this%bc%finalize()
     n_pts = this%bc%msk(0)
     if (n_pts .gt. 0) then
        call this%n1%init(n_pts)
