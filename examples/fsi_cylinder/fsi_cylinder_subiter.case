@@ -49,7 +49,7 @@
             "name": "cylFSI",
             "zone_id": 7,
          
-            "mass": 7.0853982, 
+            "mass": 7.853982,
             "mass_disp": 0.0,
 
             "center_of_mass": [0.0, 0.0, 0.0],
@@ -61,7 +61,7 @@
             "rot_damping": [0.0, 0.0, 0.0],
             
             "pos_equilibrium": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "initial_velocity": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "initial_velocity": [0.0, 1.0E-6, 0.0, 0.0, 0.0, 0.0],
             
             "active_dofs": [0, 1, 0, 0, 0, 0],
 
