@@ -34,6 +34,7 @@
 module fluid_pnpn_fsi_subiteration
   use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms, &
        add_fsi_non_linear_matrices
+  use fsi_body_params, only : params_inertia_about_pivot
   use fsi_manager, only : fsi_manager_init, linsolve_dense, &
        fsi_prep_checkpoint, fsi_restart_restore
   use fluid_pnpn, only : fluid_pnpn_t
@@ -51,7 +52,7 @@ module fluid_pnpn_fsi_subiteration
   use utils, only : neko_error
   use logger, only : neko_log, LOG_SIZE
   use mesh, only : mesh_t
-  use user_intf, only : user_t
+  use user_intf, only : user_t, user_fsi_body_params_intf
   use checkpoint, only : chkp_t
   use mpi_f08, only : MPI_Wtime
   use math, only : rzero, copy
@@ -160,6 +161,10 @@ module fluid_pnpn_fsi_subiteration
      real(kind=rp), allocatable :: ghost_hist(:,:,:,:) ! (3, n_lag, 2, nbodies)
      real(kind=rp), allocatable :: disp_hist(:,:,:)    ! (6, n_lag, nbodies)
 
+
+     !> Runtime modification of FSI body parameters.
+     procedure(user_fsi_body_params_intf), nopass, pointer :: &
+          user_fsi_body_params => null()
    contains
      procedure, pass(this) :: init => fluid_subiter_init
      procedure, pass(this) :: step => fluid_subiter_step
@@ -197,6 +202,9 @@ contains
   
     ! Initialize the base fluid_pnpn scheme (allocates the mesh and ALE scheme)
     call this%fluid_pnpn_t%init(msh, lx, params, user, chkp)
+
+    ! User hook for FSI body parameters.
+    this%user_fsi_body_params => user%fsi_structural_parameters
 
     ! Structure time integrator: 'bdf' (default) or 'newmark'. Selecting
     ! 'newmark' automatically switches the ALE mesh update to CN, so the user
@@ -1328,14 +1336,15 @@ contains
        call assemble_structural_inertial_terms(this%nbodies_fsi, &
             this%fsi_bodies, this%fsi_dof_map, this%M_global, this%B_global, &
             this%ale%body_rot_matrices, time, gamma, beta, nadv, &
-            this%gravity_vec, accel_hist = accel_hist)
+            this%gravity_vec, this%user_fsi_body_params, &
+            accel_hist = accel_hist)
        deallocate(accel_hist)
     else
        gamma = beta(0) / time%dt
        call assemble_structural_inertial_terms(this%nbodies_fsi, &
             this%fsi_bodies, this%fsi_dof_map, this%M_global, this%B_global, &
             this%ale%body_rot_matrices, time, gamma, beta, nadv, &
-            this%gravity_vec)
+            this%gravity_vec, this%user_fsi_body_params)
     end if
   end subroutine subiter_calc_fsi_terms
 
@@ -1373,7 +1382,7 @@ contains
     call assemble_structural_inertial_terms(this%nbodies_fsi, &
          this%fsi_bodies, this%fsi_dof_map, this%M_global, this%B_global, &
          this%ale%body_rot_matrices, time, gamma, beta, nadv, &
-         this%gravity_vec, accel_hist = accel_hist)
+         this%gravity_vec, this%user_fsi_body_params, accel_hist = accel_hist)
     deallocate(accel_hist)
 
     ! Add the initial fluid force/torque to the net force.
@@ -1395,10 +1404,10 @@ contains
     Mmass = 0.0_rp
     do i = 1, this%nbodies_fsi
        a = this%fsi_bodies(i)%ale_id
-       m = this%fsi_bodies(i)%mass
+       m = this%fsi_bodies(i)%prm%mass
        R = this%ale%body_rot_matrices(:, :, a)
-       I_body = this%fsi_bodies(i)%I_body_tensor
-       c = matmul(R, this%fsi_bodies(i)%local_offset_com)
+       I_body = params_inertia_about_pivot(this%fsi_bodies(i)%prm)
+       c = matmul(R, this%fsi_bodies(i)%prm%offset_com)
        I_P = matmul(R, matmul(I_body, transpose(R)))
        ! Cs = skew(c)
        Cs = 0.0_rp
@@ -1472,9 +1481,9 @@ contains
           row_g = this%fsi_dof_map(i, j)
           if (row_g > 0) then
              if (j <= 3) then
-                k_dof = this%fsi_bodies(i)%K_lin(j) ! translational spring
+                k_dof = this%fsi_bodies(i)%prm%K_lin(j) ! translational spring
              else
-                k_dof = this%fsi_bodies(i)%K_ang(j - 3) ! torsional spring
+                k_dof = this%fsi_bodies(i)%prm%K_ang(j - 3) ! torsional spring
              end if
              this%M_global(row_g, row_g) = this%M_global(row_g, row_g) &
                   + k_dof * dvdisp

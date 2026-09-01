@@ -1,4 +1,7 @@
 module fsi_dynamics
+  use fsi_body_params, only : fsi_body_params_t, params_inertia_about_pivot, &
+       validate_body_params
+  use user_intf, only : user_fsi_body_params_intf
   use force_torque, only : force_torque_t
   use num_types, only : rp
   use time_state, only : time_state_t
@@ -7,7 +10,6 @@ module fsi_dynamics
   private
 
   public :: assemble_structural_inertial_terms
-  public :: apply_parallel_axis_theorem
   public :: add_fsi_non_linear_matrices
 
   !> single FSI body properties
@@ -21,23 +23,11 @@ module fsi_dynamics
      ! [u, v, w, omega_x, omega_y, omega_z]
      integer :: active_dofs(6)
 
-     ! Structural Properties
-     real(kind=rp) :: mass
-     real(kind=rp) :: mass_disp
-     real(kind=rp) :: I_body_diag(3) = 0.0_rp
-     real(kind=rp) :: I_body_tensor(3,3) = 0.0_rp
-     character(len=50) :: inertia_ref_frame = 'pivot'
-     real(kind=rp) :: C_lin(3), C_ang(3)
-     real(kind=rp) :: K_lin(3), K_ang(3)
-     real(kind=rp) :: pos_eq(6)
-     real(kind=rp) :: initial_vel(6) = 0.0_rp
-     real(kind=rp) :: F_prescribed_pivot(6) = 0.0_rp
+     !> Structural parameters.
+     type(fsi_body_params_t) :: prm
 
-     ! Geometry
-     real(kind=rp) :: local_offset_com(3)
-     real(kind=rp) :: center_of_mass(3)
-     real(kind=rp) :: local_offset_cob(3)
-     real(kind=rp) :: center_of_buoyancy(3)
+     !> Initial velocity (used at init only).
+     real(kind=rp) :: initial_vel(6) = 0.0_rp
 
      ! State History
      real(kind=rp) :: disp_rel(6)
@@ -62,7 +52,7 @@ contains
 
   subroutine assemble_structural_inertial_terms(nbodies_fsi, bodies, &
        fsi_dof_map, M_global, B_global, rot_matrices, &
-       time, gamma, beta, nadv, gravity_vec, accel_hist)
+       time, gamma, beta, nadv, gravity_vec, user_body_params, accel_hist)
 
     integer, intent(in) :: nbodies_fsi
     type(fsi_body_t), intent(inout) :: bodies(:)
@@ -71,6 +61,9 @@ contains
     real(kind=rp), intent(inout) :: M_global(:,:), B_global(:)
     real(kind=rp), intent(in) :: rot_matrices(:,:,:)
     real(kind=rp), intent(in) :: gravity_vec(3)
+    !> User hook for runtime modification of body parameters.
+    procedure(user_fsi_body_params_intf), pointer, intent(in) :: &
+         user_body_params
     real(kind=rp) :: dt, gamma, beta(0:3)
     integer, intent(in) :: nadv
     !> Per-body history acceleration a_hist for the
@@ -106,9 +99,19 @@ contains
        ! in mesh velocity arrays.
        bodies(i)%body_vel_guess = bodies(i)%body_vel
 
-       m = bodies(i)%mass
-       m_disp = bodies(i)%mass_disp
-       I_body = bodies(i)%I_body_tensor
+       ! Rotation matrix
+       R_mat = rot_matrices(:,:, bodies(i)%ale_id)
+       R_T = transpose(R_mat)
+
+       ! User hook: runtime modification of body parameters. Points to a
+       ! do-nothing dummy unless registered in the user file.
+       call user_body_params(trim(bodies(i)%name), i, time, R_mat, &
+            bodies(i)%disp_rel, bodies(i)%body_vel, bodies(i)%prm)
+       call validate_body_params(bodies(i)%prm, bodies(i)%name)
+
+       m = bodies(i)%prm%mass
+       m_disp = bodies(i)%prm%mass_disp
+       I_body = params_inertia_about_pivot(bodies(i)%prm)
 
        !> Frame States
        ! Translational acceleration
@@ -125,14 +128,10 @@ contains
        ! Angular velocity
        w_s = bodies(i)%body_vel_guess(4:6)
 
-       ! Rotation matrix
-       R_mat = rot_matrices(:,:, bodies(i)%ale_id)
-       R_T = transpose(R_mat)
-
        ! Global vector from Pivot to Center of Mass
-       c = matmul(R_mat, bodies(i)%local_offset_com)
+       c = matmul(R_mat, bodies(i)%prm%offset_com)
        ! Global vector from Pivot to Center of Buoyancy
-       r_cb = matmul(R_mat, bodies(i)%local_offset_cob)
+       r_cb = matmul(R_mat, bodies(i)%prm%offset_cob)
 
        ! Rotate Inertia Tensor and Center of Mass (com) Offset to Global Frame
        I_P = matmul(R_mat, matmul(I_body, R_T))
@@ -192,21 +191,21 @@ contains
        B_local(4:6) = B_local(4:6) + cross(r_cb, -m_disp * gravity_vec)
 
        ! Structural Springs
-       B_local(1:3) = B_local(1:3) - &
-            bodies(i)%K_lin * (bodies(i)%disp_rel(1:3) - bodies(i)%pos_eq(1:3))
-       B_local(4:6) = B_local(4:6) - &
-            bodies(i)%K_ang * (bodies(i)%disp_rel(4:6) - bodies(i)%pos_eq(4:6))
+       B_local(1:3) = B_local(1:3) - bodies(i)%prm%K_lin * &
+            (bodies(i)%disp_rel(1:3) - bodies(i)%prm%pos_eq(1:3))
+       B_local(4:6) = B_local(4:6) - bodies(i)%prm%K_ang * &
+            (bodies(i)%disp_rel(4:6) - bodies(i)%prm%pos_eq(4:6))
 
        ! Structural Dampers
-       B_local(1:3) = B_local(1:3) - bodies(i)%C_lin * v_s
-       B_local(4:6) = B_local(4:6) - bodies(i)%C_ang * w_s
+       B_local(1:3) = B_local(1:3) - bodies(i)%prm%C_lin * v_s
+       B_local(4:6) = B_local(4:6) - bodies(i)%prm%C_ang * w_s
        do j = 1, 3
-          M_local(j, j) = M_local(j, j) + bodies(i)%C_lin(j)
-          M_local(j+3, j+3) = M_local(j+3, j+3) + bodies(i)%C_ang(j)
+          M_local(j, j) = M_local(j, j) + bodies(i)%prm%C_lin(j)
+          M_local(j+3, j+3) = M_local(j+3, j+3) + bodies(i)%prm%C_ang(j)
        end do
 
        ! Known external force applied at "pivot location"
-       B_local = B_local + bodies(i)%F_prescribed_pivot
+       B_local = B_local + bodies(i)%prm%F_prescribed_pivot
 
 
        ! ----------------------------------------------------------------------
@@ -367,8 +366,8 @@ contains
 
        R_mat = rot_matrices(:,:, bodies(i)%ale_id)
        R_T = transpose(R_mat)
-       c = matmul(R_mat, bodies(i)%local_offset_com)
-       I_body = bodies(i)%I_body_tensor
+       c = matmul(R_mat, bodies(i)%prm%offset_com)
+       I_body = params_inertia_about_pivot(bodies(i)%prm)
        I_P = matmul(R_mat, matmul(I_body, R_T))
 
        dW_skew = skew_tensor(d_omega)
@@ -376,7 +375,7 @@ contains
 
        M_local = 0.0_rp
        ! Term 12 Force Non-linear: -m * [dW_skew] * [C_skew]
-       M_local(1:3, 4:6) = -bodies(i)%mass * matmul(dW_skew, C_skew)
+       M_local(1:3, 4:6) = -bodies(i)%prm%mass * matmul(dW_skew, C_skew)
        
        ! Term 4 Torque Non-linear: + [dW_skew] * I_P
        M_local(4:6, 4:6) = matmul(dW_skew, I_P)
@@ -423,25 +422,5 @@ contains
     v_skew(3,1) = -v(2)
     v_skew(3,2) = v(1)
   end function skew_tensor
-
-  !> Computes the Parallel Axis Theorem mapping for the inertia tensor
-  subroutine apply_parallel_axis_theorem(I_in, mass, r, I_out)
-    real(kind=rp), intent(in) :: I_in(3,3)
-    real(kind=rp), intent(in) :: mass
-    real(kind=rp), intent(in) :: r(3)
-    real(kind=rp), intent(out) :: I_out(3,3)
-    real(kind=rp) :: r_sq, J_steina(3,3)
-    integer :: i, j
-
-    r_sq = dot_product(r, r)
-    J_steina = 0.0_rp
-    do i = 1, 3
-       do j = 1, 3
-          J_steina(i,j) = -mass * r(i) * r(j)
-       end do
-       J_steina(i,i) = J_steina(i,i) + mass * r_sq
-    end do
-    I_out = I_in + J_steina
-  end subroutine apply_parallel_axis_theorem
 
 end module fsi_dynamics

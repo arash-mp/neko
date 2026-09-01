@@ -328,6 +328,7 @@ neko_fortran_SOURCES = \
 	fluid/bcknd/cpu/compressible_ops_cpu.f90\
 	fluid/bcknd/device/compressible_ops_device.F90\
 	fluid/fluid_source_term.f90\
+	fsi/fsi_body_params.f90\
 	fsi/fsi_manager.f90\
 	fsi/fsi_dynamics.f90\
 	common/time_step_controller.f90\

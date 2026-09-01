@@ -51,6 +51,7 @@ module user_intf
   use field_dirichlet, only : field_dirichlet_t
   use field_neumann, only : field_neumann_t
   use time_state, only : time_state_t
+  use fsi_body_params, only : fsi_body_params_t
   implicit none
   private
 
@@ -210,6 +211,29 @@ module user_intf
      end subroutine user_ale_rigid_kinematics_intf
   end interface
 
+  !> Abstract interface for user modification of FSI body structural
+  !! parameters.
+  !! @param body_name Name of the body (from the case file).
+  !! @param body_id Index of the body in the case.fluid.fsi.bodies list.
+  !! @param time The time state.
+  !! @param rot_mat Current rotation matrix (body -> lab) of the body.
+  !! @param disp_rel Relative displacement [x, y, z, rx, ry, rz] (read-only).
+  !! @param body_vel Body velocity [u, v, w, wx, wy, wz] (read-only).
+  !! @param prm The body parameters to be modified.
+  abstract interface
+     subroutine user_fsi_body_params_intf(body_name, body_id, time, &
+          rot_mat, disp_rel, body_vel, prm)
+       import rp, time_state_t, fsi_body_params_t
+       character(len=*), intent(in) :: body_name
+       integer, intent(in) :: body_id
+       type(time_state_t), intent(in) :: time
+       real(kind=rp), intent(in) :: rot_mat(3, 3)
+       real(kind=rp), intent(in) :: disp_rel(6)
+       real(kind=rp), intent(in) :: body_vel(6)
+       type(fsi_body_params_t), intent(inout) :: prm
+     end subroutine user_fsi_body_params_intf
+  end interface
+
 
   !> A type collecting all the overridable user routines and flag to suppress
   !! type injection from custom modules.
@@ -262,6 +286,10 @@ module user_intf
      !> User routine to set ALE rigid body kinematics.
      procedure(user_ale_rigid_kinematics_intf), nopass, pointer :: &
           ale_rigid_kinematics => null()
+     !> User routine to modify FSI body structural parameters (mass,
+     !! inertia, COM offset, springs, dampers, ...).
+     procedure(user_fsi_body_params_intf), nopass, pointer :: &
+          fsi_structural_parameters => null()
      !> User routine to set ALE base shapes (smooth blending functions).
      procedure(user_ale_base_shapes_intf), nopass, pointer :: &
           ale_base_shapes => null()
@@ -287,7 +315,8 @@ module user_intf
        user_ale_rigid_kinematics_intf, &
        dummy_user_ale_mesh_velocity, dummy_user_ale_base_shapes, &
        dummy_user_ale_rigid_kinematics, morph_overset_interface, &
-       user_wall_sampling_gll_intf, user_wall_sampling_distance_intf
+       user_wall_sampling_gll_intf, user_wall_sampling_distance_intf, &
+       user_fsi_body_params_intf, dummy_fsi_structural_parameters
 contains
 
   !> Constructor.
@@ -416,6 +445,14 @@ contains
        user_extended = .true.
        n = n + 1
        write(extensions(n), '(A)') '- ALE kinematics'
+    end if
+
+    if (.not. associated(this%fsi_structural_parameters)) then
+       this%fsi_structural_parameters => dummy_fsi_structural_parameters
+    else
+       user_extended = .true.
+       n = n + 1
+       write(extensions(n), '(A)') '- FSI structural parameters'
     end if
 
     if (.not. associated(this%ale_base_shapes)) then
@@ -566,5 +603,16 @@ contains
     real(kind=rp), intent(inout) :: vel_trans(3)
     real(kind=rp), intent(inout) :: vel_ang(3)
   end subroutine dummy_user_ale_rigid_kinematics
+
+  subroutine dummy_fsi_structural_parameters(body_name, body_id, time, &
+       rot_mat, disp_rel, body_vel, prm)
+    character(len=*), intent(in) :: body_name
+    integer, intent(in) :: body_id
+    type(time_state_t), intent(in) :: time
+    real(kind=rp), intent(in) :: rot_mat(3, 3)
+    real(kind=rp), intent(in) :: disp_rel(6)
+    real(kind=rp), intent(in) :: body_vel(6)
+    type(fsi_body_params_t), intent(inout) :: prm
+  end subroutine dummy_fsi_structural_parameters
 
 end module user_intf

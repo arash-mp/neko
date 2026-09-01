@@ -87,6 +87,7 @@ module neko
   use mathops, only : opchsign, opcolv, opcolv3c, opadd2cm, opadd2col
   use projection
   use user_intf
+  use fsi_body_params
   use signal
   use time_state
   use jobctrl, only : jobctrl_init, jobctrl_set_time_limit, &

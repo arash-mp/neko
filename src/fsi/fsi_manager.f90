@@ -1,5 +1,7 @@
 module fsi_manager
-  use fsi_dynamics, only : fsi_body_t, apply_parallel_axis_theorem
+  use fsi_dynamics, only : fsi_body_t
+  use fsi_body_params, only : fsi_body_params_t, FSI_INERTIA_ABOUT_PIVOT, &
+       FSI_INERTIA_ABOUT_COM, params_inertia_about_pivot, validate_body_params
   use fluid_pnpn, only : fluid_pnpn_t
   use force_torque, only : force_torque_t
   use field, only : field_t
@@ -71,7 +73,8 @@ contains
     character(len=200) :: name_buf, name_buf2, log_buf, field_name
     real(kind=rp) :: center_dummy(3), force_scale
     real(kind=rp) :: pivot_init(3)
-    real(kind=rp) :: I_pivot_temp(3,3), I_com_temp(3,3)
+    real(kind=rp) :: com_position(3), cob_position(3)
+    real(kind=rp) :: I_pivot_log(3,3)
     real(kind=rp), allocatable :: temp_vec(:)
     character(len=:), allocatable :: temp_str
     integer, allocatable :: temp_vec_int(:)
@@ -242,38 +245,38 @@ contains
              call neko_error("FSI: Body " // trim(bodies(i)%name) // " zone_id not found in ALE bodies!")
           end if
 
-          call json_get(body_sub, 'mass', bodies(i)%mass)
+          call json_get(body_sub, 'mass', bodies(i)%prm%mass)
 
-          bodies(i)%I_body_tensor = 0.0_rp
+          bodies(i)%prm%inertia = 0.0_rp
           if (body_sub%valid_path('I_xx_xy_xz_p') .or. &
                body_sub%valid_path('I_yx_yy_yz_p') .or. &
                body_sub%valid_path('I_zx_zy_zz_p')) then
 
              call json_get(body_sub, 'I_xx_xy_xz_p', temp_vec, expected_size = 3)
-             bodies(i)%I_body_tensor(1,:) = temp_vec
+             bodies(i)%prm%inertia(1,:) = temp_vec
 
              call json_get(body_sub, 'I_yx_yy_yz_p', temp_vec, expected_size = 3)
-             bodies(i)%I_body_tensor(2,:) = temp_vec
+             bodies(i)%prm%inertia(2,:) = temp_vec
 
              call json_get(body_sub, 'I_zx_zy_zz_p', temp_vec, expected_size = 3)
-             bodies(i)%I_body_tensor(3,:) = temp_vec
+             bodies(i)%prm%inertia(3,:) = temp_vec
 
-             bodies(i)%inertia_ref_frame = 'pivot'
+             bodies(i)%prm%inertia_ref = FSI_INERTIA_ABOUT_PIVOT
 
           else if (body_sub%valid_path('I_xx_xy_xz_com') .or. &
                body_sub%valid_path('I_yx_yy_yz_com') .or. &
                body_sub%valid_path('I_zx_zy_zz_com')) then
 
              call json_get(body_sub, 'I_xx_xy_xz_com', temp_vec, expected_size = 3)
-             bodies(i)%I_body_tensor(1,:) = temp_vec
+             bodies(i)%prm%inertia(1,:) = temp_vec
 
              call json_get(body_sub, 'I_yx_yy_yz_com', temp_vec, expected_size = 3)
-             bodies(i)%I_body_tensor(2,:) = temp_vec
+             bodies(i)%prm%inertia(2,:) = temp_vec
 
              call json_get(body_sub, 'I_zx_zy_zz_com', temp_vec, expected_size = 3)
-             bodies(i)%I_body_tensor(3,:) = temp_vec
+             bodies(i)%prm%inertia(3,:) = temp_vec
 
-             bodies(i)%inertia_ref_frame = 'com'
+             bodies(i)%prm%inertia_ref = FSI_INERTIA_ABOUT_COM
 
           else
              call neko_error("FSI: Body " // trim(bodies(i)%name) // &
@@ -284,64 +287,56 @@ contains
           bodies(i)%active_dofs = temp_vec_int
 
 
+          ! Absolute COM position is used only to compute the pivot offset.
           call json_get(body_sub, 'center_of_mass', temp_vec, expected_size = 3)
-          bodies(i)%center_of_mass = temp_vec
+          com_position = temp_vec
 
           pivot_init = ale%ale_pivot(bodies(i)%ale_id)%pos
 
-          bodies(i)%local_offset_com = bodies(i)%center_of_mass - &
-                 pivot_init
+          bodies(i)%prm%offset_com = com_position - pivot_init
 
-          if (trim(bodies(i)%inertia_ref_frame) == 'com') then
-             I_com_temp = bodies(i)%I_body_tensor
-             call apply_parallel_axis_theorem(bodies(i)%I_body_tensor,&
-                    bodies(i)%mass, &
-                    bodies(i)%local_offset_com, &
-                    I_pivot_temp)
-             bodies(i)%I_body_tensor = I_pivot_temp
-             bodies(i)%inertia_ref_frame = 'pivot (shifted from com)'
-          end if
-
-          bodies(i)%center_of_buoyancy = 0.0_rp
-          bodies(i)%local_offset_cob = 0.0_rp
-          bodies(i)%mass_disp = 0.0_rp
+          cob_position = 0.0_rp
+          bodies(i)%prm%offset_cob = 0.0_rp
+          bodies(i)%prm%mass_disp = 0.0_rp
           if (params%valid_path('case.fluid.fsi.gravity_vec')) then
              ! IF Gravity exists, buoyancy is mandatory;
              ! otherwise, the physics is wrong!
              call json_get(body_sub, 'center_of_buoyancy', temp_vec, expected_size = 3)
-             bodies(i)%center_of_buoyancy = temp_vec
+             cob_position = temp_vec
 
-             bodies(i)%local_offset_cob = bodies(i)%center_of_buoyancy - &
-                    pivot_init
-             call json_get(body_sub, 'mass_disp', bodies(i)%mass_disp)
+             bodies(i)%prm%offset_cob = cob_position - pivot_init
+             call json_get(body_sub, 'mass_disp', bodies(i)%prm%mass_disp)
           end if
 
           ! Prescribed constant forcing at pivot location
-          bodies(i)%F_prescribed_pivot = 0.0_rp
+          bodies(i)%prm%F_prescribed_pivot = 0.0_rp
           if (body_sub%valid_path('F0_p')) then
              call json_get(body_sub, 'F0_p', temp_vec, &
                     expected_size = 6)
-             bodies(i)%F_prescribed_pivot = temp_vec
+             bodies(i)%prm%F_prescribed_pivot = temp_vec
           end if
 
           call json_get(body_sub, 'stiffness', temp_vec, expected_size = 3)
-          bodies(i)%K_lin = temp_vec
+          bodies(i)%prm%K_lin = temp_vec
 
 
           call json_get(body_sub, 'damping', temp_vec, expected_size = 3)
-          bodies(i)%C_lin = temp_vec
+          bodies(i)%prm%C_lin = temp_vec
 
 
           call json_get(body_sub, 'rot_stiffness', temp_vec, expected_size = 3)
-          bodies(i)%K_ang = temp_vec
+          bodies(i)%prm%K_ang = temp_vec
 
 
           call json_get(body_sub, 'rot_damping', temp_vec, expected_size = 3)
-          bodies(i)%C_ang = temp_vec
+          bodies(i)%prm%C_ang = temp_vec
 
 
           call json_get(body_sub, 'pos_equilibrium', temp_vec, expected_size = 6)
-          bodies(i)%pos_eq = temp_vec
+          bodies(i)%prm%pos_eq = temp_vec
+
+          ! Fail on physically impossible inputs.
+          call validate_body_params(bodies(i)%prm, bodies(i)%name)
 
           call json_get(body_sub, 'initial_velocity', temp_vec, expected_size = 6)
           bodies(i)%initial_vel = temp_vec
@@ -386,64 +381,65 @@ contains
           write(log_buf, '(A,6(I2,1X))') '   Active DOFs   : ', bodies(i)%active_dofs
           call neko_log%message(log_buf)
 
-          write(log_buf, '(A,ES18.11)') '   Mass          : ', bodies(i)%mass
+          write(log_buf, '(A,ES18.11)') '   Mass          : ', bodies(i)%prm%mass
           call neko_log%message(log_buf)
 
-          if (trim(bodies(i)%inertia_ref_frame) == 'pivot (shifted from com)') then
+          if (bodies(i)%prm%inertia_ref == FSI_INERTIA_ABOUT_COM) then
              call neko_log%message('   Inertia Tensor (Input at COM) :')
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_xx_xy_xz  : ', I_com_temp(1,:)
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_xx_xy_xz  : ', bodies(i)%prm%inertia(1,:)
              call neko_log%message(trim(log_buf))
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_yx_yy_yz  : ', I_com_temp(2,:)
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_yx_yy_yz  : ', bodies(i)%prm%inertia(2,:)
              call neko_log%message(trim(log_buf))
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_zx_zy_zz  : ', I_com_temp(3,:)
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_zx_zy_zz  : ', bodies(i)%prm%inertia(3,:)
              call neko_log%message(trim(log_buf))
 
-             call neko_log%message('   Inertia Tensor (Shifted to Pivot) :')
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_xx_xy_xz  : ', bodies(i)%I_body_tensor(1,:)
+             I_pivot_log = params_inertia_about_pivot(bodies(i)%prm)
+             call neko_log%message('   Inertia Tensor (Derived at Pivot) :')
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_xx_xy_xz  : ', I_pivot_log(1,:)
              call neko_log%message(trim(log_buf))
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_yx_yy_yz  : ', bodies(i)%I_body_tensor(2,:)
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_yx_yy_yz  : ', I_pivot_log(2,:)
              call neko_log%message(trim(log_buf))
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_zx_zy_zz  : ', bodies(i)%I_body_tensor(3,:)
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_zx_zy_zz  : ', I_pivot_log(3,:)
              call neko_log%message(trim(log_buf))
           else
              call neko_log%message('   Inertia Tensor (Input at Pivot) :')
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_xx_xy_xz  : ', bodies(i)%I_body_tensor(1,:)
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_xx_xy_xz  : ', bodies(i)%prm%inertia(1,:)
              call neko_log%message(trim(log_buf))
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_yx_yy_yz  : ', bodies(i)%I_body_tensor(2,:)
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_yx_yy_yz  : ', bodies(i)%prm%inertia(2,:)
              call neko_log%message(trim(log_buf))
-             write(log_buf, '(A,3(ES13.6,1X))') '     I_zx_zy_zz  : ', bodies(i)%I_body_tensor(3,:)
+             write(log_buf, '(A,3(ES13.6,1X))') '     I_zx_zy_zz  : ', bodies(i)%prm%inertia(3,:)
              call neko_log%message(trim(log_buf))
           end if
 
-          write(log_buf, '(A,3(ES13.6,1X))') '   COM Position  : ', bodies(i)%center_of_mass
+          write(log_buf, '(A,3(ES13.6,1X))') '   COM Position  : ', com_position
           call neko_log%message(log_buf)
-          write(log_buf, '(A,3(ES13.6,1X))') '   COM Offset    : ', bodies(i)%local_offset_com
+          write(log_buf, '(A,3(ES13.6,1X))') '   COM Offset    : ', bodies(i)%prm%offset_com
           call neko_log%message(log_buf)
 
           if (any(abs(gravity_vec) > 0.0_rp)) then
-             write(log_buf, '(A,3(ES13.6,1X))') '   COB Position  : ', bodies(i)%center_of_buoyancy
+             write(log_buf, '(A,3(ES13.6,1X))') '   COB Position  : ', cob_position
              call neko_log%message(log_buf)
-             write(log_buf, '(A,3(ES13.6,1X))') '   COB Offset    : ', bodies(i)%local_offset_cob
+             write(log_buf, '(A,3(ES13.6,1X))') '   COB Offset    : ', bodies(i)%prm%offset_cob
              call neko_log%message(log_buf)
-             write(log_buf, '(A,ES13.6)') '   Mass Disp.    : ', bodies(i)%mass_disp
+             write(log_buf, '(A,ES13.6)') '   Mass Disp.    : ', bodies(i)%prm%mass_disp
              call neko_log%message(log_buf)
           end if
 
-          write(log_buf, '(A,3(ES13.6,1X))') '   Lin Stiffness : ', bodies(i)%K_lin
+          write(log_buf, '(A,3(ES13.6,1X))') '   Lin Stiffness : ', bodies(i)%prm%K_lin
           call neko_log%message(log_buf)
-          write(log_buf, '(A,3(ES13.6,1X))') '   Lin Damping   : ', bodies(i)%C_lin
+          write(log_buf, '(A,3(ES13.6,1X))') '   Lin Damping   : ', bodies(i)%prm%C_lin
           call neko_log%message(log_buf)
-          write(log_buf, '(A,3(ES13.6,1X))') '   Rot Stiffness : ', bodies(i)%K_ang
+          write(log_buf, '(A,3(ES13.6,1X))') '   Rot Stiffness : ', bodies(i)%prm%K_ang
           call neko_log%message(log_buf)
-          write(log_buf, '(A,3(ES13.6,1X))') '   Rot Damping   : ', bodies(i)%C_ang
+          write(log_buf, '(A,3(ES13.6,1X))') '   Rot Damping   : ', bodies(i)%prm%C_ang
           call neko_log%message(log_buf)
 
-          write(log_buf, '(A,6(ES13.6,1X))') '   Pos Equilib   : ', bodies(i)%pos_eq
+          write(log_buf, '(A,6(ES13.6,1X))') '   Pos Equilib   : ', bodies(i)%prm%pos_eq
           call neko_log%message(log_buf)
           write(log_buf, '(A,6(ES13.6,1X))') '   Init Velocity : ', bodies(i)%initial_vel
           call neko_log%message(log_buf)
 
-          write(log_buf, '(A,6(ES13.6,1X))') '   Prescribed F0 : ', bodies(i)%F_prescribed_pivot
+          write(log_buf, '(A,6(ES13.6,1X))') '   Prescribed F0 : ', bodies(i)%prm%F_prescribed_pivot
           call neko_log%message(log_buf)
 
           call neko_log%message(' ')

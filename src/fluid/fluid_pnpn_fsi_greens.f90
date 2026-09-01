@@ -55,7 +55,7 @@ module fluid_pnpn_fsi_greens
   use utils, only : neko_error
   use logger, only : neko_log, LOG_SIZE
   use mesh, only : mesh_t
-  use user_intf, only : user_t
+  use user_intf, only : user_t, user_fsi_body_params_intf
   use checkpoint, only : chkp_t
   use mpi_f08, only: MPI_Wtime
   use ab_time_scheme, only : ab_time_scheme_t
@@ -113,6 +113,11 @@ module fluid_pnpn_fsi_greens
      real(kind=rp), allocatable :: global_body_vel(:)
      real(kind=rp), allocatable :: global_body_vel_lag(:,:)
      real(kind=rp), allocatable :: global_moving_frame_presc_vel(:,:)
+
+     !> User hook: runtime modification of FSI body parameters. Always
+     !> associated (dummy if not registered in the user file).
+     procedure(user_fsi_body_params_intf), nopass, pointer :: &
+          user_fsi_body_params => null()
    contains
      procedure, pass(this) :: init => fluid_fsi_init
      procedure, pass(this) :: step => fluid_fsi_step
@@ -140,6 +145,9 @@ contains
 
     ! Initialize the base PnPn solver
     call this%fluid_pnpn_t%init(msh, lx, params, user, chkp)
+
+    ! User hook for FSI body parameters (never null after user%init).
+    this%user_fsi_body_params => user%fsi_structural_parameters
 
     ! Initialize Standard Fields locally
     call this%u_s%init(this%dm_Xh, 'u_s')
@@ -652,7 +660,8 @@ contains
          this%fsi_bodies, &
          this%fsi_dof_map, this%M_global, this%B_global, &
          this%ale%body_rot_matrices, &
-         time, gamma, beta, nadv, this%gravity_vec)
+         time, gamma, beta, nadv, this%gravity_vec, &
+         this%user_fsi_body_params)
 
   end subroutine assemble_fsi_structural_inertial_terms
 
