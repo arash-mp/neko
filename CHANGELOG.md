@@ -5,6 +5,24 @@
 - Improved the performance of the AABB tree and the AABB element/process
   finders: Morton-ordered bottom-up build, exact node-pool capacity, and a
   bulk tree build instead of per-element insertion.
+- Fixed facet masks for some simulation components.
+- *BREAKING*, normal_outflow conditions now require specifying `value`, which
+  is used to set the value of the tangential components of velocity.
+- Added fp64 tensor core (`DMMA`) and matrix core (`MFMA`) variants of the
+  Helmholtz operator on the CUDA and HIP backends, and on Hopper two TMA
+  staged forms of the CUDA one --- `DMMA_TMA` for the scalar and vector
+  operators and the batched `DMMA_TMA_BATCH` for the vector operator --- all
+  of them candidates in the operator auto-tuner. New environment variables
+  `NEKO_DMMA_NW`, `NEKO_DMMA_TMA_NW`, `NEKO_MFMA_NWF` and `NEKO_MFMA_TUNE`
+  control them, and `NEKO_AUTOTUNE` accepts the four new formulation names.
+- Extended the tensor core (`DMMA`), matrix core (`MFMA`) and Hopper TMA
+  staged (`DMMA_TMA`) formulations to the `opgrad`, `dudxyz`, `conv1` and
+  `cdtp` operators, again as auto-tuner candidates selected per operator,
+  polynomial order and element count.
+- *BREAKING* The `ax_helm_factory` is renamed to `ax_helm_allocator`. It now
+  selects matrix-vector product types by name instead of a `full_formulation`
+  logical argument, and supports runtime registration of user-defined `ax_t`
+  descendants.
 - Hardened the CPU BiCGStab solver with scale-aware breakdown checks and correct
   handling of converged initial guesses and negative `omega` values.
 - *BREAKING* Changed all time-related variables to double precision. 
