@@ -1,7 +1,8 @@
 module fsi_dynamics
   use fsi_body_params, only : fsi_body_params_t, params_inertia_about_pivot, &
        validate_body_params
-  use user_intf, only : user_fsi_body_params_intf
+  use user_intf, only : user_fsi_body_params_intf, &
+       user_fsi_structural_terms_intf, dummy_fsi_structural_terms
   use force_torque, only : force_torque_t
   use num_types, only : rp
   use time_state, only : time_state_t
@@ -11,6 +12,7 @@ module fsi_dynamics
 
   public :: assemble_structural_inertial_terms
   public :: add_fsi_non_linear_matrices
+  public :: add_fsi_user_structural_terms
 
   !> single FSI body properties
   type, public :: fsi_body_t
@@ -37,6 +39,14 @@ module fsi_dynamics
      !> Previous-step acceleration, used only by the Newmark structure
      !> integrator (constant average acceleration). Ignored for the BDF path.
      real(kind=rp) :: body_acc(6) = 0.0_rp
+
+     !> Relative acceleration a^{n+1} evaluated at body_vel_guess by the
+     !> last structural assembly, and the Jacobian factor gamma = da/dv it
+     !> used. Consumed by add_fsi_user_structural_terms so the user hook
+     !> sees exactly the same integrator as the built-in terms. Derived
+     !> data, rebuilt on every assembly, not checkpointed.
+     real(kind=rp) :: accel_at_guess(6) = 0.0_rp
+     real(kind=rp) :: gamma_guess = 0.0_rp
 
      ! The prescribed velocity of the moving frame
      real(kind=rp) :: moving_frame_presc_acc(6) = 0.0_rp
@@ -165,6 +175,10 @@ contains
           end do
           a_full = V_hist / dt
        end if
+
+       ! Record what this assembly used, for add_fsi_user_structural_terms.
+       bodies(i)%accel_at_guess = a_full
+       bodies(i)%gamma_guess = gamma
 
        ! History acceleration (Evaluated with current guess)
        a_rel_s = a_full(1:3) !< Linear acceleration
@@ -394,6 +408,87 @@ contains
        end do
     end do
   end subroutine add_fsi_non_linear_matrices
+
+  !> Adds user-defined structural equation terms to the global system.
+  !!
+  !! Called inside the structural fixed-point loop, every pass, after
+  !! M_global and B_global have been reset to their linear base. The user
+  !! hook is evaluated at the current velocity iterate
+  !!     v_k = body_vel_guess + delta_k,   a_k = accel_at_guess + gamma delta_k
+  !! where delta_k is the current X_sol. With
+  !!     J_k = dF/dv + gamma dF/da
+  !! the Newton update of  M_lin delta = B_lin + F(v_guess + delta)  is
+  !!     (M_lin - J_k) delta = B_lin + F_k - J_k delta_k
+  !! so this routine adds  -J_k  to M_global and  F_k - J_k delta_k  to
+  !! B_global. At delta_k = 0 this is the plain linearised treatment; on
+  !! convergence it is exact for any nonlinearity in v and a.
+  subroutine add_fsi_user_structural_terms(nbodies_fsi, bodies, &
+       fsi_dof_map, M_global, B_global, X_sol, rot_matrices, time, &
+       gravity_vec, user_terms)
+    integer, intent(in) :: nbodies_fsi
+    type(fsi_body_t), intent(in) :: bodies(:)
+    integer, intent(in) :: fsi_dof_map(:,:)
+    real(kind=rp), intent(inout) :: M_global(:,:), B_global(:)
+    real(kind=rp), intent(in) :: X_sol(:)
+    real(kind=rp), intent(in) :: rot_matrices(:,:,:)
+    type(time_state_t), intent(in) :: time
+    real(kind=rp), intent(in) :: gravity_vec(3)
+    !> User hook. Points to a do-nothing dummy unless registered.
+    procedure(user_fsi_structural_terms_intf), pointer, intent(in) :: &
+         user_terms
+
+    integer :: i, j, k, row_g, col_g
+    real(kind=rp) :: delta(6), v_k(6), a_k(6)
+    real(kind=rp) :: force_pivot(6), dforce_dvel(6,6), dforce_dacc(6,6)
+    real(kind=rp) :: jac(6,6), M_local(6,6), B_local(6)
+
+     ! Return when no hook is registered.
+    if (associated(user_terms, dummy_fsi_structural_terms)) return
+
+    do i = 1, nbodies_fsi
+
+       ! Current velocity correction for this body (inactive DOFs stay 0).
+       delta = 0.0_rp
+       do k = 1, 6
+          row_g = fsi_dof_map(i, k)
+          if (row_g .gt. 0) delta(k) = X_sol(row_g)
+       end do
+
+       ! State at the current iterate, on the same integrator the built-in
+       ! assembly used.
+       v_k = bodies(i)%body_vel_guess + delta
+       a_k = bodies(i)%accel_at_guess + bodies(i)%gamma_guess * delta
+
+       force_pivot = 0.0_rp
+       dforce_dvel = 0.0_rp
+       dforce_dacc = 0.0_rp
+
+       call user_terms(trim(bodies(i)%name), i, time, bodies(i)%prm, &
+            rot_matrices(:,:, bodies(i)%ale_id), bodies(i)%disp_rel, &
+            v_k, a_k, gravity_vec, force_pivot, dforce_dvel, dforce_dacc)
+
+       jac = dforce_dvel + bodies(i)%gamma_guess * dforce_dacc
+       M_local = -jac
+       B_local = force_pivot - matmul(jac, delta)
+
+       ! Map to the global system. Entries for inactive DOFs are dropped,
+       ! exactly as the built-in assembly drops them: a constrained DOF
+       ! legitimately carries a reaction that the support absorbs.
+       do j = 1, 6
+          row_g = fsi_dof_map(i, j)
+          if (row_g .gt. 0) then
+             B_global(row_g) = B_global(row_g) + B_local(j)
+             do k = 1, 6
+                col_g = fsi_dof_map(i, k)
+                if (col_g .gt. 0) then
+                   M_global(row_g, col_g) = M_global(row_g, col_g) + &
+                        M_local(j, k)
+                end if
+             end do
+          end if
+       end do
+    end do
+  end subroutine add_fsi_user_structural_terms
 
   !> Computes the standard 3D cross product of two vectors
   pure function cross(a, b) result(c)

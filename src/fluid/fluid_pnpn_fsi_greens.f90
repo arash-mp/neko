@@ -32,7 +32,7 @@
 !
 module fluid_pnpn_fsi_greens
   use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms, &
-       add_fsi_non_linear_matrices
+       add_fsi_non_linear_matrices, add_fsi_user_structural_terms
   use fsi_manager, only: fsi_manager_init, linsolve_dense, &
        fsi_prep_checkpoint, fsi_restart_restore
   use fluid_pnpn, only : fluid_pnpn_t
@@ -55,7 +55,8 @@ module fluid_pnpn_fsi_greens
   use utils, only : neko_error
   use logger, only : neko_log, LOG_SIZE
   use mesh, only : mesh_t
-  use user_intf, only : user_t, user_fsi_body_params_intf
+  use user_intf, only : user_t, user_fsi_body_params_intf, &
+       user_fsi_structural_terms_intf, dummy_fsi_structural_terms
   use checkpoint, only : chkp_t
   use mpi_f08, only: MPI_Wtime
   use ab_time_scheme, only : ab_time_scheme_t
@@ -118,6 +119,11 @@ module fluid_pnpn_fsi_greens
      !> associated (dummy if not registered in the user file).
      procedure(user_fsi_body_params_intf), nopass, pointer :: &
           user_fsi_body_params => null()
+     !> User hook: extra structural equation terms.
+     procedure(user_fsi_structural_terms_intf), nopass, pointer :: &
+          user_fsi_structural_terms => null()
+     !> True when the user registered structural terms.
+     logical :: has_user_structural_terms = .false.
    contains
      procedure, pass(this) :: init => fluid_fsi_init
      procedure, pass(this) :: step => fluid_fsi_step
@@ -148,6 +154,11 @@ contains
 
     ! User hook for FSI body parameters (never null after user%init).
     this%user_fsi_body_params => user%fsi_structural_parameters
+
+    ! User hook for extra structural terms (never null after user%init).
+    this%user_fsi_structural_terms => user%fsi_structural_terms
+    this%has_user_structural_terms = .not. associated( &
+         this%user_fsi_structural_terms, dummy_fsi_structural_terms)
 
     ! Initialize Standard Fields locally
     call this%u_s%init(this%dm_Xh, 'u_s')
@@ -226,9 +237,10 @@ contains
     real(kind=dp), save :: total_elapsed_g = 0.0_dp
 
     ! Fixed-Point Iteration variables
-    real(kind=rp), allocatable :: M_linear(:,:), X_prev(:)
+    real(kind=rp), allocatable :: M_linear(:,:), B_linear(:), X_prev(:)
     real(kind=rp) :: nr_residual
     integer :: nr_iter, max_nr_iter
+    logical :: iter_verbose, converged
 
     n = this%dm_Xh%size()
     nadv = this%ext_bdf%nadv
@@ -429,25 +441,35 @@ contains
     ! Calculate all FSI corrections: M_global * X_sol = B_global.
     ! With current algorithm, the correction is actually just
     ! the velocity change compared to the previous time step.
-    ! In case of non_linear_correction_term, X_sol contains values 
-    ! from the previous time step, 
-    ! providing an initial guess.
+    ! X_sol enters holding the previous step's solution, which serves as
+    ! the initial guess of the fixed-point loop below.
     if (this%total_active_dofs > 0) then
        allocate(M_linear(this%total_active_dofs, this%total_active_dofs))
+       allocate(B_linear(this%total_active_dofs))
        allocate(X_prev(this%total_active_dofs))
 
-       ! Save the linear matrix
-       M_linear = this%M_global 
-       
-       max_nr_iter = 1
-       if (this%non_linear_correction_term) then
-          max_nr_iter = 20
+       ! Save the linear base. Both M and B are rebuilt every pass: the
+       ! built-in nonlinear correction touches M, user terms touch both.
+       M_linear = this%M_global
+       B_linear = this%B_global
+
+       ! The loop always runs to convergence. When nothing depends on
+       ! X_sol, pass 2 reproduces pass 1 (linsolve_dense is
+       ! deterministic), the residual is exactly zero, and the result is
+       ! identical to a single solve. X_sol enters with the previous
+       ! step's solution as a warm start.
+       max_nr_iter = 20
+       iter_verbose = this%non_linear_correction_term .or. &
+            this%has_user_structural_terms
+       if (iter_verbose) then
           call neko_log%message("  --- Fixed-point Iteration ---")
        end if
 
+       converged = .false.
        do nr_iter = 1, max_nr_iter
-          ! Reset matrix to linear base
+          ! Reset to linear base
           this%M_global = M_linear
+          this%B_global = B_linear
 
           if (this%non_linear_correction_term) then
              call add_fsi_non_linear_matrices(this%nbodies_fsi, &
@@ -455,25 +477,39 @@ contains
                   this%X_sol, this%ale%body_rot_matrices)
           end if
 
+          call add_fsi_user_structural_terms(this%nbodies_fsi, &
+               this%fsi_bodies, this%fsi_dof_map, this%M_global, &
+               this%B_global, this%X_sol, this%ale%body_rot_matrices, &
+               time, this%gravity_vec, this%user_fsi_structural_terms)
+
           X_prev = this%X_sol
 
           call linsolve_dense(this%total_active_dofs, this%M_global, &
                this%B_global, this%X_sol)
-              
-          if (this%non_linear_correction_term) then
 
-             nr_residual = maxval(abs(this%X_sol - X_prev))
-             
+          nr_residual = maxval(abs(this%X_sol - X_prev))
+
+          if (iter_verbose) then
              write(msg, '(A, I2, A, ES13.6)') "    Iter: ", &
                   nr_iter, " | Max Residual: ", nr_residual
              call neko_log%message(trim(msg))
-             if (nr_residual < 1e-14_rp) exit
+          end if
+          if (nr_residual .lt. 1.0e-14_rp) then
+             converged = .true.
+             exit
           end if
        end do
-       
-       if (this%non_linear_correction_term) call neko_log%message(' ')
+
+       if (.not. converged) then
+          write(msg, '(A,I0,A,I0,A,ES13.6)') &
+               "FSI structural loop did not converge at step ", time%tstep, &
+               " after ", max_nr_iter, " passes. Max residual: ", nr_residual
+          call neko_log%warning(trim(msg))
+       end if
+       if (iter_verbose) call neko_log%message(' ')
 
        deallocate(M_linear)
+       deallocate(B_linear)
        deallocate(X_prev)
     end if
 

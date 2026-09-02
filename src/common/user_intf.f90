@@ -234,6 +234,52 @@ module user_intf
      end subroutine user_fsi_body_params_intf
   end interface
 
+  !> Abstract interface for user-defined structural equation terms on an
+  !! FSI body.
+  !!
+  !! Write the contribution as a generalised `force` on the right-hand side
+  !! of (built-in inertia) = F_builtin + F_fluid + force_pivot,  in LAB
+  !! components referenced to the body's pivot: force_pivot(1:3) is force,
+  !! force_pivot(4:6) is torque.
+  !!
+  !! body_vel and body_acc are the `current iterate` of the structural
+  !! fixed-point loop.
+  !! All three outputs are zeroed by the caller before every call and do
+  !! NOT persist between calls. Do not keep state in module variables: it
+  !! is not checkpointed and restarts will be silently wrong.
+  !!
+  !! @param body_name Name of the body (from the case file).
+  !! @param body_id Index of the body in the case.fluid.fsi.bodies list.
+  !! @param time The time state.
+  !! @param prm Structural parameters as set by the parameters hook
+  !! @param rot_mat Current rotation matrix (body -> lab) of the body.
+  !! @param disp_rel Relative displacement [x, y, z, rx, ry, rz].
+  !! @param body_vel Velocity [u, v, w, wx, wy, wz] at the current iterate.
+  !! @param body_acc Acceleration at the current iterate.
+  !! @param gravity_vec Gravity vector from the case file.
+  !! @param force_pivot Generalised force at the pivot, lab frame.
+  !! @param dforce_dvel d(force_pivot)/d(body_vel), row = force component.
+  !! @param dforce_dacc d(force_pivot)/d(body_acc), row = force component.
+  abstract interface
+     subroutine user_fsi_structural_terms_intf(body_name, body_id, time, &
+          prm, rot_mat, disp_rel, body_vel, body_acc, gravity_vec, &
+          force_pivot, dforce_dvel, dforce_dacc)
+       import rp, time_state_t, fsi_body_params_t
+       character(len=*), intent(in) :: body_name
+       integer, intent(in) :: body_id
+       type(time_state_t), intent(in) :: time
+       type(fsi_body_params_t), intent(in) :: prm
+       real(kind=rp), intent(in) :: rot_mat(3, 3)
+       real(kind=rp), intent(in) :: disp_rel(6)
+       real(kind=rp), intent(in) :: body_vel(6)
+       real(kind=rp), intent(in) :: body_acc(6)
+       real(kind=rp), intent(in) :: gravity_vec(3)
+       real(kind=rp), intent(inout) :: force_pivot(6)
+       real(kind=rp), intent(inout) :: dforce_dvel(6, 6)
+       real(kind=rp), intent(inout) :: dforce_dacc(6, 6)
+     end subroutine user_fsi_structural_terms_intf
+  end interface
+
 
   !> A type collecting all the overridable user routines and flag to suppress
   !! type injection from custom modules.
@@ -290,6 +336,9 @@ module user_intf
      !! inertia, COM offset, springs, dampers, ...).
      procedure(user_fsi_body_params_intf), nopass, pointer :: &
           fsi_structural_parameters => null()
+     !> User routine to add structural equation terms to an FSI body.
+     procedure(user_fsi_structural_terms_intf), nopass, pointer :: &
+          fsi_structural_terms => null()
      !> User routine to set ALE base shapes (smooth blending functions).
      procedure(user_ale_base_shapes_intf), nopass, pointer :: &
           ale_base_shapes => null()
@@ -316,7 +365,8 @@ module user_intf
        dummy_user_ale_mesh_velocity, dummy_user_ale_base_shapes, &
        dummy_user_ale_rigid_kinematics, morph_overset_interface, &
        user_wall_sampling_gll_intf, user_wall_sampling_distance_intf, &
-       user_fsi_body_params_intf, dummy_fsi_structural_parameters
+       user_fsi_body_params_intf, dummy_fsi_structural_parameters, &
+       user_fsi_structural_terms_intf, dummy_fsi_structural_terms
 contains
 
   !> Constructor.
@@ -453,6 +503,14 @@ contains
        user_extended = .true.
        n = n + 1
        write(extensions(n), '(A)') '- FSI structural parameters'
+    end if
+
+    if (.not. associated(this%fsi_structural_terms)) then
+       this%fsi_structural_terms => dummy_fsi_structural_terms
+    else
+       user_extended = .true.
+       n = n + 1
+       write(extensions(n), '(A)') '- FSI structural terms'
     end if
 
     if (.not. associated(this%ale_base_shapes)) then
@@ -614,5 +672,22 @@ contains
     real(kind=rp), intent(in) :: body_vel(6)
     type(fsi_body_params_t), intent(inout) :: prm
   end subroutine dummy_fsi_structural_parameters
+
+  subroutine dummy_fsi_structural_terms(body_name, body_id, time, prm, &
+       rot_mat, disp_rel, body_vel, body_acc, gravity_vec, force_pivot, &
+       dforce_dvel, dforce_dacc)
+    character(len=*), intent(in) :: body_name
+    integer, intent(in) :: body_id
+    type(time_state_t), intent(in) :: time
+    type(fsi_body_params_t), intent(in) :: prm
+    real(kind=rp), intent(in) :: rot_mat(3, 3)
+    real(kind=rp), intent(in) :: disp_rel(6)
+    real(kind=rp), intent(in) :: body_vel(6)
+    real(kind=rp), intent(in) :: body_acc(6)
+    real(kind=rp), intent(in) :: gravity_vec(3)
+    real(kind=rp), intent(inout) :: force_pivot(6)
+    real(kind=rp), intent(inout) :: dforce_dvel(6, 6)
+    real(kind=rp), intent(inout) :: dforce_dacc(6, 6)
+  end subroutine dummy_fsi_structural_terms
 
 end module user_intf
