@@ -34,15 +34,15 @@
 !! shells, divergence-free directions, random phases and amplitudes from a
 !! von Karman spectrum. Generated on rank 0 and broadcast.
 !!
-!! Ported from the FST plugin of V. Baconnet, E. Kluesberg, P. Negi and
-!! P. Schlatter (neko-plugins). For the same inputs it gives the plugin's
+!! Ported from:
+!!   Repository: https://github.com/vbaconnet/free-stream-turbulence
+!!   Original implementation by E. Kluesberg, P. Negi and P. Schlatter.
+!! For the same inputs it gives the plugin's
 !! mode set, except for these deliberate changes:
 !!  - all sizes and parameters are runtime inputs,
-!!  - the seed is honoured (the plugin always used -143),
 !!  - periodic wavenumbers are rounded to the nearest multiple instead of
 !!    down, which removes a 5-15% energy bias between components, and
-!!    are never reduced to zero,
-!!  - unused plugin code is dropped.
+!!    are never reduced to zero
 module fst_spectrum
   use num_types, only : rp
   use math, only : pi

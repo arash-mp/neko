@@ -815,7 +815,7 @@ contains
        end if
     end do
 
-    ! Spectrum energies are only known on rank 0, where they were generated
+    ! Spectrum energies are only known on rank 0
     if (pe_rank .eq. 0) then
        tu_target = this%spectrum%ti*this%u_ref
        tu_rel_err = abs(this%spectrum%tu_uinf_estimate - tu_target) &
@@ -957,14 +957,12 @@ contains
     call neko_log%message("[FST] Writing preview fields 1-4 " // &
          "(fringe, u', v', w') to '" // trim(this%dump_fname) // "'")
 
-    ! Cleared on the active backend, which is where the kernel works
     call neko_scratch_registry%request_field(f_up, i2, .true.)
     call neko_scratch_registry%request_field(f_vp, i3, .true.)
     call neko_scratch_registry%request_field(f_wp, i4, .true.)
     call neko_scratch_registry%request_field(f_zero, i5, .true.)
 
-    ! The fringe is cheap and built on the host. Host coordinates are
-    ! current here: this runs at the first step, before the mesh is moved.
+    ! The fringe is cheap and built on the host.
     call neko_scratch_registry%request_field(f_lam, i1, .false.)
     f_lam%x = 0.0_rp
     call fst_source_term_fringe_cpu(f_lam%size(), this%zone%size, &
@@ -977,7 +975,7 @@ contains
             HOST_TO_DEVICE, sync = .true.)
     end if
 
-    ! u' from the same kernel as the run: with a flat fringe, gain 1 and
+    ! u' with a flat fringe, gain 1 and
     ! zero base flow and velocity it adds 1 * 1 * (0 + u' - 0) = u'
     call fst_apply(this, f_zero, f_zero, f_zero, f_up, f_vp, f_wp, &
          f_zero%x, f_zero%x, f_zero%x, &
