@@ -62,8 +62,8 @@ module scalar_sgs_stats_simcomp
      !> Output writer.
      type(scalar_sgs_stats_output_t) :: stats_output
      !> Time value at which the sampling of statistics is initiated.
-     real(kind=rp) :: start_time
-     real(kind=rp) :: time
+     real(kind=dp) :: start_time
+     real(kind=dp) :: time
      !> Output filename stem without the run counter.
      character(len=:), allocatable :: base_filename
 
@@ -104,7 +104,7 @@ contains
     character(len=:), allocatable :: hom_dir
     character(len=:), allocatable :: sname
     character(len=:), allocatable :: name
-    real(kind=rp) :: start_time
+    real(kind=dp) :: start_time
     type(coef_t), pointer :: coef
     character(len=:), allocatable :: alphat_field, nut_field
     real(kind=rp) :: pr_turb
@@ -119,7 +119,7 @@ contains
     call json_get_or_default(json, 'avg_direction', &
          hom_dir, 'none')
     call json_get_or_lookup_or_default(json, 'start_time', &
-         start_time, 0.0_rp)
+         start_time, 0.0_dp)
 
     call json_get(json, 'alphat', json_subdict)
     call json_get(json_subdict, 'nut_dependency', nut_dependency)
@@ -169,7 +169,7 @@ contains
     character(len=*), intent(in) :: name
     character(len=*), intent(in) :: sname
     character(len=*), intent(in) :: hom_dir
-    real(kind=rp), intent(in) :: start_time
+    real(kind=dp), intent(in) :: start_time
     type(coef_t), intent(in), target :: coef
     character(len=*), intent(in) :: alphat_field
     character(len=*), intent(in) :: fname
@@ -199,9 +199,14 @@ contains
          hom_dir = hom_dir, name = stats_fname, &
          path = this%case%output_directory)
 
+    ! Statistics are averaged over the interval between two writes, so
+    ! writing at the very start of the averaging would only produce an
+    ! empty file. The schedule is anchored to the start of the averaging.
     call this%case%output_controller%add(this%stats_output, &
          this%output_controller%control_value, &
-         this%output_controller%control_mode)
+         this%output_controller%control_mode, &
+         start_time = max(this%start_time, this%case%time%start_time), &
+         write_at_start = .false.)
 
     call neko_log%end_section()
 
@@ -222,7 +227,7 @@ contains
     character(len=*), intent(in) :: name
     character(len=*), intent(in) :: sname
     character(len=*), intent(in) :: hom_dir
-    real(kind=rp), intent(in) :: start_time
+    real(kind=dp), intent(in) :: start_time
     type(coef_t), intent(in), target :: coef
     character(len=*), intent(in) :: nut_field
     real(kind=rp), intent(in) :: pr_turb
@@ -256,9 +261,14 @@ contains
          hom_dir = hom_dir, name = stats_fname, &
          path = this%case%output_directory)
 
+    ! Statistics are averaged over the interval between two writes, so
+    ! writing at the very start of the averaging would only produce an
+    ! empty file. The schedule is anchored to the start of the averaging.
     call this%case%output_controller%add(this%stats_output, &
          this%output_controller%control_value, &
-         this%output_controller%control_mode)
+         this%output_controller%control_mode, &
+         start_time = max(this%start_time, this%case%time%start_time), &
+         write_at_start = .false.)
 
     call neko_log%end_section()
 
@@ -277,7 +287,7 @@ contains
     type(time_state_t), intent(in) :: time
     character(len=NEKO_FNAME_LEN) :: fname
     character(len=5) :: prefix, suffix
-    real(kind=rp) :: t
+    real(kind=dp) :: t
 
     t = time%t
     if (t .gt. this%time) this%time = t
@@ -297,8 +307,8 @@ contains
   subroutine scalar_sgs_stats_simcomp_compute(this, time)
     class(scalar_sgs_stats_simcomp_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
-    real(kind=rp) :: delta_t, t
-    real(kind=rp) :: sample_start_time, sample_time
+    real(kind=rp) :: delta_t
+    real(kind=dp) :: sample_start_time, sample_time, t
     character(len=LOG_SIZE) :: log_buf
     integer :: ierr
 
@@ -320,7 +330,7 @@ contains
     t = time%t
 
     if (t .ge. this%start_time) then
-       delta_t = t - this%time !This is only a real number
+       delta_t = real(t - this%time, kind=rp) !This is only a real number
 
        call MPI_Barrier(NEKO_COMM, ierr)
 

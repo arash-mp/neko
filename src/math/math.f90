@@ -68,6 +68,8 @@ module math
 
   !> Machine epsilon \f$ \epsilon \f$
   real(kind=rp), public, parameter :: NEKO_EPS = epsilon(1.0_rp)
+  real(kind=dp), public, parameter :: NEKO_EPS_DP = epsilon(1.0_dp)
+  real(kind=sp), public, parameter :: NEKO_EPS_SP = epsilon(1.0_sp)
 
   !> \f$ ln(2) \f$
   real(kind=rp), public, parameter :: NEKO_M_LN2 = log(2.0_rp)
@@ -100,7 +102,8 @@ module math
   end interface relcmp
 
   public :: abscmp, rzero, izero, row_zero, rone, copy, cmult, cadd, cfill, &
-       glsum, glmax, glmin, chsign, vlmax, vlmin, invcol1, invcol3, invers2, &
+       glsum, glmax, glmin, glamax, chsign, vlmax, vlmin, vlamax, &
+       invcol1, invcol3, invers2, &
        vcross, vdot2, vdot3, vlsc3, vlsc2, add2, add3, add4, sub2, sub3, &
        add2s1, add2s2, addsqr2s2, cmult2, invcol2, col2, col3, subcol3, &
        add3s2, add4s3, add5s4, subcol4, addcol3, addcol4, addcol3s2, ascol5, &
@@ -111,7 +114,8 @@ module math
        pwmax2, pwmax3, cpwmax2, cpwmax3, pwmin2, pwmin3, cpwmin2, cpwmin3, &
        masked_scatter_copy_0, cdiv, cdiv2, glsubnorm, &
        masked_copy, masked_gather_copy, masked_scatter_copy, sabscmp, dabscmp, &
-       math_dstepf, math_stepf, cwrap, lambert_w0, sqrt_inplace, power
+       math_dstepf, math_stepf, cwrap, lambert_w0, sqrt_inplace, power, &
+       eig_sym2, eig_sym3
 
 contains
 
@@ -664,6 +668,26 @@ contains
 
   end function glmax
 
+  !>Max of the absolute value of a vector of length n
+  !! @details Returns \f$ \max_i |a_i| \f$ reduced over all ranks.
+  function glamax(a, n)
+    integer, intent(in) :: n
+    real(kind=rp), dimension(n) :: a
+    real(kind=rp) :: tmp, glamax
+    integer :: i, ierr
+
+    tmp = 0.0_rp
+    !$omp parallel do reduction(max:tmp)
+    do i = 1, n
+       tmp = max(tmp, abs(a(i)))
+    end do
+    !$omp end parallel do
+
+    call MPI_Allreduce(tmp, glamax, 1, &
+         MPI_REAL_PRECISION, MPI_MAX, NEKO_COMM, ierr)
+
+  end function glamax
+
   !>Max of an integer vector of length n
   function glimax(a, n)
     integer, intent(in) :: n
@@ -734,6 +758,21 @@ contains
     !$omp end parallel do
 
   end subroutine chsign
+
+  !> maximum absolute value of a vector of length @a n, rank-local
+  function vlamax(vec,n) result(tamax)
+    integer :: n, i
+    real(kind=rp), intent(in) :: vec(n)
+    real(kind=rp) :: tamax
+
+    tamax = 0.0_rp
+    !$omp parallel do reduction(max:tamax)
+    do i = 1, n
+       tamax = max(tamax, abs(vec(i)))
+    end do
+    !$omp end parallel do
+
+  end function vlamax
 
   !> maximum value of a vector of length @a n
   function vlmax(vec,n) result(tmax)
@@ -1902,4 +1941,113 @@ contains
     !$omp end parallel do
 
   end subroutine power
+
+  !> Eigenvalues of a symmetric 2x2 matrix, descending
+  !! @param a11 Diagonal entry (1,1).
+  !! @param a22 Diagonal entry (2,2).
+  !! @param a12 Off-diagonal entry.
+  !! @param e1 The larger eigenvalue.
+  !! @param e2 The smaller eigenvalue.
+  pure subroutine eig_sym2(a11, a22, a12, e1, e2)
+    real(kind=dp), intent(in) :: a11, a22, a12
+    real(kind=dp), intent(out) :: e1, e2
+    real(kind=dp) :: t, d, s
+
+    t = a11 + a22
+    d = a11 * a22 - a12 * a12
+    s = sqrt(max(0.0_dp, 0.25_dp * t * t - d))
+    e1 = 0.5_dp * t + s
+
+    if (e1 .gt. 0.0_dp) then
+       e2 = d / e1
+    else
+       e2 = 0.5_dp * t - s
+    end if
+
+  end subroutine eig_sym2
+
+  !> Eigenvalues of a symmetric 3x3 matrix, descending
+  !!
+  !! Closed form via the characteristic polynomial of the deviatoric part,
+  !! which avoids an iterative solve for what is a per quadrature point
+  !! diagnostic. A diagonal matrix is handled by the general path and comes
+  !! back exact; only the isotropic case is special, because the deviatoric
+  !! scaling is singular there.
+  !!
+  !! @note The smallest root is a difference of terms of order
+  !! \f$ \lambda_{max} \f$, so its relative accuracy degrades as
+  !! \f$ \epsilon \kappa \f$ -- about 1e-10 at the 1e6 condition numbers
+  !! this is used to detect, which is ample for a threshold test but would
+  !! not be if \f$ \kappa \f$ approached \f$ 1/\epsilon \f$. That is why
+  !! this works in double regardless of what \a rp is: in a single precision
+  !! build the same amplification against \f$ \epsilon_{sp} \f$ would put a
+  !! 6% error on \f$ \kappa \f$ at 1e6 and lose it entirely near 1e7,
+  !! exactly where the answer matters most.
+  !!
+  !! @note Both call sites in coef_metric_condition() pass a matrix scaled to
+  !! unit magnitude: the geometric factors divided by their largest entry, and
+  !! the same factors Jacobi scaled to a unit diagonal. The latter is exactly
+  !! the identity for an orthogonal element, which is why the isotropic branch
+  !! above is not merely defensive.
+  !!
+  !! @param a11 Diagonal entry (1,1).
+  !! @param a22 Diagonal entry (2,2).
+  !! @param a33 Diagonal entry (3,3).
+  !! @param a12 Off-diagonal entry (1,2).
+  !! @param a13 Off-diagonal entry (1,3).
+  !! @param a23 Off-diagonal entry (2,3).
+  !! @param e1 The largest eigenvalue.
+  !! @param e2 The intermediate eigenvalue.
+  !! @param e3 The smallest eigenvalue.
+  pure subroutine eig_sym3(a11, a22, a33, a12, a13, a23, e1, e2, e3)
+    real(kind=dp), intent(in) :: a11, a22, a33, a12, a13, a23
+    real(kind=dp), intent(out) :: e1, e2, e3
+    real(kind=dp) :: p1, p2, q, p, r, phi
+    real(kind=dp) :: b11, b22, b33, b12, b13, b23
+    real(kind=dp), parameter :: third = 1.0_dp / 3.0_dp
+    real(kind=dp), parameter :: pi_third = 1.0471975511965976_dp
+    real(kind=dp), parameter :: twopi_third = 2.0943951023931953_dp
+
+    p1 = a12 * a12 + a13 * a13 + a23 * a23
+
+    q = (a11 + a22 + a33) * third
+    p2 = (a11 - q)**2 + (a22 - q)**2 + (a33 - q)**2 + 2.0_dp * p1
+    p = sqrt(p2 / 6.0_dp)
+
+    if (p .le. 0.0_dp) then
+       ! diagonal and isotropic, or all zero
+       e1 = max(a11, max(a22, a33))
+       e3 = min(a11, min(a22, a33))
+       e2 = a11 + a22 + a33 - e1 - e3
+       return
+    end if
+
+    b11 = (a11 - q) / p
+    b22 = (a22 - q) / p
+    b33 = (a33 - q) / p
+    b12 = a12 / p
+    b13 = a13 / p
+    b23 = a23 / p
+
+    r = 0.5_dp * (b11 * (b22 * b33 - b23 * b23) &
+         - b12 * (b12 * b33 - b23 * b13) &
+         + b13 * (b12 * b23 - b22 * b13))
+
+    ! r is in [-1, 1] analytically, round-off can push it out
+    if (r .le. -1.0_dp) then
+       phi = pi_third
+    else if (r .ge. 1.0_dp) then
+       phi = 0.0_dp
+    else
+       phi = acos(r) * third
+    end if
+
+    e1 = q + 2.0_dp * p * cos(phi)
+    e3 = q + 2.0_dp * p * cos(phi + twopi_third)
+    e2 = 3.0_dp * q - e1 - e3
+
+  end subroutine eig_sym3
+
+
+
 end module math

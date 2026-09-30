@@ -36,11 +36,13 @@ module gmres
   use krylov, only : ksp_t, ksp_monitor_t
   use precon, only : pc_t
   use ax_product, only : ax_t
-  use num_types, only: rp, xp
+  use num_types, only : rp, xp
   use field, only : field_t
   use coefs, only : coef_t
   use gather_scatter, only : gs_t, GS_OP_ADD
-  use bc_list, only : bc_list_t
+  use scalar_bc_projector, only : scalar_bc_projector_t
+  use vector_bc_projector, only : vector_bc_projector_t, &
+       vector_bc_projector_components
   use math, only : glsc3, rzero, copy, sub2, cmult2, abscmp
   use neko_config, only : NEKO_BLK_SIZE
   use comm, only : NEKO_COMM, MPI_EXTRA_PRECISION
@@ -172,7 +174,7 @@ contains
   end subroutine gmres_free
 
   !> Standard GMRES solve
-  function gmres_solve(this, Ax, x, f, n, coef, blst, gs_h, niter) &
+  function gmres_solve(this, Ax, x, f, n, coef, bc_projector, gs_h, niter) &
        result(ksp_results)
     class(gmres_t), intent(inout) :: this
     class(ax_t), intent(in) :: Ax
@@ -180,13 +182,14 @@ contains
     integer, intent(in) :: n
     real(kind=rp), dimension(n), intent(in) :: f
     type(coef_t), intent(inout) :: coef
-    type(bc_list_t), intent(inout) :: blst
+    class(scalar_bc_projector_t), intent(inout) :: bc_projector
     type(gs_t), intent(inout) :: gs_h
     type(ksp_monitor_t) :: ksp_results
     integer, optional, intent(in) :: niter
     integer :: iter, max_iter
     integer :: i, j, k, l, ierr, tid, nthrds
     real(kind=xp) :: w_plus(NEKO_BLK_SIZE), x_plus(NEKO_BLK_SIZE)
+    real(kind=xp) :: hl(this%lgmres)
     real(kind=xp) :: alpha, lr, alpha2, norm_fac, tmp, acc
     real(kind=rp) :: temp, rnorm
     logical :: conv
@@ -222,7 +225,7 @@ contains
             call copy(r, f, n)
             call Ax%compute(w, x%x, coef, x%msh, x%Xh)
             call gs_h%op(w, n, GS_OP_ADD)
-            call blst%apply(w, n)
+            call bc_projector%apply(w, n)
             call sub2(r, w, n)
          end if
 
@@ -243,39 +246,43 @@ contains
 
             call Ax%compute(w, z(1,j), coef, x%msh, x%Xh)
             call gs_h%op(w, n, GS_OP_ADD)
-            call blst%apply(w, n)
+            call bc_projector%apply(w, n)
 
             ! Classical Gram-Schmidt orthogonalization: accumulate
-            ! <w, v_l>_mult for l=1..j into per-thread columns of hp,
-            ! merge across threads, then one MPI_Allreduce of length j.
-            !$omp parallel private(i, k, l, tid, acc)
+            ! <w, v_l>_mult for l=1..j in a thread-private array hl,
+            ! publish it once per thread into a column of hp, merge
+            ! across threads, then one MPI_Allreduce of length j.
+            !$omp parallel private(i, k, l, tid, acc, hl)
             tid = 1
             !$ tid = omp_get_thread_num() + 1
             do l = 1, j
-               hp(l,tid) = 0.0_xp
+               hl(l) = 0.0_xp
             end do
             !$omp do
             do i = 0, n-1, NEKO_BLK_SIZE
                if (i + NEKO_BLK_SIZE .le. n) then
                   do l = 1, j
-                     acc = hp(l,tid)
+                     acc = hl(l)
                      !$omp simd reduction(+:acc)
                      do k = 1, NEKO_BLK_SIZE
                         acc = acc + &
                              w(i+k) * v(i+k,l) * coef%mult(i+k,1,1,1)
                      end do
-                     hp(l,tid) = acc
+                     hl(l) = acc
                   end do
                else
                   do l = 1, j
                      do k = 1, n - i
-                        hp(l,tid) = hp(l,tid) + &
+                        hl(l) = hl(l) + &
                              w(i+k) * v(i+k,l) * coef%mult(i+k,1,1,1)
                      end do
                   end do
                end if
             end do
-            !$omp end do
+            !$omp end do nowait
+            do l = 1, j
+               hp(l,tid) = hl(l)
+            end do
             !$omp end parallel
 
             ! Cross-thread merge into hp(:, 1), then one Allreduce of j.
@@ -309,6 +316,7 @@ contains
                         w_plus(k) = w_plus(k) - h(l,j) * v(i+k,l)
                      end do
                   end do
+                  !$omp simd reduction(+:alpha2)
                   do k = 1, NEKO_BLK_SIZE
                      w(i+k) = w(i+k) + w_plus(k)
                      alpha2 = alpha2 + w(i+k)**2 * coef%mult(i+k,1,1,1)
@@ -412,7 +420,7 @@ contains
 
   !> Standard GMRES coupled solve
   function gmres_solve_coupled(this, Ax, x, y, z, fx, fy, fz, &
-       n, coef, blstx, blsty, blstz, gs_h, niter) result(ksp_results)
+       n, coef, bc_projector, gs_h, niter) result(ksp_results)
     class(gmres_t), intent(inout) :: this
     class(ax_t), intent(in) :: Ax
     type(field_t), intent(inout) :: x
@@ -423,16 +431,16 @@ contains
     real(kind=rp), dimension(n), intent(in) :: fy
     real(kind=rp), dimension(n), intent(in) :: fz
     type(coef_t), intent(inout) :: coef
-    type(bc_list_t), intent(inout) :: blstx
-    type(bc_list_t), intent(inout) :: blsty
-    type(bc_list_t), intent(inout) :: blstz
+    class(vector_bc_projector_t), intent(inout) :: bc_projector
     type(gs_t), intent(inout) :: gs_h
     type(ksp_monitor_t), dimension(3) :: ksp_results
     integer, optional, intent(in) :: niter
+    type(scalar_bc_projector_t), pointer :: bc_x, bc_y, bc_z
 
-    ksp_results(1) = this%solve(Ax, x, fx, n, coef, blstx, gs_h, niter)
-    ksp_results(2) = this%solve(Ax, y, fy, n, coef, blsty, gs_h, niter)
-    ksp_results(3) = this%solve(Ax, z, fz, n, coef, blstz, gs_h, niter)
+    call vector_bc_projector_components(bc_projector, bc_x, bc_y, bc_z)
+    ksp_results(1) = this%solve(Ax, x, fx, n, coef, bc_x, gs_h, niter)
+    ksp_results(2) = this%solve(Ax, y, fy, n, coef, bc_y, gs_h, niter)
+    ksp_results(3) = this%solve(Ax, z, fz, n, coef, bc_z, gs_h, niter)
 
   end function gmres_solve_coupled
 

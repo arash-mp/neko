@@ -15,6 +15,7 @@ SUBDIRS = tuple\
 	  global_interpolation\
 	  mean_field\
 	  gather_scatter\
+	  ax\
 	  krylov\
 	  bc\
 	  signal\
@@ -27,8 +28,11 @@ SUBDIRS = tuple\
 	  octree\
 	  vector\
 	  matrix\
+	  tensor3\
+	  tensor4\
 	  case_file_utils\
 	  registry\
+	  errors\
 	  scratch_registry\
 	  fast3d\
 	  time_scheme\
@@ -40,8 +44,11 @@ SUBDIRS = tuple\
 	  expression\
 	  point_interpolation\
 	  templates/parallel\
+	  bc_projector\
 	  boundary_operation\
+	  checkpoint_payload\
 	  wall_sampling\
+	  restart_consistency\
 	  templates/serial
 
 TESTS = device/device_test\
@@ -63,6 +70,7 @@ TESTS = device/device_test\
 	global_interpolation/global_interpolation_test\
 	mean_field/mean_field_test\
 	gather_scatter/gather_scatter_test\
+	ax/ax_test\
 	krylov/krylov_test\
 	bc/bc_test\
 	signal/signal_test\
@@ -73,8 +81,11 @@ TESTS = device/device_test\
 	octree/octree_test\
 	vector/vector_test\
 	matrix/matrix_test\
+	tensor3/tensor3_test\
+	tensor4/tensor4_test\
 	case_file_utils/case_file_utils_test\
 	registry/registry_test\
+	errors/errors_test\
 	scratch_registry/scratch_registry_test\
 	fast3d/fast3d_test\
 	time_scheme/time_scheme_test\
@@ -86,8 +97,11 @@ TESTS = device/device_test\
 	expression/expression_test\
 	point_interpolation/point_interpolation_test\
 	templates/parallel/parallel_test\
+	bc_projector/bc_projector_test\
 	boundary_operation/boundary_operation_test\
+	checkpoint_payload/checkpoint_payload_test\
 	wall_sampling/wall_sampling_test\
+	restart_consistency/restart_consistency_test\
 	templates/serial/serial_test
 
 # Note we need to list .pf and runner scripts manually
@@ -95,11 +109,13 @@ EXTRA_DIST = \
 	mesh/test_mesh_parallel.pf\
 	quad/test_quad.pf\
 	gather_scatter/test_gather_scatter_parallel.pf\
+	ax/test_ax_factory.pf\
 	krylov/test_krylov.pf\
 	hex/test_hex.pf\
 	tet/test_tet.pf\
 	tri/test_tri.pf\
 	bc/test_bc.pf\
+	bc/bc_test\
 	tuple/test_tuple.pf\
 	point/test_point.pf\
 	signal/test_signal.pf\
@@ -147,11 +163,15 @@ EXTRA_DIST = \
 	octree/test_octree.pf\
 	vector/test_vector_parallel.pf\
 	matrix/test_matrix_parallel.pf\
+	tensor3/test_tensor3_parallel.pf\
+	tensor4/test_tensor4_parallel.pf\
 	case_file_utils/test_case_file_utils.pf\
 	registry/test_registry.pf\
 	registry/test_field_registry.pf\
 	registry/test_vector_registry.pf\
 	registry/test_matrix_registry.pf\
+	errors/test_errors.pf\
+	fixtures/error_redirection.f90\
 	scratch_registry/test_scratch_registry.pf\
 	scratch_registry/test_field_scratch_registry.pf\
 	scratch_registry/test_vector_scratch_registry.pf\
@@ -170,20 +190,29 @@ EXTRA_DIST = \
 	expression/test_expression.pf\
 	time_based_controller/test_time_based_controller.pf\
 	point_interpolation/test_point_interpolation_parallel.pf\
+	bc_projector/bc_projector_test\
 	point_interpolation/point_interpolation_test\
+	bc_projector/test_bc_projector.pf\
+	bc_projector/test_coupled_bc_projector.pf\
 	boundary_operation/test_boundary_operation.pf\
 	wall_sampling/test_base.pf\
 	wall_sampling/test_gll.pf\
 	wall_sampling/test_distance.pf\
 	wall_sampling/wall_sampling_test\
+	restart_consistency/test_restart_consistency.pf\
+	restart_consistency/restart_consistency_test\
 	templates/parallel/test_parallel.pf\
 	templates/parallel/parallel_test\
+	checkpoint_payload/test_checkpoint_payload.pf\
 	templates/serial/test_serial.pf
 
 if ENABLE_HDF5
-SUBDIRS += vtkhdf
-TESTS += vtkhdf/vtkhdf_test
-EXTRA_DIST += vtkhdf/vtkhdf_parallel.pf
+SUBDIRS += vtkhdf restart_consistency_hdf5
+TESTS += vtkhdf/vtkhdf_test \
+	restart_consistency_hdf5/restart_consistency_hdf5_test
+EXTRA_DIST += vtkhdf/vtkhdf_parallel.pf \
+	restart_consistency_hdf5/test_restart_consistency_hdf5.pf \
+	restart_consistency_hdf5/restart_consistency_hdf5_test
 endif
 
 UNIT_TEST_MAKEFILES = Makefile $(SUBDIRS:%=%/Makefile)
