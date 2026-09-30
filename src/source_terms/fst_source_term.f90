@@ -369,9 +369,9 @@ contains
 
     ! Full domain lengths for the periodic quantization
     n = coef%dof%size()
-    lx_dom = glmax(coef%dof%x, n) - glmin(coef%dof%x, n)
-    ly_dom = glmax(coef%dof%y, n) - glmin(coef%dof%y, n)
-    lz_dom = glmax(coef%dof%z, n) - glmin(coef%dof%z, n)
+    lx_dom = glmax(coef%dof%x%x, n) - glmin(coef%dof%x%x, n)
+    ly_dom = glmax(coef%dof%y%x, n) - glmin(coef%dof%y%x, n)
+    lz_dom = glmax(coef%dof%z%x, n) - glmin(coef%dof%z%x, n)
 
     call this%spectrum%init(n_shells, modes_per_shell, k_min, k_max, &
          ti, il, this%u_ref, periodic, seed, write_files, path)
@@ -703,7 +703,7 @@ contains
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call device_fst_apply(this%zone%size, this%zone%mask%get_d(), &
-            this%coef%dof%x_d, this%coef%dof%y_d, this%coef%dof%z_d, &
+            this%coef%dof%x%x_d, this%coef%dof%y%x_d, this%coef%dof%z%x_d, &
             this%u%x_d, this%v%x_d, this%w%x_d, fu%x_d, fv%x_d, fw%x_d, &
             this%u_bf_d, this%v_bf_d, this%w_bf_d, &
             this%k_length, this%kx_d, this%ky_d, this%kz_d, &
@@ -713,7 +713,7 @@ contains
             this%fringe_end, this%fringe_rise, this%fringe_fall)
     else
        call fst_apply_cpu(this%u%dof%size(), this%zone%size, this%mask, &
-            this%coef%dof%x, this%coef%dof%y, this%coef%dof%z, &
+            this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
             this%u%x, this%v%x, this%w%x, fu%x, fv%x, fw%x, &
             this%u_bf, this%v_bf, this%w_bf, &
             this%k_length, this%kx, this%ky, this%kz, &
@@ -965,12 +965,12 @@ contains
     bbox_max = -huge(0.0_rp)
     do idx = 1, this%zone%size
        i = this%mask(idx)
-       bbox_min(1) = min(bbox_min(1), coef%dof%x(i, 1, 1, 1))
-       bbox_max(1) = max(bbox_max(1), coef%dof%x(i, 1, 1, 1))
-       bbox_min(2) = min(bbox_min(2), coef%dof%y(i, 1, 1, 1))
-       bbox_max(2) = max(bbox_max(2), coef%dof%y(i, 1, 1, 1))
-       bbox_min(3) = min(bbox_min(3), coef%dof%z(i, 1, 1, 1))
-       bbox_max(3) = max(bbox_max(3), coef%dof%z(i, 1, 1, 1))
+       bbox_min(1) = min(bbox_min(1), coef%dof%x%x(i, 1, 1, 1))
+       bbox_max(1) = max(bbox_max(1), coef%dof%x%x(i, 1, 1, 1))
+       bbox_min(2) = min(bbox_min(2), coef%dof%y%x(i, 1, 1, 1))
+       bbox_max(2) = max(bbox_max(2), coef%dof%y%x(i, 1, 1, 1))
+       bbox_min(3) = min(bbox_min(3), coef%dof%z%x(i, 1, 1, 1))
+       bbox_max(3) = max(bbox_max(3), coef%dof%z%x(i, 1, 1, 1))
     end do
     call MPI_Allreduce(MPI_IN_PLACE, bbox_min, 3, MPI_REAL_PRECISION, &
          MPI_MIN, NEKO_COMM, ierr)
@@ -1096,9 +1096,9 @@ contains
           do j = 1, ly
              line_len = 0.0_rp
              do i = 2, lx
-                d = sqrt((coef%dof%x(i,j,k,e) - coef%dof%x(i-1,j,k,e))**2 &
-                     + (coef%dof%y(i,j,k,e) - coef%dof%y(i-1,j,k,e))**2 &
-                     + (coef%dof%z(i,j,k,e) - coef%dof%z(i-1,j,k,e))**2)
+                d = sqrt((coef%dof%x%x(i,j,k,e) - coef%dof%x%x(i-1,j,k,e))**2 &
+                     + (coef%dof%y%x(i,j,k,e) - coef%dof%y%x(i-1,j,k,e))**2 &
+                     + (coef%dof%z%x(i,j,k,e) - coef%dof%z%x(i-1,j,k,e))**2)
                 h_min = min(h_min, d)
                 h_max = max(h_max, d)
                 gap_sum = gap_sum + d
@@ -1113,9 +1113,9 @@ contains
           do i = 1, lx
              line_len = 0.0_rp
              do j = 2, ly
-                d = sqrt((coef%dof%x(i,j,k,e) - coef%dof%x(i,j-1,k,e))**2 &
-                     + (coef%dof%y(i,j,k,e) - coef%dof%y(i,j-1,k,e))**2 &
-                     + (coef%dof%z(i,j,k,e) - coef%dof%z(i,j-1,k,e))**2)
+                d = sqrt((coef%dof%x%x(i,j,k,e) - coef%dof%x%x(i,j-1,k,e))**2 &
+                     + (coef%dof%y%x(i,j,k,e) - coef%dof%y%x(i,j-1,k,e))**2 &
+                     + (coef%dof%z%x(i,j,k,e) - coef%dof%z%x(i,j-1,k,e))**2)
                 h_min = min(h_min, d)
                 h_max = max(h_max, d)
                 gap_sum = gap_sum + d
@@ -1130,9 +1130,9 @@ contains
           do i = 1, lx
              line_len = 0.0_rp
              do k = 2, lz
-                d = sqrt((coef%dof%x(i,j,k,e) - coef%dof%x(i,j,k-1,e))**2 &
-                     + (coef%dof%y(i,j,k,e) - coef%dof%y(i,j,k-1,e))**2 &
-                     + (coef%dof%z(i,j,k,e) - coef%dof%z(i,j,k-1,e))**2)
+                d = sqrt((coef%dof%x%x(i,j,k,e) - coef%dof%x%x(i,j,k-1,e))**2 &
+                     + (coef%dof%y%x(i,j,k,e) - coef%dof%y%x(i,j,k-1,e))**2 &
+                     + (coef%dof%z%x(i,j,k,e) - coef%dof%z%x(i,j,k-1,e))**2)
                 h_min = min(h_min, d)
                 h_max = max(h_max, d)
                 gap_sum = gap_sum + d
@@ -1170,7 +1170,7 @@ contains
     call neko_scratch_registry%request_field(f_wp, i4, .true.)
 
     call fill_preview(this%u%dof%size(), this%zone%size, this%mask, &
-         this%coef%dof%x, this%coef%dof%y, this%coef%dof%z, &
+         this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
          f_lam%x, f_up%x, f_vp%x, f_wp%x, &
          this%k_length, this%kx, this%ky, this%kz, &
          this%ax, this%ay, this%az, this%mode_phase, &
