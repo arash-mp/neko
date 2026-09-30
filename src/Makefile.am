@@ -417,6 +417,9 @@ neko_fortran_SOURCES = \
 	source_terms/hpfrt_source_term.f90\
 	source_terms/source_term_fctry.f90\
 	source_terms/sponge_source_term.f90\
+	source_terms/fst_spectrum.f90\
+	source_terms/fst_source_term.f90\
+	source_terms/bcknd/device/fst_source_term_device.F90\
 	source_terms/brinkman_source_term.f90\
 	filter/mappings.f90\
 	filter/filter.f90\
@@ -559,6 +562,7 @@ libneko_la_SOURCES += \
 	lpt/bcknd/device/hip/lpt_periodic_bc.hip\
 	lpt/bcknd/device/hip/lpt_wall_collision.hip\
 	source_terms/bcknd/device/hip/gradient_jump_penalty.hip\
+	source_terms/bcknd/device/hip/fst.hip\
 	les/bcknd/device/hip/sigma_nut.hip\
 	les/bcknd/device/hip/vreman_nut.hip\
 	les/bcknd/device/hip/smagorinsky_nut.hip\
@@ -627,6 +631,7 @@ libneko_la_SOURCES += \
 	lpt/bcknd/device/cuda/lpt_periodic_bc.cu\
 	lpt/bcknd/device/cuda/lpt_wall_collision.cu\
 	source_terms/bcknd/device/cuda/gradient_jump_penalty.cu\
+	source_terms/bcknd/device/cuda/fst.cu\
 	les/bcknd/device/cuda/sigma_nut.cu\
 	les/bcknd/device/cuda/vreman_nut.cu\
 	les/bcknd/device/cuda/smagorinsky_nut.cu\
