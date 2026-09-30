@@ -62,7 +62,7 @@ module fst_source_term
   use device, only : device_map, device_unmap, device_memcpy, &
        HOST_TO_DEVICE, DEVICE_TO_HOST
   use fst_source_term_cpu, only : fst_source_term_compute_cpu, &
-       fst_source_term_preview_cpu
+       fst_source_term_fringe_cpu
   use fst_source_term_device, only : fst_source_term_compute_device
   use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR, c_associated
   use math, only : glmax, glmin, pi
@@ -606,33 +606,59 @@ contains
     fv => this%fields%get(2)
     fw => this%fields%get(3)
 
+    call fst_apply(this, this%u, this%v, this%w, fu, fv, fw, &
+         this%u_bf, this%v_bf, this%w_bf, &
+         this%u_bf_d, this%v_bf_d, this%w_bf_d, &
+         coeff, this%fringe_smooth, real(time%t, kind=rp))
+
+  end subroutine fst_compute
+
+  !> Run the kernel of the active backend at the zone points,
+  !! f += coeff * lambda * (bf + u' - u).
+  !! @param u, v, w Velocity.
+  !! @param fu, fv, fw Fields the forcing is added to.
+  !! @param u_bf, v_bf, w_bf Base flow at the zone points (host).
+  !! @param u_bf_d, v_bf_d, w_bf_d The same on the device.
+  !! @param coeff gain * ramp(t).
+  !! @param smooth Directions with a smooth fringe, the others are flat.
+  !! @param t Time.
+  subroutine fst_apply(this, u, v, w, fu, fv, fw, u_bf, v_bf, w_bf, &
+       u_bf_d, v_bf_d, w_bf_d, coeff, smooth, t)
+    class(fst_source_term_t), intent(inout) :: this
+    type(field_t), intent(in) :: u, v, w
+    type(field_t), intent(inout) :: fu, fv, fw
+    real(kind=rp), intent(in) :: u_bf(*), v_bf(*), w_bf(*)
+    type(c_ptr) :: u_bf_d, v_bf_d, w_bf_d
+    real(kind=rp), intent(in) :: coeff, t
+    logical, intent(in) :: smooth(3)
+
     if (this%zone%size .eq. 0) return
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call fst_source_term_compute_device(this%zone%size, &
             this%zone%mask%get_d(), &
             this%coef%dof%x%x_d, this%coef%dof%y%x_d, this%coef%dof%z%x_d, &
-            this%u%x_d, this%v%x_d, this%w%x_d, fu%x_d, fv%x_d, fw%x_d, &
-            this%u_bf_d, this%v_bf_d, this%w_bf_d, &
+            u%x_d, v%x_d, w%x_d, fu%x_d, fv%x_d, fw%x_d, &
+            u_bf_d, v_bf_d, w_bf_d, &
             this%k_length, this%kx_d, this%ky_d, this%kz_d, &
             this%ax_d, this%ay_d, this%az_d, this%phase_d, &
-            this%conv_vel*real(time%t, kind=rp), coeff, &
-            merge(1, 0, this%fringe_smooth), this%fringe_start, &
+            this%conv_vel*t, coeff, &
+            merge(1, 0, smooth), this%fringe_start, &
             this%fringe_end, this%fringe_rise, this%fringe_fall)
     else
-       call fst_source_term_compute_cpu(this%u%dof%size(), this%zone%size, &
+       call fst_source_term_compute_cpu(u%dof%size(), this%zone%size, &
             this%mask, &
             this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
-            this%u%x, this%v%x, this%w%x, fu%x, fv%x, fw%x, &
-            this%u_bf, this%v_bf, this%w_bf, &
+            u%x, v%x, w%x, fu%x, fv%x, fw%x, &
+            u_bf, v_bf, w_bf, &
             this%k_length, this%kx, this%ky, this%kz, &
             this%ax, this%ay, this%az, this%mode_phase, &
-            this%conv_vel*real(time%t, kind=rp), coeff, &
-            this%fringe_smooth, this%fringe_start, this%fringe_end, &
+            this%conv_vel*t, coeff, &
+            smooth, this%fringe_start, this%fringe_end, &
             this%fringe_rise, this%fringe_fall)
     end if
 
-  end subroutine fst_compute
+  end subroutine fst_apply
 
   !> Linear ramp from 0 at t_start to 1 at t_start + t_ramp.
   pure function time_ramp(t, t_start, t_ramp) result(ramp)
@@ -924,42 +950,39 @@ contains
     type(time_state_t), intent(in) :: time
 
     type(fld_file_output_t) :: fout
-    type(field_t), pointer :: f_lam, f_up, f_vp, f_wp
-    integer :: i1, i2, i3, i4
+    type(field_t), pointer :: f_lam, f_up, f_vp, f_wp, f_zero
+    integer :: i1, i2, i3, i4, i5
+    logical, parameter :: flat(3) = .false.
 
     call neko_log%message("[FST] Writing preview fields 1-4 " // &
          "(fringe, u', v', w') to '" // trim(this%dump_fname) // "'")
 
+    ! Cleared on the active backend, which is where the kernel works
+    call neko_scratch_registry%request_field(f_up, i2, .true.)
+    call neko_scratch_registry%request_field(f_vp, i3, .true.)
+    call neko_scratch_registry%request_field(f_wp, i4, .true.)
+    call neko_scratch_registry%request_field(f_zero, i5, .true.)
+
+    ! The fringe is cheap and built on the host. Host coordinates are
+    ! current here: this runs at the first step, before the mesh is moved.
     call neko_scratch_registry%request_field(f_lam, i1, .false.)
-    call neko_scratch_registry%request_field(f_up, i2, .false.)
-    call neko_scratch_registry%request_field(f_vp, i3, .false.)
-    call neko_scratch_registry%request_field(f_wp, i4, .false.)
-
     f_lam%x = 0.0_rp
-    f_up%x = 0.0_rp
-    f_vp%x = 0.0_rp
-    f_wp%x = 0.0_rp
-
-    call fst_source_term_preview_cpu(this%u%dof%size(), this%zone%size, &
+    call fst_source_term_fringe_cpu(f_lam%size(), this%zone%size, &
          this%mask, &
          this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
-         f_lam%x, f_up%x, f_vp%x, f_wp%x, &
-         this%k_length, this%kx, this%ky, this%kz, &
-         this%ax, this%ay, this%az, this%mode_phase, &
-         this%conv_vel*real(time%t, kind=rp), &
-         this%fringe_smooth, this%fringe_start, this%fringe_end, &
+         f_lam%x, this%fringe_smooth, this%fringe_start, this%fringe_end, &
          this%fringe_rise, this%fringe_fall)
-
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call device_memcpy(f_lam%x, f_lam%x_d, f_lam%size(), &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(f_up%x, f_up%x_d, f_up%size(), &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(f_vp%x, f_vp%x_d, f_vp%size(), &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(f_wp%x, f_wp%x_d, f_wp%size(), &
             HOST_TO_DEVICE, sync = .true.)
     end if
+
+    ! u' from the same kernel as the run: with a flat fringe, gain 1 and
+    ! zero base flow and velocity it adds 1 * 1 * (0 + u' - 0) = u'
+    call fst_apply(this, f_zero, f_zero, f_zero, f_up, f_vp, f_wp, &
+         f_zero%x, f_zero%x, f_zero%x, &
+         f_zero%x_d, f_zero%x_d, f_zero%x_d, &
+         1.0_rp, flat, real(time%t, kind=rp))
 
     call fout%init(sp, trim(this%dump_fname), 4)
     call fout%fields%assign_to_ptr(1, f_lam)
@@ -973,6 +996,7 @@ contains
     call neko_scratch_registry%relinquish_field(i2)
     call neko_scratch_registry%relinquish_field(i3)
     call neko_scratch_registry%relinquish_field(i4)
+    call neko_scratch_registry%relinquish_field(i5)
 
   end subroutine dump_preview
 

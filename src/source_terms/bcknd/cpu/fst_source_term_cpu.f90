@@ -37,8 +37,7 @@ module fst_source_term_cpu
   implicit none
   private
 
-  public :: fst_source_term_compute_cpu, fst_source_term_preview_cpu, &
-       fst_fringe
+  public :: fst_source_term_compute_cpu, fst_source_term_fringe_cpu
 
 contains
 
@@ -147,38 +146,25 @@ contains
 
   end function fringe_1d
 
-  !> Fringe and raw u' (no gain or ramp) at the zone points, for the dump.
-  subroutine fst_source_term_preview_cpu(n, n_mask, mask, xc, yc, zc, &
-       lam_f, up, vp, wp, k_length, kx, ky, kz, ax, ay, az, phase, shift, &
+  !> Fringe lambda at the zone points, for the dump.
+  subroutine fst_source_term_fringe_cpu(n, n_mask, mask, xc, yc, zc, lam, &
        fringe_smooth, fringe_start, fringe_end, fringe_rise, fringe_fall)
-    integer, intent(in) :: n, n_mask, k_length
+    integer, intent(in) :: n, n_mask
     integer, intent(in) :: mask(n_mask)
     real(kind=rp), intent(in) :: xc(n), yc(n), zc(n)
-    real(kind=rp), intent(inout) :: lam_f(n), up(n), vp(n), wp(n)
-    real(kind=rp), intent(in) :: kx(k_length), ky(k_length), kz(k_length)
-    real(kind=rp), intent(in) :: ax(k_length), ay(k_length), az(k_length)
-    real(kind=rp), intent(in) :: phase(k_length)
-    real(kind=rp), intent(in) :: shift(3)
+    real(kind=rp), intent(inout) :: lam(n)
     logical, intent(in) :: fringe_smooth(3)
     real(kind=rp), intent(in) :: fringe_start(3), fringe_end(3), &
          fringe_rise(3), fringe_fall(3)
 
     integer :: idx, i
-    real(kind=rp) :: rv(3)
 
     do idx = 1, n_mask
        i = mask(idx)
-
-       lam_f(i) = fst_fringe(xc(i), yc(i), zc(i), fringe_smooth, &
+       lam(i) = fst_fringe(xc(i), yc(i), zc(i), fringe_smooth, &
             fringe_start, fringe_end, fringe_rise, fringe_fall)
-
-       call fst_mode_sum(xc(i), yc(i), zc(i), shift, k_length, kx, ky, kz, &
-            ax, ay, az, phase, rv)
-       up(i) = rv(1)
-       vp(i) = rv(2)
-       wp(i) = rv(3)
     end do
 
-  end subroutine fst_source_term_preview_cpu
+  end subroutine fst_source_term_fringe_cpu
 
 end module fst_source_term_cpu
