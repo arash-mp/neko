@@ -118,8 +118,8 @@ __global__ void fst_apply_kernel(const int n_mask,
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= n_mask) return;
 
-  /* The mask holds 1-based Fortran indices */
-  const int i = mask[idx] - 1;
+  /* The device copy of a mask_t is already 0-based */
+  const int i = mask[idx];
 
   const T x = xc[i];
   const T y = yc[i];

@@ -64,7 +64,7 @@ module fst_source_term
   use fst_source_term_cpu, only : fst_source_term_compute_cpu, &
        fst_source_term_preview_cpu
   use fst_source_term_device, only : fst_source_term_compute_device
-  use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR
+  use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR, c_associated
   use math, only : glmax, glmin, pi
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION, pe_rank
   use mpi_f08, only : MPI_Allreduce, MPI_IN_PLACE, MPI_MIN, MPI_MAX, &
@@ -417,6 +417,13 @@ contains
     call import_fields(trim(fname), interp_subdict, mesh_fname, &
          u = pu, v = pv, w = pw, interpolate = interpolate)
 
+    ! On device the imported values are only on the device
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call wku%copy_from(DEVICE_TO_HOST, .false.)
+       call wkv%copy_from(DEVICE_TO_HOST, .false.)
+       call wkw%copy_from(DEVICE_TO_HOST, .true.)
+    end if
+
     call gather_masked(this%u_bf, wku%x, this%mask, wku%size(), &
          this%zone%size)
     call gather_masked(this%v_bf, wkv%x, this%mask, wkv%size(), &
@@ -513,7 +520,7 @@ contains
     type(c_ptr), intent(inout) :: x_d
 
     if (allocated(x)) then
-       if (NEKO_BCKND_DEVICE .eq. 1) call device_unmap(x, x_d)
+       if (c_associated(x_d)) call device_unmap(x, x_d)
        deallocate(x)
     end if
 
@@ -589,7 +596,8 @@ contains
        end if
     end if
 
-    ramp = time_ramp(time%t, this%start_time, this%ramp_time)
+    ramp = time_ramp(real(time%t, kind=rp), this%start_time, &
+         this%ramp_time)
     if (ramp .le. 0.0_rp) return
 
     coeff = this%gain*ramp
@@ -608,7 +616,7 @@ contains
             this%u_bf_d, this%v_bf_d, this%w_bf_d, &
             this%k_length, this%kx_d, this%ky_d, this%kz_d, &
             this%ax_d, this%ay_d, this%az_d, this%phase_d, &
-            this%conv_vel*time%t, coeff, &
+            this%conv_vel*real(time%t, kind=rp), coeff, &
             merge(1, 0, this%fringe_smooth), this%fringe_start, &
             this%fringe_end, this%fringe_rise, this%fringe_fall)
     else
@@ -619,7 +627,7 @@ contains
             this%u_bf, this%v_bf, this%w_bf, &
             this%k_length, this%kx, this%ky, this%kz, &
             this%ax, this%ay, this%az, this%mode_phase, &
-            this%conv_vel*time%t, coeff, &
+            this%conv_vel*real(time%t, kind=rp), coeff, &
             this%fringe_smooth, this%fringe_start, this%fringe_end, &
             this%fringe_rise, this%fringe_fall)
     end if
@@ -938,7 +946,7 @@ contains
          f_lam%x, f_up%x, f_vp%x, f_wp%x, &
          this%k_length, this%kx, this%ky, this%kz, &
          this%ax, this%ay, this%az, this%mode_phase, &
-         this%conv_vel*time%t, &
+         this%conv_vel*real(time%t, kind=rp), &
          this%fringe_smooth, this%fringe_start, this%fringe_end, &
          this%fringe_rise, this%fringe_fall)
 
@@ -959,6 +967,7 @@ contains
     call fout%fields%assign_to_ptr(3, f_vp)
     call fout%fields%assign_to_ptr(4, f_wp)
     call fout%sample(time%t)
+    call fout%free()
 
     call neko_scratch_registry%relinquish_field(i1)
     call neko_scratch_registry%relinquish_field(i2)
