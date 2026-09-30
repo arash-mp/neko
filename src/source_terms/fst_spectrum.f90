@@ -30,37 +30,18 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-!> Implements `fst_spectrum_t`: generation of a synthetic free-stream
-!! turbulence (FST) mode set (wavenumbers, amplitudes, phases) sampled from
-!! a von Karman spectrum on isotropically distributed spherical shells.
+!> Mode set for synthetic free-stream turbulence: wavenumbers on spherical
+!! shells, divergence-free directions, random phases and amplitudes from a
+!! von Karman spectrum. Generated on rank 0 and broadcast.
 !!
-!! This is a runtime-configurable port of the FST generation code by
-!! V. Baconnet, E. Kluesberg, P. Negi and P. Schlatter
-!! (https://github.com/vbaconnet/neko-plugins, FST plugin, files
-!! 01_global_params.f90 through 05_turbu.f90). The generation algorithm is
-!! preserved verbatim so that, for identical inputs (seed, shells, modes per
-!! shell, wavenumber range, Ti, L, U_inf, periodicity, domain lengths), this
-!! module reproduces the plugin's mode set bit-for-bit (the random number
-!! generator is kept identical, including its single-precision granularity).
-!!
-!! Differences from the plugin (deliberate):
-!!  - All compile-time parameters (nshells, Npmax, kstart, kend, Ti, L,
-!!    U_inf) are runtime inputs; all module-global arrays are type
-!!    components with allocatable storage.
-!!  - The user-provided seed is honoured. The plugin overrides it with -143
-!!    inside make_turbu (05_turbu.f90); that line does not exist here.
-!!  - The domain lengths are intent(in). The plugin declares them
-!!    intent(out) in spec_s (04_spec.f90) although they are inputs, which
-!!    only works by compiler accident.
-!!  - The RNG state lives in `fst_rng_t` instead of SAVE variables, so the
-!!    generator is reentrant across multiple source-term instances.
-!!  - Periodic quantization uses nearest rounding instead of floor (see
-!!    make_periodic_1d). This changes results relative to the plugin for
-!!    periodic configurations only.
-!!  - Dead code removed: the wire.dat output and its link bookkeeping (asl),
-!!    the unreachable non-"new" lattice branch in the sphere routine,
-!!    gen_bounded_k, and vlamax (whose max accumulator was initialized to
-!!    +9.9e21 and could never have worked).
+!! Ported from the FST plugin of V. Baconnet, E. Kluesberg, P. Negi and
+!! P. Schlatter (neko-plugins). For the same inputs it gives the plugin's
+!! mode set, except for these deliberate changes:
+!!  - all sizes and parameters are runtime inputs,
+!!  - the seed is honoured (the plugin always used -143),
+!!  - periodic wavenumbers are rounded to the nearest multiple instead of
+!!    down, which removes a 5-15% energy bias between components,
+!!  - unused plugin code is dropped.
 module fst_spectrum
   use num_types, only : rp
   use math, only : pi
@@ -71,10 +52,7 @@ module fst_spectrum
   implicit none
   private
 
-  !> State of the portable random number generator (Numerical Recipes ran2,
-  !! as used in the original FST implementation). Kept bit-identical to the
-  !! plugin, including the single-precision 1/m factor, so that mode sets
-  !! generated here can be validated against plugin output for equal seeds.
+  !> Numerical Recipes ran2, kept identical to the plugin for parity.
   type :: fst_rng_t
      integer :: ir(97) = 0
      integer :: iy = 0
@@ -83,59 +61,37 @@ module fst_spectrum
      procedure, pass(this) :: next => fst_rng_next
   end type fst_rng_t
 
-  !> Synthetic FST mode set: wavenumber vectors on spherical shells,
-  !! continuity-projected unit direction vectors, random phases and
-  !! shell amplitudes sampled from a von Karman spectrum.
   type, public :: fst_spectrum_t
-     !> Number of spherical shells discretizing [k_start, k_end].
+     !> Shells, requested points per shell, and array size 2*n_shells*npmax.
      integer :: n_shells = 0
-     !> Requested points per shell (before mirroring). The sphere point
-     !! lattice may realize fewer points; see `sphere_points`.
      integer :: npmax = 0
-     !> Maximum number of modes (2 * n_shells * npmax); allocation size of
-     !! the per-mode arrays. The number of valid modes is `k_length`.
      integer :: n_modes_max = 0
-     !> Smallest and largest total wavenumber (shell radii).
+     !> Wavenumber band.
      real(kind=rp) :: k_start = 0.0_rp
      real(kind=rp) :: k_end = 0.0_rp
-     !> Target turbulence intensity Tu (rms(u')/U_inf).
+     !> Turbulence intensity (fraction), integral length scale and the
+     !! speed it refers to.
      real(kind=rp) :: ti = 0.0_rp
-     !> Integral length scale of the von Karman spectrum.
      real(kind=rp) :: il = 0.0_rp
-     !> Reference speed |U_c| used for the energy scaling
-     !! (tke = 3/2 * (Ti * u_ref)^2).
      real(kind=rp) :: u_ref = 0.0_rp
-     !> Periodic directions (x, y, z): wavenumber components in periodic
-     !! directions are quantized to multiples of 2*pi/L.
+     !> Directions whose wavenumbers are quantized to 2*pi*n/L.
      logical :: periodic(3) = .false.
-     !> RNG seed (used as given; negative values initialize the generator).
      integer :: seed = -143
-     !> Whether to write diagnostic files (sphere.dat, bb.txt,
-     !! fst_spectrum.csv) during generation (rank 0 only).
+     !> Write sphere.dat, bb.txt and fst_spectrum.csv on rank 0.
      logical :: write_files = .false.
-     !> Output path for the diagnostic files.
      character(len=:), allocatable :: path
 
-     !> Number of valid modes (after removal of zero wavenumber vectors).
+     !> Number of valid modes; the arrays below are valid up to k_length.
      integer :: k_length = 0
-     !> Wavenumber vectors, (n_modes_max, 3); valid rows are 1..k_length.
      real(kind=rp), allocatable :: k_num(:,:)
-     !> Continuity-projected unit direction vectors, (n_modes_max, 3).
      real(kind=rp), allocatable :: u_hat(:,:)
-     !> Random phase per mode, (n_modes_max).
      real(kind=rp), allocatable :: phase(:)
-     !> Shell index of each mode, (n_modes_max).
      integer, allocatable :: shell(:)
-     !> Amplitude of each shell, (n_shells).
      real(kind=rp), allocatable :: shell_amp(:)
-     !> Number of valid modes in each shell, (n_shells).
      integer, allocatable :: shell_modes(:)
 
-     ! --- Diagnostics, valid on rank 0 only (used for logging/validation).
-     !> Estimated Tu * U_inf of the generated mode set,
-     !! sqrt((E_u + E_v + E_w)/3).
+     !> Realized Tu*U and component energies, valid on rank 0 only.
      real(kind=rp) :: tu_uinf_estimate = 0.0_rp
-     !> Energy in each velocity component of the generated mode set.
      real(kind=rp) :: energy(3) = 0.0_rp
    contains
      procedure, pass(this) :: init => fst_spectrum_init
@@ -145,10 +101,7 @@ module fst_spectrum
 
 contains
 
-  !> Portable random number generator (Numerical Recipes ran2). Verbatim
-  !! port of ran2 in the FST plugin's 01_global_params.f90; the state is a
-  !! type component instead of SAVE variables. `rm` is intentionally kept in
-  !! default (single) precision for bit parity with the plugin.
+  !> Next uniform number in [0, 1). A negative idum reseeds.
   function fst_rng_next(this, idum) result(r)
     class(fst_rng_t), intent(inout) :: this
     integer, intent(inout) :: idum
@@ -159,7 +112,6 @@ contains
     integer :: j
 
     if (idum .lt. 0 .or. this%iff .eq. 0) then
-       ! Initialize
        this%iff = 1
        idum = mod(ic - idum, m)
        do j = 1, 97
@@ -178,8 +130,7 @@ contains
 
   end function fst_rng_next
 
-  !> Initialize the spectrum configuration and allocate the result arrays.
-  !! All arguments are validated; invalid input is a hard error.
+  !> Check the parameters and allocate the mode arrays.
   subroutine fst_spectrum_init(this, n_shells, npmax, k_start, k_end, &
        ti, il, u_ref, periodic, seed, write_files, path)
     class(fst_spectrum_t), intent(inout) :: this
@@ -240,9 +191,6 @@ contains
     allocate(this%shell_amp(this%n_shells))
     allocate(this%shell_modes(this%n_shells))
 
-    ! Zero-initialize so that entries beyond k_length are defined (they are
-    ! broadcast but never read) and so that any unfilled sphere-lattice slot
-    ! is deterministically removed by the zero-wavenumber filter.
     this%k_num = 0.0_rp
     this%u_hat = 0.0_rp
     this%phase = 0.0_rp
@@ -252,7 +200,7 @@ contains
 
   end subroutine fst_spectrum_init
 
-  !> Free the result arrays and reset the configuration.
+  !> Destructor.
   subroutine fst_spectrum_free(this)
     class(fst_spectrum_t), intent(inout) :: this
 
@@ -271,11 +219,8 @@ contains
 
   end subroutine fst_spectrum_free
 
-  !> Generate the mode set on rank 0 and broadcast it to all ranks.
-  !! @param lx Domain length in x, used for periodic quantization if
-  !! periodic(1).
-  !! @param ly Domain length in y, used if periodic(2).
-  !! @param lz Domain length in z, used if periodic(3).
+  !> Generate on rank 0 and broadcast.
+  !! @param lx, ly, lz Domain lengths, used in periodic directions.
   subroutine fst_spectrum_generate(this, lx, ly, lz)
     class(fst_spectrum_t), intent(inout) :: this
     real(kind=rp), intent(in) :: lx, ly, lz
@@ -306,63 +251,68 @@ contains
 
   end subroutine fst_spectrum_generate
 
-  !> Rank-0 generation. Port of spec_s (04_spec.f90) followed by the random
-  !! amplitude/phase drawing and continuity projection of make_turbu
-  !! (05_turbu.f90). The random draw order is identical to the plugin.
+  !> Shells, sphere points, amplitudes and continuity projection.
+  !! The order of random draws matches the plugin.
   subroutine generate_rank0(this, dlx, dly, dlz)
     class(fst_spectrum_t), intent(inout) :: this
     real(kind=rp), intent(in) :: dlx, dly, dlz
 
     type(fst_rng_t) :: rng
-    integer :: idum
-
-    real(kind=rp), allocatable :: co(:,:,:)
-    real(kind=rp), allocatable :: kk(:), q(:), dk(:), tke_shell(:)
-    real(kind=rp), allocatable :: bb(:,:), bb1(:,:)
-    real(kind=rp) :: u_hat_raw(3), u_hat_p(3)
-
-    real(kind=rp) :: k2, dkint, tke_tot, tke_tot1, tke_scaled, shell_energy
-    real(kind=rp) :: rotx, roty, rotz
-    real(kind=rp) :: kxmin, kxmax, kymin, kymax, kzmin, kzmax
-    real(kind=rp) :: ue, ve, we, uamp, vamp, wamp, amp, kdotu, knorm2
-    integer :: np, ndk, i, j, k, l, shellno, n_kept, n_removed
-    character(len=LOG_SIZE) :: log_buf
+    integer :: idum, np
+    real(kind=rp), allocatable :: co(:,:,:), tke_shell(:)
 
     idum = this%seed
-    np = this%npmax
-
     allocate(co(2*this%npmax, this%n_shells, 3))
-    allocate(kk(0:this%n_shells))
-    allocate(q(this%n_shells))
-    allocate(dk(this%n_shells))
     allocate(tke_shell(this%n_shells))
     co = 0.0_rp
 
     call print_param('integral length scale', this%il)
+    call shell_energies(this, tke_shell)
+    call shell_points(this, dlx, dly, dlz, rng, idum, co, np)
+    call pack_points(this, co, np)
+    call shell_amplitudes(this, tke_shell)
+    call log_wavelengths(co, np)
+    call random_directions(this, rng, idum)
+    call energy_check(this)
 
-    ! Target kinetic energy: 3/2 * Tu^2 * U_inf^2
+    deallocate(co, tke_shell)
+
+  end subroutine generate_rank0
+
+  !> Radius of shell i.
+  pure function shell_radius(this, i) result(kk)
+    class(fst_spectrum_t), intent(in) :: this
+    integer, intent(in) :: i
+    real(kind=rp) :: kk, k2
+
+    k2 = (this%k_start + (i-1)*(this%k_end - this%k_start) &
+         / real(this%n_shells - 1, kind=rp))**2
+    kk = sqrt(k2)
+
+  end function shell_radius
+
+  !> Energy of each shell, scaled so the band holds 3/2 (Ti U)^2.
+  subroutine shell_energies(this, tke_shell)
+    class(fst_spectrum_t), intent(in) :: this
+    real(kind=rp), intent(out) :: tke_shell(:)
+
+    real(kind=rp) :: dkint, dk, tke_tot, tke_band, tke_scaled, q
+    integer :: i, ndk
+    character(len=LOG_SIZE) :: log_buf
+
     tke_scaled = 1.5_rp * (this%ti * this%u_ref)**2
 
-    kxmax = 1.0e-20_rp
-    kxmin = 1.0e+20_rp
-    kymax = 1.0e-20_rp
-    kymin = 1.0e+20_rp
-    kzmax = 1.0e-20_rp
-    kzmin = 1.0e+20_rp
-
-    ! --- Integrate the energy spectrum on a fine grid (diagnostic only)
+    ! Fine integral over the band, for the log only
     ndk = 5000
     dkint = (this%k_end - this%k_start)/real(ndk, kind=rp)
-    tke_tot1 = ek(this%k_start, this%il, 1.0_rp) &
+    tke_band = ek(this%k_start, this%il, 1.0_rp) &
          + ek(this%k_end, this%il, 1.0_rp)
     do i = 1, ndk - 1
-       tke_tot1 = tke_tot1 + ek(this%k_start + i*dkint, this%il, 1.0_rp)
+       tke_band = tke_band + ek(this%k_start + i*dkint, this%il, 1.0_rp)
     end do
-    tke_tot1 = tke_tot1*dkint
-    call print_param('FST - integrated energy in spectrum', tke_tot1)
+    tke_band = tke_band*dkint
+    call print_param('FST - integrated energy in spectrum', tke_band)
 
-    ! --- Integrate the energy spectrum on the n_shells nodes. This is the
-    !     normalization used to rescale the truncated spectrum to tke_scaled.
     dkint = (this%k_end - this%k_start)/real(this%n_shells - 1, kind=rp)
     tke_tot = 0.0_rp
     do i = 1, this%n_shells
@@ -372,6 +322,31 @@ contains
     write (log_buf, '(A,I0,A,E13.5)') 'FST - discretized on ', &
          this%n_shells, ' shells : ', tke_tot
     call neko_log%message(log_buf)
+    call print_param("Truncated TKE", tke_scaled/tke_tot)
+
+    do i = 1, this%n_shells
+       dk = (this%k_end - this%k_start)/real(this%n_shells - 1, kind=rp)
+       q = ek(shell_radius(this, i), this%il, tke_scaled/tke_tot)
+       tke_shell(i) = q*dk
+    end do
+
+  end subroutine shell_energies
+
+  !> Randomly rotated point set on every shell, quantized in periodic
+  !! directions and mirrored about the x axis. np returns the points per
+  !! shell actually used, before mirroring.
+  subroutine shell_points(this, dlx, dly, dlz, rng, idum, co, np)
+    class(fst_spectrum_t), intent(in) :: this
+    real(kind=rp), intent(in) :: dlx, dly, dlz
+    type(fst_rng_t), intent(inout) :: rng
+    integer, intent(inout) :: idum
+    real(kind=rp), intent(inout) :: co(:,:,:)
+    integer, intent(out) :: np
+
+    real(kind=rp) :: kk, rotx, roty, rotz
+    integer :: i, j
+
+    np = this%npmax
 
     if (this%write_files) then
        open(file = trim(this%path) // '/sphere.dat', unit = 10)
@@ -384,39 +359,19 @@ contains
        write(10, '(2a5,3a18)') 'i', 'j', 'x', 'y', 'z'
     end if
 
-    kk(0) = 0.0_rp
-    tke_tot1 = 0.0_rp
-
-    call print_param("Truncated TKE", tke_scaled/tke_tot)
-
     do i = 1, this%n_shells
+       kk = shell_radius(this, i)
 
-       k2 = (this%k_start + (i-1)*(this%k_end - this%k_start) &
-            / real(this%n_shells - 1, kind=rp))**2
-       kk(i) = sqrt(k2)
-       dk(i) = (this%k_end - this%k_start)/real(this%n_shells - 1, kind=rp)
-
-       ! 1/tke_tot so that the total truncated energy equals tke_scaled
-       q(i) = ek(kk(i), this%il, tke_scaled/tke_tot)
-       tke_shell(i) = q(i)*dk(i)
-       tke_tot1 = tke_tot1 + tke_shell(i)
-
-       ! Randomly rotated sphere point set with radius kk(i).
-       ! NOTE: np is intent(inout) and may be reduced by the point lattice
-       ! on the first call; subsequent calls with the reduced np reproduce
-       ! the same lattice (the construction is deterministic in np).
        rotx = rng%next(idum)*2.0_rp*pi
        roty = rng%next(idum)*2.0_rp*pi
        rotz = rng%next(idum)*2.0_rp*pi
        call sphere_points(np, co(:, i, 1), co(:, i, 2), co(:, i, 3), &
-            kk(i), rotx, roty, rotz)
+            kk, rotx, roty, rotz)
 
-       ! Quantize wavenumbers in the periodic direction(s)
        call periodicity_chk(co(:, i, 1), co(:, i, 2), co(:, i, 3), np, &
-            kk(i), dlx, dly, dlz, this%periodic(1), this%periodic(2), &
+            kk, dlx, dly, dlz, this%periodic(1), this%periodic(2), &
             this%periodic(3), rng, idum)
 
-       ! Add a second point set mirrored at the x-axis
        do j = np + 1, 2*np
           co(j, i, 1) = co(j - np, i, 1)
           co(j, i, 2) = -co(j - np, i, 2)
@@ -429,23 +384,21 @@ contains
                   co(j, i, 3)
           end do
        end if
-
-       ! Track smallest and largest wavenumber magnitudes per direction.
-       ! NOTE: the plugin used the signed maximum (vlmax) here; we use the
-       ! magnitude, which is the physically meaningful quantity for the
-       ! wavelength report. Affects log output only.
-       kxmax = max(kxmax, maxval(abs(co(1:2*np, i, 1))))
-       kxmin = min(kxmin, minval(abs(co(1:2*np, i, 1))))
-       kymax = max(kymax, maxval(abs(co(1:2*np, i, 2))))
-       kymin = min(kymin, minval(abs(co(1:2*np, i, 2))))
-       kzmax = max(kzmax, maxval(abs(co(1:2*np, i, 3))))
-       kzmin = min(kzmin, minval(abs(co(1:2*np, i, 3))))
-
-    end do ! i = 1, n_shells
+    end do
 
     if (this%write_files) close(10)
 
-    ! --- Remove zero wavenumber vectors and pack the modes
+  end subroutine shell_points
+
+  !> Store the nonzero points as modes, with their shell index.
+  subroutine pack_points(this, co, np)
+    class(fst_spectrum_t), intent(inout) :: this
+    real(kind=rp), intent(in) :: co(:,:,:)
+    integer, intent(in) :: np
+
+    integer :: i, j, k, l, n_removed
+    character(len=LOG_SIZE) :: log_buf
+
     n_removed = 0
     l = 0
     do i = 1, this%n_shells
@@ -464,11 +417,10 @@ contains
        end do
     end do
     this%k_length = l
-    n_kept = l
 
     call neko_log%message('FST - (0,0,0) wavenumber removed')
-    write(log_buf, '(A,I0,A,I0,A)') 'Saved ', n_kept, ' of ', &
-         n_kept + n_removed, ' fst modes.'
+    write(log_buf, '(A,I0,A,I0,A)') 'Saved ', l, ' of ', &
+         l + n_removed, ' fst modes.'
     call neko_log%message(log_buf)
 
     do i = 1, this%n_shells
@@ -478,36 +430,58 @@ contains
        end if
     end do
 
-    ! --- Shell amplitudes from the energy spectrum
-    tke_tot1 = 0.0_rp
+  end subroutine pack_points
+
+  !> Amplitude of each shell, shared equally by its modes.
+  subroutine shell_amplitudes(this, tke_shell)
+    class(fst_spectrum_t), intent(inout) :: this
+    real(kind=rp), intent(in) :: tke_shell(:)
+
+    integer :: i
+    character(len=LOG_SIZE) :: log_buf
+
     do i = 1, this%n_shells
        this%shell_amp(i) = sqrt(2.0_rp*tke_shell(i)*2.0_rp &
             / real(this%shell_modes(i), kind=rp))
-       shell_energy = real(this%shell_modes(i), kind=rp) &
-            * (this%shell_amp(i)**2)/2.0_rp
-       tke_tot1 = tke_tot1 + shell_energy
     end do
 
     write (log_buf, '(A,I0,A)') 'FST - ', this%k_length, &
          ' wavenumbers generated'
     call neko_log%message(log_buf)
 
-    call print_param('FST - Largest wavelength in x', 2.0_rp*pi/kxmin)
-    call print_param('FST - Smallest wavelength in x', 2.0_rp*pi/kxmax)
-    call print_param('FST - Largest wavelength in y', 2.0_rp*pi/kymin)
-    call print_param('FST - Smallest wavelength in y', 2.0_rp*pi/kymax)
-    call print_param('FST - Largest wavelength in z', 2.0_rp*pi/kzmin)
-    call print_param('FST - Smallest wavelength in z', 2.0_rp*pi/kzmax)
+  end subroutine shell_amplitudes
 
-    ! =====================================================================
-    ! Random phases and amplitudes (port of make_turbu, 05_turbu.f90).
-    ! The plugin draws phase/amplitude pairs for three "columns" although
-    ! only the first phase column and all three amplitude columns are used;
-    ! the draw order is preserved for bit parity with the plugin.
-    ! NOTE: the plugin overrides the seed with -143 at this point
-    ! (05_turbu.f90, `seed = -143` in make_turbu), which makes its JSON
-    ! seed option ineffective. That override is intentionally NOT ported.
-    ! =====================================================================
+  !> Log the longest and shortest wavelength in each direction.
+  subroutine log_wavelengths(co, np)
+    real(kind=rp), intent(in) :: co(:,:,:)
+    integer, intent(in) :: np
+
+    real(kind=rp) :: kmin(3), kmax(3)
+    character(len=1), parameter :: dir_char(3) = ['x', 'y', 'z']
+    integer :: d
+
+    do d = 1, 3
+       kmax(d) = max(1.0e-20_rp, maxval(abs(co(1:2*np, :, d))))
+       kmin(d) = min(1.0e+20_rp, minval(abs(co(1:2*np, :, d))))
+       call print_param('FST - Largest wavelength in ' // dir_char(d), &
+            2.0_rp*pi/kmin(d))
+       call print_param('FST - Smallest wavelength in ' // dir_char(d), &
+            2.0_rp*pi/kmax(d))
+    end do
+
+  end subroutine log_wavelengths
+
+  !> Random phases, and random directions projected normal to k so every
+  !! mode is divergence free.
+  subroutine random_directions(this, rng, idum)
+    class(fst_spectrum_t), intent(inout) :: this
+    type(fst_rng_t), intent(inout) :: rng
+    integer, intent(inout) :: idum
+
+    real(kind=rp), allocatable :: bb(:,:), bb1(:,:)
+    real(kind=rp) :: u_hat_raw(3), u_hat_p(3), kdotu, knorm2
+    integer :: i, j, k
+
     allocate(bb(this%n_modes_max, 3))
     allocate(bb1(this%n_modes_max, 3))
 
@@ -516,6 +490,8 @@ contains
             file = trim(this%path) // '/bb.txt')
     end if
 
+    ! Three columns are drawn though only one phase column is used, to keep
+    ! the plugin's random sequence
     do k = 1, 3
        do i = 1, this%n_modes_max
           bb(i, k) = rng%next(idum)*2.0_rp*pi   ! random phase shift
@@ -529,10 +505,6 @@ contains
 
     this%phase(:) = bb(:, 1)
 
-    ! Enforce continuity by projecting the random amplitude vectors
-    ! perpendicular to their wavenumber vectors, then normalize.
-    ! Zero-norm projections cannot occur for generic random draws
-    ! (measure-zero event); as in the plugin, this is not guarded.
     do i = 1, this%k_length
        do j = 1, 3
           u_hat_raw(j) = bb1(i, j)
@@ -556,7 +528,18 @@ contains
 
     call neko_log%message('FST - Amplitudes projection done')
 
-    ! --- Energy check and spectrum file
+    deallocate(bb, bb1)
+
+  end subroutine random_directions
+
+  !> Energy per component of the generated modes, and the realized Tu.
+  subroutine energy_check(this)
+    class(fst_spectrum_t), intent(inout) :: this
+
+    real(kind=rp) :: ue, ve, we, uamp, vamp, wamp, amp
+    integer :: i, shellno
+    character(len=LOG_SIZE) :: log_buf
+
     ue = 0.0_rp
     ve = 0.0_rp
     we = 0.0_rp
@@ -606,14 +589,9 @@ contains
          this%tu_uinf_estimate
     call neko_log%message(log_buf)
 
-    deallocate(co, kk, q, dk, tke_shell, bb, bb1)
+  end subroutine energy_check
 
-  end subroutine generate_rank0
-
-  !> Von Karman energy spectrum (port of 03_spectrum.f90).
-  !! @param k Wavenumber.
-  !! @param l Integral length scale.
-  !! @param q Scale factor.
+  !> Von Karman spectrum; integrates to q over [0, inf).
   pure function ek(k, l, q) result(e)
     real(kind=rp), intent(in) :: k, l, q
     real(kind=rp) :: e
@@ -623,9 +601,7 @@ contains
 
   end function ek
 
-  !> Number of azimuthal points at latitude ring j of the "new"-branch
-  !! sphere lattice of the original compute_sphere (02_sphere.f90). Shared
-  !! by the counting pass and the fill pass so both stay consistent.
+  !> Points on latitude ring j of the sphere lattice.
   pure function lattice_nphi(nn, j) result(nphi)
     integer, intent(in) :: nn, j
     integer :: nphi
@@ -644,12 +620,9 @@ contains
 
   end function lattice_nphi
 
-  !> Computes a set of np points which are (more or less) uniformly
-  !! distributed on a sphere with radius rad, rotated by (rotx, roty, rotz).
-  !! Port of compute_sphere (02_sphere.f90). np is intent(inout): for the
-  !! general lattice branch it is reduced to the realized point count.
-  !! The regular polyhedra for np = 4, 6, 8, 12, 20 are preserved; the
-  !! unreachable non-"new" branch and the wire.dat output were removed.
+  !> np points spread evenly on a sphere of radius rad, then rotated.
+  !! Regular polyhedra for np = 4, 6, 8, 12, 20, otherwise a lattice that
+  !! may use fewer points; np returns the number used.
   subroutine sphere_points(np, x, y, z, rad, rotx, roty, rotz)
     integer, intent(inout) :: np
     real(kind=rp), intent(inout) :: x(:), y(:), z(:)
@@ -663,7 +636,6 @@ contains
     end if
 
     if (np .eq. 4) then
-       ! Tetrahedron
        call asp(x, y, z, 1, -1.0_rp/6.0_rp*sqrt(3.0_rp), -0.5_rp, 0.0_rp)
        call asp(x, y, z, 2, -1.0_rp/6.0_rp*sqrt(3.0_rp), 0.5_rp, 0.0_rp)
        call asp(x, y, z, 3, 1.0_rp/3.0_rp*sqrt(3.0_rp), 0.0_rp, 0.0_rp)
@@ -672,7 +644,6 @@ contains
        call scale1(x, y, z, np, sqrt(6.0_rp)*2.0_rp/3.0_rp)
 
     else if (np .eq. 6) then
-       ! Octahedron
        call asp(x, y, z, 1, 0.0_rp, 0.0_rp, sqrt(2.0_rp)/2.0_rp)
        call asp(x, y, z, 2, 0.0_rp, 1.0_rp, sqrt(2.0_rp)/2.0_rp)
        call asp(x, y, z, 3, 1.0_rp, 1.0_rp, sqrt(2.0_rp)/2.0_rp)
@@ -683,7 +654,6 @@ contains
        call scale1(x, y, z, np, sqrt(2.0_rp))
 
     else if (np .eq. 8) then
-       ! Cube
        w = sqrt(3.0_rp)/3.0_rp
        call asp(x, y, z, 1, -w, w, -w)
        call asp(x, y, z, 2, -w, -w, -w)
@@ -695,7 +665,6 @@ contains
        call asp(x, y, z, 8, w, w, w)
 
     else if (np .eq. 12) then
-       ! Icosahedron
        w = 0.5_rp*(sqrt(5.0_rp) + 1.0_rp)
        call asp(x, y, z, 1, w/2.0_rp, 0.0_rp, 0.5_rp*(w - 1.0_rp))
        call asp(x, y, z, 2, w/2.0_rp, 0.0_rp, 0.5_rp*(w + 1.0_rp))
@@ -713,7 +682,6 @@ contains
        call scale1(x, y, z, np, 2.0_rp/sqrt(w**2 + 1.0_rp))
 
     else if (np .eq. 20) then
-       ! Dodecahedron
        w = 0.5_rp*(sqrt(5.0_rp) + 3.0_rp)
        call asp(x, y, z, 1, 0.5_rp*w, 0.5_rp*(w - 1.0_rp), 0.0_rp)
        call asp(x, y, z, 2, 0.5_rp*w, 0.5_rp*(w + 1.0_rp), 0.0_rp)
@@ -739,8 +707,6 @@ contains
        call scale1(x, y, z, np, 2.0_rp/sqrt(w**2 + 1.0_rp))
 
     else
-       ! General case: latitude/longitude lattice with (approximately)
-       ! uniform surface density, realizing the largest point count <= np.
        nn = 1
        npn1 = 0
        do
@@ -776,13 +742,12 @@ contains
 
     end if
 
-    ! Scale to the requested radius and rotate
     call scale1(x, y, z, np, rad)
     call rot3d(np, x, y, z, rotx, roty, rotz)
 
   end subroutine sphere_points
 
-  !> Assign point i.
+  !> Set point i.
   subroutine asp(x, y, z, i, xx, yy, zz)
     real(kind=rp), intent(inout) :: x(:), y(:), z(:)
     integer, intent(in) :: i
@@ -807,7 +772,7 @@ contains
     end do
   end subroutine trans
 
-  !> Scale points 1..np by r.
+  !> Scale points 1..np.
   subroutine scale1(x, y, z, np, r)
     real(kind=rp), intent(inout) :: x(:), y(:), z(:)
     integer, intent(in) :: np
@@ -821,7 +786,7 @@ contains
     end do
   end subroutine scale1
 
-  !> Rotate points 1..np by the angles (rotx, roty, rotz).
+  !> Rotate points 1..np.
   subroutine rot3d(np, x, y, z, rotx, roty, rotz)
     integer, intent(in) :: np
     real(kind=rp), intent(inout) :: x(:), y(:), z(:)
@@ -847,8 +812,7 @@ contains
     end do
   end subroutine rot3d
 
-  !> Dispatch the periodicity quantization (port of periodicity_chk,
-  !! 04_spec.f90).
+  !> Quantize the periodic direction(s). At most two can be periodic.
   subroutine periodicity_chk(kx, ky, kz, np, kk, dlx, dly, dlz, &
        ifxp, ifyp, ifzp, rng, idum)
     real(kind=rp), intent(inout) :: kx(:), ky(:), kz(:)
@@ -888,15 +852,8 @@ contains
 
   end subroutine periodicity_chk
 
-  !> Quantize the wavenumbers kp to multiples of 2*pi/lp, adjusting k1 or
-  !! k2 (chosen by coin toss) to preserve the shell radius k_total.
-  !! Port of make_periodic_1D (04_spec.f90) with one deliberate change:
-  !! the multiple is chosen by nearest rounding (nint) instead of floor.
-  !! Floor rounds every quantized component toward zero, so the free
-  !! component that restores the shell radius is systematically inflated;
-  !! since u_hat is perpendicular to k, that direction is then starved of
-  !! energy (measured: 5-15% component-energy bias for one periodic
-  !! direction). Nearest rounding removes the bias.
+  !> Snap kp to the nearest nonzero multiple of 2*pi/lp and adjust k1 or
+  !! k2 (coin toss) so the shell radius is kept.
   subroutine make_periodic_1d(k1, k2, kp, np, k_total, lp, rng, idum)
     real(kind=rp), intent(inout) :: k1(:), k2(:), kp(:)
     integer, intent(in) :: np
@@ -911,7 +868,6 @@ contains
     twopi_over_l = 2.0_rp*pi/lp
     k_total_sq = k_total**2
 
-    ! At least one multiple of 2*pi/lp must fit inside the shell radius
     nmax = floor(k_total/twopi_over_l)
     if (nmax .lt. 1) then
        call print_param('K_total:', k_total)
@@ -928,19 +884,15 @@ contains
        if (n_j .gt. nmax) then
           n_j_signed = n_j_signed - int(sign(1.0_rp, kp(j)))
        else if (n_j .eq. 0) then
-          ! Force to not be zero
           n_j_signed = n_j_signed + int(sign(1.0_rp, kp(j)))
        end if
 
        kp(j) = real(n_j_signed, kind=rp)*twopi_over_l
 
-       ! Adjust k1 or k2 so that k1^2 + k2^2 + kp^2 = k_total^2.
-       ! NOTE (from the original): the `> 1` threshold is dimensional and
-       ! kept as-is for parity; it avoids assigning near-zero components.
+       ! The > 1 test on rtmp below is dimensional; kept from the plugin
        flip = rng%next(idum)
 
        if (flip .gt. 0.5_rp) then
-          ! k1 stays, recompute k2
           rtmp = k_total_sq - k1(j)**2 - kp(j)**2
           if (rtmp .gt. 1.0_rp) then
              k2(j) = sign(1.0_rp, k2(j))*sqrt(rtmp)
@@ -950,7 +902,6 @@ contains
              k2(j) = sign(1.0_rp, k2(j))*rtmp
           end if
        else
-          ! k2 stays, recompute k1
           rtmp = k_total_sq - kp(j)**2 - k2(j)**2
           if (rtmp .gt. 1.0_rp) then
              k1(j) = sign(1.0_rp, k1(j))*sqrt(rtmp)
@@ -965,20 +916,9 @@ contains
 
   end subroutine make_periodic_1d
 
-  !> Quantize kp1 and kp2 to multiples of 2*pi/l1 and 2*pi/l2 respectively,
-  !! recomputing k1 to preserve the shell radius.
-  !! Port of make_periodic_2D (04_spec.f90), using nearest rounding (nint)
-  !! instead of floor for the multiples (see make_periodic_1d for why).
-  !! With two quantized directions a residual anisotropy remains at the
-  !! lowest shells, because both components are forced to be nonzero and
-  !! the shell then cannot point along the free direction; this is
-  !! inherent to the quantization, not to the rounding.
-  !! Two quirks of the original are
-  !! preserved for parity and flagged here: (1) the fit check for direction
-  !! 1 is overwritten by that of direction 2, so the per-mode clamp uses the
-  !! direction-2 nmax for both directions (only relevant when l1 /= l2);
-  !! (2) the reduction loop compares signed components when deciding which
-  !! one to reduce.
+  !> Snap kp1 and kp2 to multiples of 2*pi/l1 and 2*pi/l2 and set k1 from
+  !! the shell radius. The lowest shells stay slightly anisotropic since
+  !! both quantized components must be nonzero.
   subroutine make_periodic_2d(k1, kp1, kp2, np, k_total, l1, l2)
     real(kind=rp), intent(inout) :: k1(:), kp1(:), kp2(:)
     integer, intent(in) :: np
@@ -993,7 +933,6 @@ contains
     twopi_over_l2 = 2.0_rp*pi/l2
     k_total_sq = k_total**2
 
-    ! Direction 1 fit check
     nmax = floor(k_total/twopi_over_l1)
     if (nmax .lt. 1) then
        call print_param('K_total:', k_total)
@@ -1002,7 +941,8 @@ contains
        call neko_error('(FST) Increase minimum total wave number!')
     end if
 
-    ! Direction 2 fit check (overwrites nmax; see subroutine comment)
+    ! As in the plugin, this overwrites nmax from direction 1, so the clamp
+    ! below uses direction 2 for both (matters only when l1 /= l2)
     nmax = floor(k_total/twopi_over_l2)
     if (nmax .lt. 1) then
        call print_param('K_total:', k_total)
@@ -1013,7 +953,6 @@ contains
 
     do j = 1, np
 
-       ! Discrete wavenumber in direction 1
        n_j1 = nint(abs(kp1(j))/twopi_over_l1)
        n_j1_signed = int(sign(1.0_rp, kp1(j)))*n_j1
 
@@ -1025,7 +964,6 @@ contains
 
        kp1(j) = real(n_j1_signed, kind=rp)*twopi_over_l1
 
-       ! Discrete wavenumber in direction 2
        n_j2 = nint(abs(kp2(j))/twopi_over_l2)
        n_j2_signed = int(sign(1.0_rp, kp2(j)))*n_j2
 
@@ -1037,9 +975,6 @@ contains
 
        kp2(j) = real(n_j2_signed, kind=rp)*twopi_over_l2
 
-       ! Recompute k1 to preserve the shell radius; if the quantized
-       ! components already exceed it, reduce the largest one until a
-       ! valid configuration is reached.
        rtmp = k_total_sq - kp1(j)**2 - kp2(j)**2
        valid_config = (rtmp .gt. 1.0_rp)
 
@@ -1062,14 +997,12 @@ contains
 
   end subroutine make_periodic_2d
 
-  !> Log a named real parameter.
+  !> Log a named value.
   subroutine print_param(name, value)
     character(len=*), intent(in) :: name
     real(kind=rp), intent(in) :: value
     character(len=LOG_SIZE) :: log_buf
 
-    ! The name field is bounded so that the line always fits LOG_SIZE:
-    ! 6 ("[FST] ") + 50 (name) + 2 (": ") + 13 (E13.5) = 71 characters.
     write(log_buf, '(A,A50,A,E13.5)') "[FST] ", name, ": ", value
     call neko_log%message(log_buf)
 

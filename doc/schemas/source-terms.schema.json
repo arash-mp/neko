@@ -614,6 +614,288 @@
       },
       "additionalProperties": false
     },
+    "fstSourceTerm": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "fst"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "zone_name": {
+          "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+        },
+        "gain": {
+          "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+        },
+        "convection_velocity": {
+          "$ref": "urn:neko:schema:common#/$defs/vector3OrRef"
+        },
+        "turbulence_intensity": {
+          "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+        },
+        "integral_length_scale": {
+          "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+        },
+        "spectrum": {
+          "type": "object",
+          "required": [
+            "n_shells",
+            "modes_per_shell",
+            "k_min",
+            "k_max"
+          ],
+          "properties": {
+            "n_shells": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 2
+                },
+                {
+                  "$ref": "urn:neko:schema:common#/$defs/constRef"
+                }
+              ]
+            },
+            "modes_per_shell": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 3,
+                  "maximum": 1000
+                },
+                {
+                  "$ref": "urn:neko:schema:common#/$defs/constRef"
+                }
+              ]
+            },
+            "k_min": {
+              "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+            },
+            "k_max": {
+              "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+            }
+          },
+          "additionalProperties": false
+        },
+        "periodic": {
+          "type": "array",
+          "items": {
+            "type": "boolean"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "fringe": {
+          "type": "object",
+          "properties": {
+            "x": {
+              "type": "object",
+              "required": [
+                "start",
+                "end",
+                "rise",
+                "fall"
+              ],
+              "properties": {
+                "start": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                },
+                "end": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                },
+                "rise": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "fall": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                }
+              },
+              "additionalProperties": false
+            },
+            "y": {
+              "type": "object",
+              "required": [
+                "start",
+                "end",
+                "rise",
+                "fall"
+              ],
+              "properties": {
+                "start": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                },
+                "end": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                },
+                "rise": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "fall": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                }
+              },
+              "additionalProperties": false
+            },
+            "z": {
+              "type": "object",
+              "required": [
+                "start",
+                "end",
+                "rise",
+                "fall"
+              ],
+              "properties": {
+                "start": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                },
+                "end": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                },
+                "rise": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                },
+                "fall": {
+                  "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "baseflow": {
+          "type": "object",
+          "required": [
+            "method"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "initial_condition",
+                "constant",
+                "field"
+              ]
+            },
+            "value": {
+              "$ref": "urn:neko:schema:common#/$defs/vector3OrRef"
+            },
+            "file_name": {
+              "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+            },
+            "mesh_file_name": {
+              "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+            },
+            "interpolate": {
+              "type": "boolean"
+            },
+            "interpolation": {
+              "type": "object",
+              "properties": {
+                "tolerance": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                },
+                "padding": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "method": {
+                    "const": "constant"
+                  }
+                },
+                "required": [
+                  "method"
+                ]
+              },
+              "then": {
+                "required": [
+                  "value"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "method": {
+                    "const": "field"
+                  }
+                },
+                "required": [
+                  "method"
+                ]
+              },
+              "then": {
+                "required": [
+                  "file_name"
+                ]
+              }
+            }
+          ],
+          "additionalProperties": false
+        },
+        "ramp_time": {
+          "$ref": "urn:neko:schema:common#/$defs/nonNegativeNumberOrRef"
+        },
+        "seed": {
+          "$ref": "urn:neko:schema:common#/$defs/integerOrRef"
+        },
+        "write_files": {
+          "type": "boolean"
+        },
+        "files_output_path": {
+          "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+        },
+        "dump_fields": {
+          "type": "boolean"
+        },
+        "dump_file_name": {
+          "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+        },
+        "validate_only": {
+          "type": "boolean"
+        },
+        "start_time": {
+          "$ref": "urn:neko:schema:common#/$defs/nonNegativeNumberOrRef"
+        },
+        "end_time": {
+          "$ref": "urn:neko:schema:common#/$defs/nonNegativeNumberOrRef"
+        }
+      },
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "then": {
+        "required": [
+          "zone_name",
+          "gain",
+          "convection_velocity",
+          "turbulence_intensity",
+          "integral_length_scale",
+          "spectrum",
+          "baseflow"
+        ]
+      },
+      "additionalProperties": false
+    },
     "fluidOnlySourceTerm": {
       "oneOf": [
         {
@@ -633,6 +915,9 @@
         },
         {
           "$ref": "#/$defs/translationSourceTerm"
+        },
+        {
+          "$ref": "#/$defs/fstSourceTerm"
         }
       ]
     },

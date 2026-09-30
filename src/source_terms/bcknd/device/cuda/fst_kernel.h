@@ -1,3 +1,5 @@
+#ifndef __SOURCE_TERMS_FST_KERNEL_H__
+#define __SOURCE_TERMS_FST_KERNEL_H__
 /*
  Copyright (c) 2026, The Neko Authors
  All rights reserved.
@@ -33,23 +35,13 @@
 */
 
 /**
- * Device kernel for the FST fringe forcing.
- *
- * The kernels are templated on the working precision T (instantiated with
- * `real` from device_config.h, which follows the single/double precision
- * build). All literal constants are declared as typed `const T` values so
- * that no expression is silently promoted to double in a single precision
- * build; the transcendental calls take T-typed arguments and resolve to the
- * matching device overload.
- *
- * One thread per masked (zone) point. Every thread iterates over the same
- * mode index in lockstep, so all threads in a warp read identical mode
- * addresses and the values are broadcast from cache; no shared-memory
- * staging is needed. Threads outside the fringe support (lambda = 0)
- * return early, which is safe because the kernel contains no barriers.
+ * Device kernel for the FST fringe forcing, one thread per zone point.
+ * All threads walk the mode list in lockstep, so mode data is broadcast
+ * from cache. Constants are typed as T to avoid double promotion in
+ * single precision builds.
  */
 
-/** Per-direction fringe description, passed by value. */
+/** Fringe description per direction, passed by value. */
 template< typename T >
 struct fst_fringe_t {
   int smooth[3];
@@ -59,21 +51,23 @@ struct fst_fringe_t {
   T fall[3];
 };
 
-/** Smooth step: 0 for x <= 0, 1 for x >= 1, C-infinity in between. */
+/** Smooth step, same function and bounds as math_stepf on the host. */
 template< typename T >
-__device__ __forceinline__ T fst_smooth_step(const T x) {
+__device__ __forceinline__ T fst_stepf(const T x) {
   const T zero = 0.0;
   const T one = 1.0;
+  const T xdmin = 0.0001;
+  const T xdmax = 0.9999;
 
-  if (x <= zero) return zero;
-  if (x >= one) return one;
+  if (x <= xdmin) return zero;
+  if (x >= xdmax) return one;
   return one / (one + exp(one / (x - one) + one / x));
 }
 
-/** Product of the per-direction fringes; flat directions contribute 1. */
+/** Product of the smooth fringes; flat directions contribute 1. */
 template< typename T >
-__device__ __forceinline__ T fst_fringe3(const T x, const T y, const T z,
-                                         const fst_fringe_t<T> f) {
+__device__ __forceinline__ T fst_fringe(const T x, const T y, const T z,
+                                        const fst_fringe_t<T> f) {
   const T c[3] = {x, y, z};
   const T one = 1.0;
   T lam = one;
@@ -81,18 +75,16 @@ __device__ __forceinline__ T fst_fringe3(const T x, const T y, const T z,
 #pragma unroll
   for (int d = 0; d < 3; d++) {
     if (f.smooth[d]) {
-      lam *= fst_smooth_step<T>((c[d] - f.start[d]) / f.rise[d])
-           - fst_smooth_step<T>((c[d] - f.end[d]) / f.fall[d] + one);
+      lam *= fst_stepf<T>((c[d] - f.start[d]) / f.rise[d])
+           - fst_stepf<T>((c[d] - f.end[d]) / f.fall[d] + one);
     }
   }
   return lam;
 }
 
 /**
- * Adds  f_i += coeff * lambda(x) * (u_bf_i + u'_i(x,t) - u_i)
- * at the masked points, with
- *   u'_j = sum_m a_j(m) * sin(k(m).(x - shift) + phase(m)).
- * Coordinates are the current ones, so the kernel is ALE-safe.
+ * f += coeff * lambda * (u_bf + u' - u) at the zone points, with
+ * u'_j = sum_m a_j(m) sin(k(m) . (x - shift) + phase(m)).
  */
 template< typename T >
 __global__ void fst_apply_kernel(const int n_mask,
@@ -126,17 +118,17 @@ __global__ void fst_apply_kernel(const int n_mask,
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx >= n_mask) return;
 
-  /* Fortran mask holds 1-based linear indices. */
+  /* The mask holds 1-based Fortran indices */
   const int i = mask[idx] - 1;
 
   const T x = xc[i];
   const T y = yc[i];
   const T z = zc[i];
 
-  const T lam = fst_fringe3<T>(x, y, z, fringe);
+  /* No barriers in this kernel, so returning early is safe */
+  const T lam = fst_fringe<T>(x, y, z, fringe);
   if (lam <= zero) return;
 
-  /* Shifted coordinates: k.(x - U_c t) */
   const T xs = x - sx;
   const T ys = y - sy;
   const T zs = z - sz;
@@ -157,3 +149,5 @@ __global__ void fst_apply_kernel(const int n_mask,
   fv[i] += c * (v_bf[idx] + ry - v[i]);
   fw[i] += c * (w_bf[idx] + rz - w[i]);
 }
+
+#endif // __SOURCE_TERMS_FST_KERNEL_H__

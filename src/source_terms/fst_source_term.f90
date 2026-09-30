@@ -30,78 +30,19 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-!> Implements `fst_source_term_t`: free-stream turbulence (FST) injected as
-!! a volumetric fringe forcing
-!!
-!!    f_i = gain * ramp(t) * lambda(x,y,z) * (u_bf,i + u'_i(x,t) - u_i)
-!!
-!! where u' is a sum of Fourier modes sampled from a von Karman spectrum
-!! (see `fst_spectrum`), convected as frozen turbulence at the constant
-!! velocity vector U_c (phase k.(x - U_c t)), supporting oblique/cross
-!! flow such as swept-wing configurations,
-!! lambda is a per-direction SIMSON-type fringe with compact support and
-!! ramp(t) is a linear ramp of length ramp_time starting at start_time.
-!!
-!! The perturbation and the fringe are evaluated at the CURRENT mesh
-!! coordinates on every call, so the forcing is a purely Eulerian field and
-!! remains consistent under ALE mesh deformation. The point-zone mask,
-!! however, is built once from the initial mesh and follows material
-!! points; the zone must therefore contain the fringe support [start, end]
-!! at all times during deformation (make the zone generously larger than
-!! the fringe; points with lambda = 0 are skipped at negligible cost).
-!! The baseflow methods "initial_condition" and "field" also attach the
-!! captured target velocity to material points; under mesh deformation use
-!! "constant" unless this is the intended behavior.
-!!
-!! The compute kernels live in `fst_source_term_cpu` and
-!! `fst_source_term_device`; this module holds the type, the JSON setup,
-!! the diagnostics and the backend dispatch.
-!!
-!! JSON parameters (under case.fluid.source_terms, "type": "fst"):
-!!   zone_name (string, mandatory)        Point zone of the forcing region.
-!!   gain (real, mandatory)               Fringe gain [1/time].
-!!   convection_velocity ([real x3], mandatory)
-!!                                        Frozen-turbulence convection
-!!                                        velocity U_c (nonzero magnitude).
-!!                                        For flow aligned with x this is
-!!                                        [U_inf, 0, 0]; for a swept wing,
-!!                                        the oblique free-stream vector.
-!!   turbulence_intensity (real, mandatory)
-!!   integral_length_scale (real, mandatory)
-!!   spectrum.n_shells (int, mandatory)
-!!   spectrum.modes_per_shell (int, mandatory)
-!!   spectrum.k_min (real, mandatory)
-!!   spectrum.k_max (real, mandatory)
-!!   baseflow.method (string, mandatory)  "initial_condition", "constant"
-!!                                        (with baseflow.value = [u,v,w])
-!!                                        or "field" (with
-!!                                        baseflow.file_name, optional
-!!                                        baseflow.interpolate,
-!!                                        baseflow.mesh_file_name,
-!!                                        baseflow.interpolation).
-!!   fringe.x / fringe.y / fringe.z       Optional per direction. If absent
-!!                                        the fringe is flat (lambda = 1) in
-!!                                        that direction. If present, all of
-!!                                        start, end, rise, fall are
-!!                                        mandatory.
-!!   periodic ([bool,bool,bool], optional, default [false,false,false])
-!!                                        Wavenumber quantization to the
-!!                                        full domain length per direction.
-!!   start_time, end_time (optional)      Source term activity window.
-!!   ramp_time (real, optional, 0)        Linear ramp length after
-!!                                        start_time.
-!!   seed (int, optional, -143)           RNG seed.
-!!   write_files (bool, optional, false)  Write generation diagnostics.
-!!   files_output_path (string, optional, "./fst_files")
-!!   dump_fields (bool, optional, false)  Write fringe and u' snapshot to
-!!                                        an fld file at the first compute.
-!!   dump_file_name (string, optional, "fst_fields")
-!!   validate_only (bool, optional, false) Stop after generation,
-!!                                        diagnostics and field dump.
+!> Free-stream turbulence (FST) injected as a volume forcing.
+!! Inside a point zone the velocity is relaxed towards a base flow plus a
+!! synthetic turbulent field,
+!!   f = gain * ramp(t) * lambda(x) * (u_bf + u' - u),
+!! where u' is a sum of divergence-free Fourier modes from a von Karman
+!! spectrum, convected with a constant velocity (frozen turbulence), and
+!! lambda is a smooth fringe. u' and lambda are evaluated at the current
+!! mesh coordinates every step, so the forcing is valid with ALE.
 module fst_source_term
   use num_types, only : rp, sp
   use json_module, only : json_file
   use json_utils, only : json_get, json_get_or_default, &
+       json_get_or_lookup, json_get_or_lookup_or_default, &
        json_get_subdict_or_empty
   use field, only : field_t
   use field_list, only : field_list_t
@@ -118,12 +59,12 @@ module fst_source_term
   use logger, only : neko_log, LOG_SIZE
   use utils, only : neko_error, neko_warning, NEKO_FNAME_LEN
   use neko_config, only : NEKO_BCKND_DEVICE
-  use device, only : device_map, device_memcpy, device_free, &
+  use device, only : device_map, device_unmap, device_memcpy, &
        HOST_TO_DEVICE, DEVICE_TO_HOST
   use fst_source_term_cpu, only : fst_source_term_compute_cpu, &
        fst_source_term_preview_cpu
   use fst_source_term_device, only : fst_source_term_compute_device
-  use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR, c_associated
+  use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR
   use math, only : glmax, glmin, pi
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION, pe_rank
   use mpi_f08, only : MPI_Allreduce, MPI_IN_PLACE, MPI_MIN, MPI_MAX, &
@@ -131,44 +72,39 @@ module fst_source_term
   implicit none
   private
 
-  !> Free-stream turbulence fringe forcing source term.
   type, public, extends(source_term_t) :: fst_source_term_t
-     !> The FST mode set.
+     !> The term does nothing unless enabled.
+     logical :: enabled = .false.
+     !> Generated mode set.
      type(fst_spectrum_t) :: spectrum
-     !> Point zone defining the forcing region.
+     !> Forcing region. Its mask follows the mesh (material points).
      class(point_zone_t), pointer :: zone => null()
-     !> Zone mask (local GLL indices, 1-based).
      integer, pointer :: mask(:) => null()
-     !> Velocity fields.
+     !> Velocity components.
      type(field_t), pointer :: u => null()
      type(field_t), pointer :: v => null()
      type(field_t), pointer :: w => null()
-     !> Fringe gain [1/time].
+     !> Relaxation rate [1/time].
      real(kind=rp) :: gain = 0.0_rp
-     !> Frozen-turbulence convection velocity vector U_c.
+     !> Convection velocity of the frozen turbulence and its magnitude.
      real(kind=rp) :: conv_vel(3) = 0.0_rp
-     !> Reference speed |U_c| (energy scaling and diagnostics).
      real(kind=rp) :: u_ref = 0.0_rp
-     !> Linear time ramp length after start_time.
+     !> Length of the linear ramp after start_time.
      real(kind=rp) :: ramp_time = 0.0_rp
-     !> Per-direction fringe: smooth (SIMSON step) or flat (lambda = 1).
+     !> Fringe per direction; directions that are not smooth are flat.
      logical :: fringe_smooth(3) = .false.
      real(kind=rp) :: fringe_start(3) = 0.0_rp
      real(kind=rp) :: fringe_end(3) = 0.0_rp
      real(kind=rp) :: fringe_rise(3) = 0.0_rp
      real(kind=rp) :: fringe_fall(3) = 0.0_rp
-     !> Baseflow method: "initial_condition", "constant" or "field".
+     !> One of initial_condition, constant or field.
      character(len=:), allocatable :: baseflow_method
-     !> Number of modes (copy of spectrum%k_length, for the kernels).
+     !> Modes in the layout used by the kernels, a_j = u_hat_j * amplitude.
      integer :: k_length = 0
-     !> Mode data in a flat, kernel-friendly layout (length k_length):
-     !! wavenumber components and amplitude-weighted direction vectors
-     !! a_j(m) = u_hat(m,j) * shell_amp(shell(m)), so the kernels need no
-     !! shell indirection. Shared by the CPU and device backends.
      real(kind=rp), allocatable :: kx(:), ky(:), kz(:)
      real(kind=rp), allocatable :: ax(:), ay(:), az(:)
      real(kind=rp), allocatable :: mode_phase(:)
-     !> Device copies of the mode data (allocated only on device backends).
+     !> Device copies of the modes and of the base flow.
      type(c_ptr) :: kx_d = C_NULL_PTR
      type(c_ptr) :: ky_d = C_NULL_PTR
      type(c_ptr) :: kz_d = C_NULL_PTR
@@ -176,37 +112,31 @@ module fst_source_term
      type(c_ptr) :: ay_d = C_NULL_PTR
      type(c_ptr) :: az_d = C_NULL_PTR
      type(c_ptr) :: phase_d = C_NULL_PTR
-     !> Device copies of the baseflow on the zone.
      type(c_ptr) :: u_bf_d = C_NULL_PTR
      type(c_ptr) :: v_bf_d = C_NULL_PTR
      type(c_ptr) :: w_bf_d = C_NULL_PTR
-     !> Target velocity at the zone points (gathered, zone-local size).
+     !> Base flow at the zone points.
      real(kind=rp), allocatable :: u_bf(:), v_bf(:), w_bf(:)
-     !> Preview/validation flags.
+     !> Preview: dump the forcing fields, then stop.
      logical :: validate_only = .false.
      logical :: dump_flds = .false.
      character(len=NEKO_FNAME_LEN) :: dump_fname
-     !> First-compute setup done (baseflow capture, dt diagnostics, dump).
+     !> First-step setup done, and gain*dt warning issued.
      logical :: setup_done = .false.
-     !> Latch for the gain*dt stability warning (checked every step to
-     !! cover variable time steps; warn once).
      logical :: gain_dt_warned = .false.
    contains
-     !> Constructor from JSON.
      procedure, pass(this) :: init => fst_init_from_json
-     !> Destructor.
      procedure, pass(this) :: free => fst_free
-     !> Computes the source term and adds the result to `fields`.
      procedure, pass(this) :: compute_ => fst_compute
   end type fst_source_term_t
 
 contains
 
-  !> Constructor from JSON.
-  !! @param json The JSON object for the source term.
-  !! @param fields The list of right-hand-side fields (f_x, f_y, f_z).
-  !! @param coef The SEM coefficients.
-  !! @param variable_name The name of the scheme owning this source term.
+  !> Constructor from json.
+  !! @param json The json object for the source term.
+  !! @param fields The right-hand-side fields f_x, f_y, f_z.
+  !! @param coef SEM coefficients.
+  !! @param variable_name Name of the scheme the term belongs to.
   subroutine fst_init_from_json(this, json, fields, coef, variable_name)
     class(fst_source_term_t), intent(inout) :: this
     type(json_file), intent(inout) :: json
@@ -229,27 +159,31 @@ contains
 
     call neko_log%section("FST SOURCE TERM")
 
+    call json_get_or_lookup_or_default(json, "start_time", start_time, &
+         0.0_rp)
+    call json_get_or_lookup_or_default(json, "end_time", end_time, &
+         huge(0.0_rp))
+    call this%init_base(fields, coef, start_time, end_time)
+
+    call json_get_or_default(json, "enabled", this%enabled, .false.)
+    if (.not. this%enabled) then
+       call neko_log%message("Disabled (set enabled = true to use it)")
+       call neko_log%end_section()
+       return
+    end if
+
     if (fields%size() .ne. 3) then
-       call neko_error("(FST) The fst source term is a momentum " // &
-            "source and requires 3 right-hand-side fields." // &
-            new_line('A') // "      Got the scheme '" // &
-            trim(variable_name) // "' with a different field count.")
+       call neko_error("(FST) Needs the 3 momentum right-hand sides, " // &
+            "got scheme '" // trim(variable_name) // "'")
     end if
     if (coef%msh%gdim .ne. 3) then
        call neko_error("(FST) Only 3D meshes are supported")
     end if
 
-    call json_get_or_default(json, "start_time", start_time, 0.0_rp)
-    call json_get_or_default(json, "end_time", end_time, huge(0.0_rp))
-    call this%init_base(fields, coef, start_time, end_time)
-
     this%u => neko_registry%get_field_by_name("u")
     this%v => neko_registry%get_field_by_name("v")
     this%w => neko_registry%get_field_by_name("w")
 
-    !
-    ! Forcing region
-    !
     call json_get(json, "zone_name", zone_name)
     this%zone => neko_point_zone_registry%get_point_zone(trim(zone_name))
     this%mask => this%zone%mask%get()
@@ -262,47 +196,39 @@ contains
             "' contains no points")
     end if
 
-    !
-    ! Forcing parameters
-    !
-    call json_get(json, "gain", this%gain)
+    call json_get_or_lookup(json, "gain", this%gain)
     if (this%gain .le. 0.0_rp) then
        call neko_error("(FST) gain must be > 0")
     end if
-    if (json%valid_path("u_infty")) then
-       call neko_error("(FST) 'u_infty' has been replaced by" // &
-            new_line('A') // "      'convection_velocity': " // &
-            "[Ucx, Ucy, Ucz]." // new_line('A') // &
-            "      For the previous behavior use [u_infty, 0, 0].")
-    end if
     block
       real(kind=rp), allocatable :: cv(:)
-      call json_get(json, "convection_velocity", cv)
+      call json_get_or_lookup(json, "convection_velocity", cv)
       if (size(cv) .ne. 3) then
          call neko_error("(FST) convection_velocity must have 3 elements")
       end if
       this%conv_vel = cv
       this%u_ref = norm2(this%conv_vel)
     end block
-    call json_get_or_default(json, "ramp_time", this%ramp_time, 0.0_rp)
+    call json_get_or_lookup_or_default(json, "ramp_time", this%ramp_time, &
+         0.0_rp)
     if (this%ramp_time .lt. 0.0_rp) then
        call neko_error("(FST) ramp_time must be >= 0")
     end if
 
-    !
-    ! Fringe: per direction, either absent (flat, lambda = 1) or a smooth
-    ! SIMSON fringe with all four parameters mandatory.
-    !
     do d = 1, 3
        if (json%valid_path("fringe." // dir_char(d))) then
           this%fringe_smooth(d) = .true.
-          call json_get(json, "fringe." // dir_char(d) // ".start", &
+          call json_get_or_lookup(json, "fringe." // dir_char(d) // &
+               ".start", &
                this%fringe_start(d))
-          call json_get(json, "fringe." // dir_char(d) // ".end", &
+          call json_get_or_lookup(json, "fringe." // dir_char(d) // &
+               ".end", &
                this%fringe_end(d))
-          call json_get(json, "fringe." // dir_char(d) // ".rise", &
+          call json_get_or_lookup(json, "fringe." // dir_char(d) // &
+               ".rise", &
                this%fringe_rise(d))
-          call json_get(json, "fringe." // dir_char(d) // ".fall", &
+          call json_get_or_lookup(json, "fringe." // dir_char(d) // &
+               ".fall", &
                this%fringe_fall(d))
 
           if (this%fringe_end(d) .le. this%fringe_start(d)) then
@@ -335,9 +261,6 @@ contains
        end if
     end if
 
-    !
-    ! Periodicity for wavenumber quantization
-    !
     periodic = .false.
     if (json%valid_path("periodic")) then
        call json_get(json, "periodic", periodic_json)
@@ -347,18 +270,16 @@ contains
        periodic = periodic_json
     end if
 
-    !
-    ! Spectrum
-    !
-    call json_get(json, "turbulence_intensity", ti)
-    call json_get(json, "integral_length_scale", il)
+    call json_get_or_lookup(json, "turbulence_intensity", ti)
+    call json_get_or_lookup(json, "integral_length_scale", il)
     call json_get(json, "spectrum", spectrum_subdict)
-    call json_get(spectrum_subdict, "n_shells", n_shells)
-    call json_get(spectrum_subdict, "modes_per_shell", modes_per_shell)
-    call json_get(spectrum_subdict, "k_min", k_min)
-    call json_get(spectrum_subdict, "k_max", k_max)
+    call json_get_or_lookup(spectrum_subdict, "n_shells", n_shells)
+    call json_get_or_lookup(spectrum_subdict, "modes_per_shell", &
+         modes_per_shell)
+    call json_get_or_lookup(spectrum_subdict, "k_min", k_min)
+    call json_get_or_lookup(spectrum_subdict, "k_max", k_max)
 
-    call json_get_or_default(json, "seed", seed, -143)
+    call json_get_or_lookup_or_default(json, "seed", seed, -143)
     call json_get_or_default(json, "write_files", write_files, .false.)
     call json_get_or_default(json, "files_output_path", path, "./fst_files")
 
@@ -373,7 +294,6 @@ contains
        call execute_command_line("mkdir -p " // trim(path))
     end if
 
-    ! Full domain lengths for the periodic quantization
     n = coef%dof%size()
     lx_dom = glmax(coef%dof%x%x, n) - glmin(coef%dof%x%x, n)
     ly_dom = glmax(coef%dof%y%x, n) - glmin(coef%dof%y%x, n)
@@ -383,14 +303,8 @@ contains
          ti, il, this%u_ref, periodic, seed, write_files, path)
     call this%spectrum%generate(lx_dom, ly_dom, lz_dom)
 
-    !
-    ! Pack the mode data into the flat, kernel-friendly layout
-    !
     call pack_modes(this)
 
-    !
-    ! Baseflow
-    !
     allocate(this%u_bf(this%zone%size))
     allocate(this%v_bf(this%zone%size))
     allocate(this%w_bf(this%zone%size))
@@ -404,13 +318,11 @@ contains
 
     select case (this%baseflow_method)
     case ("initial_condition")
-       ! Captured from the solution fields at the first compute call,
-       ! since the initial condition is applied after source-term init.
-
+       ! Captured at the first step, the initial condition is set after init
     case ("constant")
        block
          real(kind=rp), allocatable :: values(:)
-         call json_get(baseflow_subdict, "value", values)
+         call json_get_or_lookup(baseflow_subdict, "value", values)
          if (size(values) .ne. 3) then
             call neko_error("(FST) baseflow.value must have 3 elements")
          end if
@@ -428,11 +340,6 @@ contains
             "      Use initial_condition, constant or field.")
     end select
 
-    !
-    ! Device: map the mode data and the baseflow. The baseflow for the
-    ! "initial_condition" method is captured at the first compute call and
-    ! copied there; the device buffers are allocated here in all cases.
-    !
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call device_map(this%kx, this%kx_d, this%k_length)
        call device_map(this%ky, this%ky_d, this%k_length)
@@ -465,9 +372,6 @@ contains
        end if
     end if
 
-    !
-    ! Init-time diagnostics
-    !
     call diagnostics_init(this, coef)
 
     write(log_buf, '(A,A)') "Baseflow method: ", this%baseflow_method
@@ -481,7 +385,7 @@ contains
 
   end subroutine fst_init_from_json
 
-  !> Import the baseflow from an fld file and gather it onto the zone.
+  !> Read the base flow from an fld file and keep its zone values.
   subroutine baseflow_from_field(this, baseflow_subdict)
     class(fst_source_term_t), intent(inout) :: this
     type(json_file), intent(inout) :: baseflow_subdict
@@ -526,11 +430,7 @@ contains
 
   end subroutine baseflow_from_field
 
-  !> Packs the generated mode set into flat arrays used by both the CPU
-  !! and the device kernels: the wavenumber components and the
-  !! amplitude-weighted direction vectors a_j(m) = u_hat(m,j) *
-  !! shell_amp(shell(m)). Folding the shell amplitude in here removes the
-  !! shell indirection from the inner loop of every backend.
+  !> Copy the modes into flat arrays and fold the shell amplitude into a_j.
   subroutine pack_modes(this)
     class(fst_source_term_t), intent(inout) :: this
 
@@ -560,7 +460,7 @@ contains
 
   end subroutine pack_modes
 
-  !> Copies the zone baseflow to the device.
+  !> Copy the base flow to the device.
   subroutine fst_baseflow_to_device(this)
     class(fst_source_term_t), intent(inout) :: this
 
@@ -579,28 +479,16 @@ contains
 
     call this%spectrum%free()
 
-    if (c_associated(this%kx_d)) call device_free(this%kx_d)
-    if (c_associated(this%ky_d)) call device_free(this%ky_d)
-    if (c_associated(this%kz_d)) call device_free(this%kz_d)
-    if (c_associated(this%ax_d)) call device_free(this%ax_d)
-    if (c_associated(this%ay_d)) call device_free(this%ay_d)
-    if (c_associated(this%az_d)) call device_free(this%az_d)
-    if (c_associated(this%phase_d)) call device_free(this%phase_d)
-    if (c_associated(this%u_bf_d)) call device_free(this%u_bf_d)
-    if (c_associated(this%v_bf_d)) call device_free(this%v_bf_d)
-    if (c_associated(this%w_bf_d)) call device_free(this%w_bf_d)
-
-    if (allocated(this%kx)) deallocate(this%kx)
-    if (allocated(this%ky)) deallocate(this%ky)
-    if (allocated(this%kz)) deallocate(this%kz)
-    if (allocated(this%ax)) deallocate(this%ax)
-    if (allocated(this%ay)) deallocate(this%ay)
-    if (allocated(this%az)) deallocate(this%az)
-    if (allocated(this%mode_phase)) deallocate(this%mode_phase)
-
-    if (allocated(this%u_bf)) deallocate(this%u_bf)
-    if (allocated(this%v_bf)) deallocate(this%v_bf)
-    if (allocated(this%w_bf)) deallocate(this%w_bf)
+    call free_mapped(this%kx, this%kx_d)
+    call free_mapped(this%ky, this%ky_d)
+    call free_mapped(this%kz, this%kz_d)
+    call free_mapped(this%ax, this%ax_d)
+    call free_mapped(this%ay, this%ay_d)
+    call free_mapped(this%az, this%az_d)
+    call free_mapped(this%mode_phase, this%phase_d)
+    call free_mapped(this%u_bf, this%u_bf_d)
+    call free_mapped(this%v_bf, this%v_bf_d)
+    call free_mapped(this%w_bf, this%w_bf_d)
     if (allocated(this%baseflow_method)) deallocate(this%baseflow_method)
 
     nullify(this%zone)
@@ -609,6 +497,7 @@ contains
     nullify(this%v)
     nullify(this%w)
 
+    this%enabled = .false.
     this%fringe_smooth = .false.
     this%setup_done = .false.
     this%gain_dt_warned = .false.
@@ -618,8 +507,20 @@ contains
 
   end subroutine fst_free
 
-  !> Computes the FST forcing and adds it to the right-hand-side fields.
-  !! @param time The time state.
+  !> Unmap (on device) and deallocate a host array created with device_map.
+  subroutine free_mapped(x, x_d)
+    real(kind=rp), allocatable, intent(inout) :: x(:)
+    type(c_ptr), intent(inout) :: x_d
+
+    if (allocated(x)) then
+       if (NEKO_BCKND_DEVICE .eq. 1) call device_unmap(x, x_d)
+       deallocate(x)
+    end if
+
+  end subroutine free_mapped
+
+  !> Add the forcing to the right-hand side.
+  !! @param time Current time state.
   subroutine fst_compute(this, time)
     class(fst_source_term_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -628,12 +529,12 @@ contains
     real(kind=rp) :: ramp, coeff
     character(len=LOG_SIZE) :: log_buf
 
+    if (.not. this%enabled) return
+
     if (.not. this%setup_done) then
 
        if (this%baseflow_method .eq. "initial_condition") then
-          ! On device backends the host copies of u, v, w may be stale
-          ! after the initial condition was applied, so sync them before
-          ! gathering, then push the captured baseflow back to the device.
+          ! The host copy of the velocity is stale on device backends
           if (NEKO_BCKND_DEVICE .eq. 1) then
              call device_memcpy(this%u%x, this%u%x_d, this%u%size(), &
                   DEVICE_TO_HOST, sync = .false.)
@@ -655,10 +556,6 @@ contains
           end if
        end if
 
-       ! Explicit-treatment strength diagnostic (heuristic): the fringe
-       ! term is advanced explicitly, so gain*dt should stay O(1). The
-       ! value is reported here; the threshold itself is checked every
-       ! step below, since dt may vary during the run.
        write(log_buf, '(A,E13.5)') "[FST] gain * dt = ", this%gain*time%dt
        call neko_log%message(log_buf)
 
@@ -667,20 +564,16 @@ contains
        end if
 
        if (this%validate_only) then
-          call neko_error("(FST) validate_only requested: stopping" // &
-               new_line('A') // "      after spectrum generation, " // &
-               "diagnostics and field dump." // new_line('A') // &
-               "      Review the log above and the dumped '" // &
-               trim(this%dump_fname) // "' fld file," // &
-               new_line('A') // "      then set validate_only = false " // &
-               "to run.")
+          call neko_error("(FST) validate_only is set, stopping here." // &
+               new_line('A') // "      Check the log and the fields in '" // &
+               trim(this%dump_fname) // "'." // new_line('A') // &
+               "      Set validate_only to false to run.")
        end if
 
        this%setup_done = .true.
     end if
 
-    ! Stability watch, every step (covers variable time steps): warn once
-    ! the first time gain*dt exceeds the heuristic O(1) threshold.
+    ! Checked every step since dt can change
     if (.not. this%gain_dt_warned .and. &
          this%gain*time%dt .gt. 1.0_rp) then
        this%gain_dt_warned = .true.
@@ -733,12 +626,7 @@ contains
 
   end subroutine fst_compute
 
-
-
-
-
-
-  !> Linear time ramp: 0 at start_time, 1 at start_time + ramp_time.
+  !> Linear ramp from 0 at t_start to 1 at t_start + t_ramp.
   pure function time_ramp(t, t_start, t_ramp) result(ramp)
     real(kind=rp), intent(in) :: t, t_start, t_ramp
     real(kind=rp) :: ramp
@@ -753,7 +641,7 @@ contains
 
   end function time_ramp
 
-  !> Gather src at the masked points into dst (zone-local numbering).
+  !> dst(i) = src(mask(i)).
   subroutine gather_masked(dst, src, mask, n, n_mask)
     integer, intent(in) :: n, n_mask
     real(kind=rp), intent(out) :: dst(n_mask)
@@ -768,10 +656,8 @@ contains
 
   end subroutine gather_masked
 
-  !> Init-time diagnostics: grid resolution of the smallest FST wavelength
-  !! in the zone, fringe support vs. zone bounding box, spectrum energy vs.
-  !! target, and fringe strength. All thresholds are heuristic guidance and
-  !! produce warnings, not errors.
+  !> Log resolution, fringe strength and spectrum checks, and warn when a
+  !! value looks wrong. The thresholds are rules of thumb.
   subroutine diagnostics_init(this, coef)
     class(fst_source_term_t), intent(inout) :: this
     type(coef_t), intent(in) :: coef
@@ -787,15 +673,9 @@ contains
     call neko_log%message("--- FST validation diagnostics " // &
          "(thresholds are heuristic guidance) ---")
 
-    !
-    ! Grid resolution: the smallest FST wavelength 2*pi/k_max must be
-    ! representable everywhere in the zone, so the binding measure is the
-    ! COARSEST average GLL spacing of any element line in the zone
-    ! (spectral criterion: ~pi points per wavelength of the average
-    ! spacing; threshold 4 adds margin). Min/max adjacent gaps are
-    ! reported for context only -- GLL gaps within one element vary by a
-    ! factor ~3 at typical orders, so neither extreme is a valid basis.
-    !
+    ! The smallest wavelength has to be resolved where the grid is coarsest.
+    ! Spectral elements need about pi points per wavelength of the average
+    ! spacing, so the check uses the coarsest line average (4 for margin).
     call zone_gll_spacing(coef, this%mask, this%zone%size, h_min, h_max, &
          h_avg_max, gap_sum, gap_count)
     call MPI_Allreduce(MPI_IN_PLACE, h_min, 1, MPI_REAL_PRECISION, &
@@ -843,11 +723,8 @@ contains
             "Reduce spectrum.k_max or refine.")
     end if
 
-    !
-    ! Zone bounding box (at the initial mesh) vs. fringe support. The
-    ! fringe support [start, end] must be inside the zone, also at every
-    ! later time if the mesh deforms.
-    !
+    ! The fringe support should lie inside the zone, at t = 0 and, with a
+    ! deforming mesh, at all later times.
     bbox_min = huge(0.0_rp)
     bbox_max = -huge(0.0_rp)
     do idx = 1, this%zone%size
@@ -878,10 +755,7 @@ contains
              end if
           end if
 
-          ! Fringe strength: gain * residence time of the flow crossing
-          ! this fringe direction. The crossing speed is the convection
-          ! velocity component along d. Heuristic: >= 5 for the forcing
-          ! to imprint the target turbulence within one fringe passage.
+          ! gain times the time the flow spends crossing the fringe
           if (abs(this%conv_vel(d)) .gt. 0.0_rp) then
              g_nondim = this%gain &
                   * (this%fringe_end(d) - this%fringe_start(d)) &
@@ -907,10 +781,7 @@ contains
        end if
     end do
 
-    !
-    ! Realized turbulence intensity of the generated mode set vs. target
-    ! (diagnostics are valid on rank 0, where generation ran).
-    !
+    ! Spectrum energies are only known on rank 0, where they were generated
     if (pe_rank .eq. 0) then
        tu_target = this%spectrum%ti*this%u_ref
        tu_rel_err = abs(this%spectrum%tu_uinf_estimate - tu_target) &
@@ -919,9 +790,6 @@ contains
             "[FST] Tu*U target: ", tu_target, &
             " realized: ", this%spectrum%tu_uinf_estimate
        call neko_log%message(log_buf)
-       ! Isotropy of the generated mode set: with M modes the component
-       ! energies scatter by roughly 1/sqrt(M); a larger imbalance points
-       ! to too few modes or to periodic quantization at low shells.
        iso = 3.0_rp*this%spectrum%energy/sum(this%spectrum%energy)
        write(log_buf, '(A,3F7.3)') &
             "[FST] component energy ratio E_u:E_v:E_w (x3/sum): ", iso
@@ -949,23 +817,15 @@ contains
 
   end subroutine diagnostics_init
 
-  !> GLL spacing statistics over every element that contains at least one
-  !! zone point: minimum and maximum adjacent-node gap (context), and the
-  !! largest per-line AVERAGE spacing h_avg_max (the basis for the
-  !! spectral resolution criterion). Adjacent-node distances are Euclidean
-  !! in physical space, so deformed/stretched/curved elements are handled
-  !! correctly. The per-line average is (chord length of the GLL line) /
-  !! (points - 1); the maximum over all lines and directions is the
-  !! coarsest average spacing anywhere in the zone. Local (per-rank)
-  !! results; reduce with MPI_MIN / MPI_MAX outside.
+  !> GLL spacing over the elements touched by the zone: smallest and largest
+  !! gap, the sum and count of all gaps, and the largest line average.
+  !! Local values; reduce over ranks outside.
   subroutine zone_gll_spacing(coef, mask, n_mask, h_min, h_max, &
        h_avg_max, gap_sum, gap_count)
     type(coef_t), intent(in) :: coef
     integer, intent(in) :: n_mask
     integer, intent(in) :: mask(n_mask)
     real(kind=rp), intent(out) :: h_min, h_max, h_avg_max
-    !> Sum and count of all adjacent gaps (for the zone-wide mean
-    !! spacing; reduce both with MPI_SUM and divide outside).
     real(kind=rp), intent(out) :: gap_sum
     integer, intent(out) :: gap_count
 
@@ -1050,9 +910,7 @@ contains
 
   end subroutine zone_gll_spacing
 
-  !> Write the fringe field and a snapshot of the FST perturbation u'
-  !! (without gain and ramp) at the current time and coordinates to an fld
-  !! file for inspection, as fields 1-4: fringe, u', v', w'.
+  !> Write fringe, u', v', w' to an fld file as fields 1-4.
   subroutine dump_preview(this, time)
     class(fst_source_term_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -1079,8 +937,6 @@ contains
          this%fringe_smooth, this%fringe_start, this%fringe_end, &
          this%fringe_rise, this%fringe_fall)
 
-    ! The preview is built on the host; sync it so the sampler writes the
-    ! same data on device backends.
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call device_memcpy(f_lam%x, f_lam%x_d, f_lam%size(), &
             HOST_TO_DEVICE, sync = .false.)

@@ -30,9 +30,10 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-!> Implements the cpu kernels for the `fst_source_term_t` type.
+!> CPU kernels for `fst_source_term_t`.
 module fst_source_term_cpu
   use num_types, only : rp
+  use math, only : math_stepf
   implicit none
   private
 
@@ -41,15 +42,16 @@ module fst_source_term_cpu
 
 contains
 
-  !> Computes the FST fringe forcing on the cpu: adds
-  !! coeff * lambda(x) * (u_bf + u' - u) at the masked points.
-  !! Coordinates and velocities are read through explicit-shape dummies so
-  !! that the (lx, ly, lz, nelv) field arrays can be indexed linearly in a
-  !! standard-conforming way. Coordinates are the CURRENT ones (ALE-safe).
-  subroutine fst_source_term_compute_cpu(n, n_mask, mask, xc, yc, zc, u, v, w, &
-       fu, fv, fw, u_bf, v_bf, w_bf, k_length, kx, ky, kz, ax, ay, az, &
-       phase, shift, coeff, fringe_smooth, fringe_start, &
-       fringe_end, fringe_rise, fringe_fall)
+  !> f += coeff * lambda * (u_bf + u' - u) at the zone points.
+  !! @param n Number of local dofs.
+  !! @param mask Zone points (local linear indices).
+  !! @param xc, yc, zc Current coordinates.
+  !! @param shift Frozen-turbulence shift, U_c * t.
+  !! @param coeff gain * ramp(t).
+  subroutine fst_source_term_compute_cpu(n, n_mask, mask, xc, yc, zc, u, v, &
+       w, fu, fv, fw, u_bf, v_bf, w_bf, k_length, kx, ky, kz, ax, ay, az, &
+       phase, shift, coeff, fringe_smooth, fringe_start, fringe_end, &
+       fringe_rise, fringe_fall)
     integer, intent(in) :: n, n_mask, k_length
     integer, intent(in) :: mask(n_mask)
     real(kind=rp), intent(in) :: xc(n), yc(n), zc(n)
@@ -85,11 +87,7 @@ contains
 
   end subroutine fst_source_term_compute_cpu
 
-  !> Sum of all Fourier modes at a point:
-  !! u'_j = sum_m a_j(m) * sin(k(m).(x - U_c t) + phase(m))
-  !! with shift = U_c*t (frozen turbulence at the constant velocity
-  !! vector U_c, oblique/cross flow supported) and a_j the
-  !! amplitude-weighted direction vectors built by `pack_modes`.
+  !> u'_j = sum_m a_j(m) sin(k(m) . (x - shift) + phase(m)) at one point.
   pure subroutine fst_mode_sum(x, y, z, shift, k_length, kx, ky, kz, &
        ax, ay, az, phase, rv)
     real(kind=rp), intent(in) :: x, y, z, shift(3)
@@ -116,10 +114,8 @@ contains
 
   end subroutine fst_mode_sum
 
-  !> Product of the per-direction fringes at a point; flat directions
-  !! contribute 1. Public so the main module can evaluate it for
-  !! diagnostics.
-  pure function fst_fringe(x, y, z, smooth, fstart, fend, frise, ffall) &
+  !> Product of the smooth fringes at a point; flat directions give 1.
+  function fst_fringe(x, y, z, smooth, fstart, fend, frise, ffall) &
        result(lam)
     real(kind=rp), intent(in) :: x, y, z
     logical, intent(in) :: smooth(3)
@@ -142,39 +138,18 @@ contains
 
   end function fst_fringe
 
-  !> SIMSON fringe in one direction: 0 for x <= start, ramps to 1 over
-  !! rise, ramps back to 0 over fall, exactly 0 for x >= end
-  !! (compact support [start, end]).
-  pure function fringe_1d(x, xstart, xend, rise, fall) result(f)
+  !> Rises from 0 at start over `rise`, falls back to 0 at end over `fall`.
+  function fringe_1d(x, xstart, xend, rise, fall) result(f)
     real(kind=rp), intent(in) :: x, xstart, xend, rise, fall
     real(kind=rp) :: f
 
-    f = smooth_step((x - xstart)/rise) &
-         - smooth_step((x - xend)/fall + 1.0_rp)
+    f = math_stepf((x - xstart)/rise) - math_stepf((x - xend)/fall + 1.0_rp)
 
   end function fringe_1d
 
-  !> Smooth step: 0 for x <= 0, 1 for x >= 1,
-  !! 1/(1 + exp(1/(x-1) + 1/x)) in between (infinitely differentiable).
-  pure function smooth_step(x) result(y)
-    real(kind=rp), intent(in) :: x
-    real(kind=rp) :: y
-
-    if (x .le. 0.0_rp) then
-       y = 0.0_rp
-    else if (x .ge. 1.0_rp) then
-       y = 1.0_rp
-    else
-       y = 1.0_rp/(1.0_rp + exp(1.0_rp/(x - 1.0_rp) + 1.0_rp/x))
-    end if
-
-  end function smooth_step
-
-  !> Fills the preview fields on the cpu at the masked points: the fringe
-  !! lambda and the raw perturbation u' (no gain, ramp or velocity
-  !! difference), for the validation dump.
-  subroutine fst_source_term_preview_cpu(n, n_mask, mask, xc, yc, zc, lam_f, up, vp, wp, &
-       k_length, kx, ky, kz, ax, ay, az, phase, shift, &
+  !> Fringe and raw u' (no gain or ramp) at the zone points, for the dump.
+  subroutine fst_source_term_preview_cpu(n, n_mask, mask, xc, yc, zc, &
+       lam_f, up, vp, wp, k_length, kx, ky, kz, ax, ay, az, phase, shift, &
        fringe_smooth, fringe_start, fringe_end, fringe_rise, fringe_fall)
     integer, intent(in) :: n, n_mask, k_length
     integer, intent(in) :: mask(n_mask)

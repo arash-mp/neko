@@ -1282,6 +1282,8 @@ define both `coriolis` and `centrifugal` source terms in a consistent way.
     Note that in this case, we still solve for the absolute velocity, not the
     relative one. It is simply advection that is affected. Useful to perform
     simulations on domains that are moving on a periodic direction.
+12. `fst`, injects synthetic free-stream turbulence through a forcing in a
+    point zone. See the section below.
 
 #### Brinkman
 The Brinkman source term introduces regions of resistance in the fluid domain.
@@ -1704,6 +1706,133 @@ The parameters for the sponge source term are summarized in the table below:
 | `baseflow_registry_prefix` | Prefix of the base flow fields in `neko_registry`                       | String                            | `"sponge_bf"`     |
 | `dump_fields`              | If `true`, dumps the fringe and baseflow fields for visualization       | Boolean                           | `false`           |
 | `dump_file_name`           | Name of the `fld` file in which to dump the base flow and fringe fields | String ending with `fld`          | `spng_fields.fld` |
+
+
+#### Free-stream turbulence
+
+The `fst` source term injects synthetic free-stream turbulence through a
+forcing in a region of the domain. Inside a point zone the velocity is relaxed
+towards a base flow plus a turbulent field,
+
+\f$ \gamma \, r(t) \, \lambda(\mathbf{x}) \, ( \mathbf{u}^{bf} + \mathbf{u}' - \mathbf{u} ) \f$
+
+where \f$ \gamma \f$ is the `gain`, \f$ r(t) \f$ a linear ramp and
+\f$ \lambda(\mathbf{x}) \f$ a smooth fringe. The field \f$ \mathbf{u}' \f$ is a
+sum of divergence-free Fourier modes drawn from a von Kármán spectrum with the
+given turbulence intensity and integral length scale, and it is carried along
+with `convection_velocity` (frozen turbulence). The convection velocity can
+point in any direction, so cross flow, for example on a swept wing, is
+supported.
+
+The fringe is set per direction under `fringe`. A direction you leave out is
+flat, which is what you want for periodic directions. A direction you give
+needs all of `start`, `end`, `rise` and `fall`: the fringe is zero outside
+`[start, end]` and reaches one after `rise` and before `fall`. Make the point
+zone a bit larger than the fringe, since points outside the zone are never
+forced.
+
+The forcing is evaluated at the current mesh coordinates every time step, so it
+works with ALE. The zone is fixed to the mesh points when the case starts,
+though, so with a deforming mesh keep the zone larger than the fringe by more
+than the expected mesh displacement. With a moving mesh, use a `constant` base
+flow: `initial_condition` and `field` store the base flow on those same mesh
+points.
+
+The term is off unless `enabled` is `true`. With `validate_only` the run
+generates the turbulence, prints its checks (resolution, fringe strength,
+realized intensity and isotropy), writes the fringe and \f$ \mathbf{u}' \f$ to
+an `fld` file as fields 1 to 4, and stops. Use it before a long run.
+
+A complete entry. Remove what you do not need, see the table for what is
+required:
+
+```json
+{
+  "type": "fst",
+  "enabled": true,
+  "zone_name": "fst_zone",
+  "gain": 20.0,
+  "convection_velocity": [1.0, 0.0, 0.0],
+  "turbulence_intensity": 0.05,
+  "integral_length_scale": 0.5,
+  "spectrum": {
+    "n_shells": 20,
+    "modes_per_shell": 12,
+    "k_min": 1.5,
+    "k_max": 12.0
+  },
+  "baseflow": {
+    "method": "constant",
+    "value": [1.0, 0.0, 0.0]
+  },
+  "fringe": {
+    "x": { "start": -8.0, "end": -5.0, "rise": 1.0, "fall": 1.0 },
+    "y": { "start": -13.0, "end": 13.0, "rise": 2.0, "fall": 2.0 }
+  },
+  "periodic": [false, false, true],
+  "start_time": 0.0,
+  "end_time": 100.0,
+  "ramp_time": 2.0,
+  "seed": -143,
+  "validate_only": false,
+  "dump_fields": false,
+  "dump_file_name": "fst_fields",
+  "write_files": false,
+  "files_output_path": "./fst_files"
+}
+```
+
+The zone is a regular point zone, for example
+
+```json
+"point_zones": [
+  {
+    "name": "fst_zone",
+    "geometry": "box",
+    "x_bounds": [-8.5, -4.5],
+    "y_bounds": [-13.5, 13.5],
+    "z_bounds": [-0.1, 6.1]
+  }
+]
+```
+
+| Name                    | Description                                                             | Required        | Default         |
+| ----------------------- | ----------------------------------------------------------------------- | --------------- | --------------- |
+| `enabled`               | Turns the term on                                                       | No              | `false`         |
+| `zone_name`             | Point zone where the forcing is applied                                 | Yes             | -               |
+| `gain`                  | Relaxation rate \f$ \gamma \f$, in 1/time                               | Yes             | -               |
+| `convection_velocity`   | Velocity carrying the turbulence, also the reference for the intensity | Yes             | -               |
+| `turbulence_intensity`  | Target intensity as a fraction, 0.05 means 5%                           | Yes             | -               |
+| `integral_length_scale` | Integral length scale, in mesh units                                    | Yes             | -               |
+| `spectrum.n_shells`     | Number of wavenumber shells, at least 2                                 | Yes             | -               |
+| `spectrum.modes_per_shell` | Modes per shell, 3 to 1000                                           | Yes             | -               |
+| `spectrum.k_min`, `k_max` | Wavenumber range                                                      | Yes             | -               |
+| `baseflow.method`       | `initial_condition`, `constant` or `field`                              | Yes             | -               |
+| `baseflow.value`        | Base flow for `constant`                                                | With `constant` | -               |
+| `baseflow.file_name`    | File for `field`; `mesh_file_name`, `interpolate` and `interpolation` work as for the sponge | With `field` | - |
+| `fringe.x`, `.y`, `.z`  | Smooth fringe with `start`, `end`, `rise`, `fall`                       | No              | flat            |
+| `periodic`              | Periodic directions; their wavenumbers fit the domain length            | No              | all `false`     |
+| `start_time`, `end_time` | When the term is active                                                | No              | whole run       |
+| `ramp_time`             | Linear ramp after `start_time`                                          | No              | `0.0`           |
+| `seed`                  | Random seed                                                             | No              | `-143`          |
+| `validate_only`         | Print the checks, dump the fields and stop                              | No              | `false`         |
+| `dump_fields`           | Dump the fields at the first step and continue                          | No              | `false`         |
+| `dump_file_name`        | Name of the dump file                                                   | No              | `"fst_fields"`  |
+| `write_files`           | Write the generated spectrum to text files                              | No              | `false`         |
+| `files_output_path`     | Folder for those files                                                  | No              | `"./fst_files"` |
+
+Real values have to be written with a decimal point, for example `20.0` and not
+`20`.
+
+Some rules of thumb, which the checks also report:
+- `gain` times the time the flow needs to cross the fringe should be at least 5,
+  and `gain` should exceed `k_max` times the convection speed.
+- `gain` times the time step should stay well below 1.
+- A fringe one to two integral length scales long is a good start.
+- In a periodic direction of length \f$ L \f$, `k_min` must be larger than
+  \f$ 2\pi / L \f$.
+- The smallest wavelength, \f$ 2\pi / \f$ `k_max`, needs about 4 points per
+  wavelength of the mean grid spacing inside the zone.
 
 
 ### Arbitrary Lagrangian-Eulerian Framework {#case-file_fluid-ale}

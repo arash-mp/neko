@@ -30,7 +30,7 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-!> Device backend for the FST fringe forcing (`fst_source_term_t`).
+!> Device backend for `fst_source_term_t`.
 module fst_source_term_device
   use num_types, only : rp, c_rp
   use utils, only : neko_error
@@ -88,14 +88,8 @@ module fst_source_term_device
 
 contains
 
-  !> Computes the FST fringe forcing on the device: adds
-  !! coeff * lambda(x) * (u_bf + u' - u) at the masked points.
-  !! All array arguments are device pointers. Coordinates are the current
-  !! ones, so the kernel is ALE-safe.
-  !! @param n_mask Number of points in the zone (local).
-  !! @param shift The frozen-turbulence shift U_c * t.
-  !! @param coeff gain * ramp(t).
-  !! @param fringe_smooth 1 for a smooth fringe in that direction, 0 flat.
+  !> f += coeff * lambda * (u_bf + u' - u) at the zone points, on device.
+  !! Arguments as in `fst_source_term_compute_cpu`, as device pointers.
   subroutine fst_source_term_compute_device(n_mask, mask_d, xc_d, yc_d, zc_d, &
        u_d, v_d, w_d, fu_d, fv_d, fw_d, u_bf_d, v_bf_d, w_bf_d, &
        k_length, kx_d, ky_d, kz_d, ax_d, ay_d, az_d, phase_d, &
