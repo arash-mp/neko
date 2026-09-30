@@ -68,6 +68,7 @@ contains
     integer :: idx, i
     real(kind=rp) :: lam, c, rv(3)
 
+    !$omp parallel do private(i, lam, c, rv)
     do idx = 1, n_mask
        i = mask(idx)
 
@@ -83,6 +84,7 @@ contains
        fv(i) = fv(i) + c*(v_bf(idx) + rv(2) - v(i))
        fw(i) = fw(i) + c*(w_bf(idx) + rv(3) - w(i))
     end do
+    !$omp end parallel do
 
   end subroutine fst_source_term_compute_cpu
 
@@ -97,19 +99,26 @@ contains
     real(kind=rp), intent(out) :: rv(3)
 
     integer :: m
-    real(kind=rp) :: xs, ys, zs, sn
+    real(kind=rp) :: xs, ys, zs, sn, rx, ry, rz
 
     xs = x - shift(1)
     ys = y - shift(2)
     zs = z - shift(3)
 
-    rv = 0.0_rp
+    rx = 0.0_rp
+    ry = 0.0_rp
+    rz = 0.0_rp
+    !$omp simd private(sn) reduction(+:rx, ry, rz)
     do m = 1, k_length
        sn = sin(kx(m)*xs + ky(m)*ys + kz(m)*zs + phase(m))
-       rv(1) = rv(1) + ax(m)*sn
-       rv(2) = rv(2) + ay(m)*sn
-       rv(3) = rv(3) + az(m)*sn
+       rx = rx + ax(m)*sn
+       ry = ry + ay(m)*sn
+       rz = rz + az(m)*sn
     end do
+
+    rv(1) = rx
+    rv(2) = ry
+    rv(3) = rz
 
   end subroutine fst_mode_sum
 
