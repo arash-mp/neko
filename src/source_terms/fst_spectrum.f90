@@ -54,6 +54,9 @@
 !!    only works by compiler accident.
 !!  - The RNG state lives in `fst_rng_t` instead of SAVE variables, so the
 !!    generator is reentrant across multiple source-term instances.
+!!  - Periodic quantization uses nearest rounding instead of floor (see
+!!    make_periodic_1d). This changes results relative to the plugin for
+!!    periodic configurations only.
 !!  - Dead code removed: the wire.dat output and its link bookkeeping (asl),
 !!    the unreachable non-"new" lattice branch in the sphere routine,
 !!    gen_bounded_k, and vlamax (whose max accumulator was initialized to
@@ -887,7 +890,13 @@ contains
 
   !> Quantize the wavenumbers kp to multiples of 2*pi/lp, adjusting k1 or
   !! k2 (chosen by coin toss) to preserve the shell radius k_total.
-  !! Port of make_periodic_1D (04_spec.f90).
+  !! Port of make_periodic_1D (04_spec.f90) with one deliberate change:
+  !! the multiple is chosen by nearest rounding (nint) instead of floor.
+  !! Floor rounds every quantized component toward zero, so the free
+  !! component that restores the shell radius is systematically inflated;
+  !! since u_hat is perpendicular to k, that direction is then starved of
+  !! energy (measured: 5-15% component-energy bias for one periodic
+  !! direction). Nearest rounding removes the bias.
   subroutine make_periodic_1d(k1, k2, kp, np, k_total, lp, rng, idum)
     real(kind=rp), intent(inout) :: k1(:), k2(:), kp(:)
     integer, intent(in) :: np
@@ -913,7 +922,7 @@ contains
 
     do j = 1, np
 
-       n_j = floor(abs(kp(j))/twopi_over_l)
+       n_j = nint(abs(kp(j))/twopi_over_l)
        n_j_signed = int(sign(1.0_rp, kp(j)))*n_j
 
        if (n_j .gt. nmax) then
@@ -958,7 +967,13 @@ contains
 
   !> Quantize kp1 and kp2 to multiples of 2*pi/l1 and 2*pi/l2 respectively,
   !! recomputing k1 to preserve the shell radius.
-  !! Port of make_periodic_2D (04_spec.f90). Two quirks of the original are
+  !! Port of make_periodic_2D (04_spec.f90), using nearest rounding (nint)
+  !! instead of floor for the multiples (see make_periodic_1d for why).
+  !! With two quantized directions a residual anisotropy remains at the
+  !! lowest shells, because both components are forced to be nonzero and
+  !! the shell then cannot point along the free direction; this is
+  !! inherent to the quantization, not to the rounding.
+  !! Two quirks of the original are
   !! preserved for parity and flagged here: (1) the fit check for direction
   !! 1 is overwritten by that of direction 2, so the per-mode clamp uses the
   !! direction-2 nmax for both directions (only relevant when l1 /= l2);
@@ -999,7 +1014,7 @@ contains
     do j = 1, np
 
        ! Discrete wavenumber in direction 1
-       n_j1 = floor(abs(kp1(j))/twopi_over_l1)
+       n_j1 = nint(abs(kp1(j))/twopi_over_l1)
        n_j1_signed = int(sign(1.0_rp, kp1(j)))*n_j1
 
        if (n_j1 .gt. nmax) then
@@ -1011,7 +1026,7 @@ contains
        kp1(j) = real(n_j1_signed, kind=rp)*twopi_over_l1
 
        ! Discrete wavenumber in direction 2
-       n_j2 = floor(abs(kp2(j))/twopi_over_l2)
+       n_j2 = nint(abs(kp2(j))/twopi_over_l2)
        n_j2_signed = int(sign(1.0_rp, kp2(j)))*n_j2
 
        if (n_j2 .gt. nmax) then

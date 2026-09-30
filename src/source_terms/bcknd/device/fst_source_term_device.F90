@@ -38,7 +38,7 @@ module fst_source_term_device
   implicit none
   private
 
-  public :: device_fst_apply
+  public :: fst_source_term_compute_device
 
 #ifdef HAVE_HIP
   interface
@@ -88,14 +88,15 @@ module fst_source_term_device
 
 contains
 
-  !> Adds the FST fringe forcing to the right-hand-side fields on device.
+  !> Computes the FST fringe forcing on the device: adds
+  !! coeff * lambda(x) * (u_bf + u' - u) at the masked points.
   !! All array arguments are device pointers. Coordinates are the current
   !! ones, so the kernel is ALE-safe.
   !! @param n_mask Number of points in the zone (local).
   !! @param shift The frozen-turbulence shift U_c * t.
   !! @param coeff gain * ramp(t).
   !! @param fringe_smooth 1 for a smooth fringe in that direction, 0 flat.
-  subroutine device_fst_apply(n_mask, mask_d, xc_d, yc_d, zc_d, &
+  subroutine fst_source_term_compute_device(n_mask, mask_d, xc_d, yc_d, zc_d, &
        u_d, v_d, w_d, fu_d, fv_d, fw_d, u_bf_d, v_bf_d, w_bf_d, &
        k_length, kx_d, ky_d, kz_d, ax_d, ay_d, az_d, phase_d, &
        shift, coeff, fringe_smooth, fringe_start, fringe_end, &
@@ -128,6 +129,6 @@ contains
     call neko_error('No device backend configured')
 #endif
 
-  end subroutine device_fst_apply
+  end subroutine fst_source_term_compute_device
 
 end module fst_source_term_device

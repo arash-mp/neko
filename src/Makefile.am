@@ -439,6 +439,7 @@ neko_fortran_SOURCES = \
 	source_terms/bcknd/device/sponge_source_term_device.f90\
 	source_terms/fst_spectrum.f90\
 	source_terms/fst_source_term.f90\
+	source_terms/bcknd/cpu/fst_source_term_cpu.f90\
 	source_terms/bcknd/device/fst_source_term_device.F90\
 	source_terms/brinkman_source_term.f90\
 	filter/mappings.f90\

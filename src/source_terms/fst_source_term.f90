@@ -53,6 +53,10 @@
 !! captured target velocity to material points; under mesh deformation use
 !! "constant" unless this is the intended behavior.
 !!
+!! The compute kernels live in `fst_source_term_cpu` and
+!! `fst_source_term_device`; this module holds the type, the JSON setup,
+!! the diagnostics and the backend dispatch.
+!!
 !! JSON parameters (under case.fluid.source_terms, "type": "fst"):
 !!   zone_name (string, mandatory)        Point zone of the forcing region.
 !!   gain (real, mandatory)               Fringe gain [1/time].
@@ -116,7 +120,9 @@ module fst_source_term
   use neko_config, only : NEKO_BCKND_DEVICE
   use device, only : device_map, device_memcpy, device_free, &
        HOST_TO_DEVICE, DEVICE_TO_HOST
-  use fst_source_term_device, only : device_fst_apply
+  use fst_source_term_cpu, only : fst_source_term_compute_cpu, &
+       fst_source_term_preview_cpu
+  use fst_source_term_device, only : fst_source_term_compute_device
   use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR, c_associated
   use math, only : glmax, glmin, pi
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION, pe_rank
@@ -702,7 +708,8 @@ contains
     if (this%zone%size .eq. 0) return
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_fst_apply(this%zone%size, this%zone%mask%get_d(), &
+       call fst_source_term_compute_device(this%zone%size, &
+            this%zone%mask%get_d(), &
             this%coef%dof%x%x_d, this%coef%dof%y%x_d, this%coef%dof%z%x_d, &
             this%u%x_d, this%v%x_d, this%w%x_d, fu%x_d, fv%x_d, fw%x_d, &
             this%u_bf_d, this%v_bf_d, this%w_bf_d, &
@@ -712,7 +719,8 @@ contains
             merge(1, 0, this%fringe_smooth), this%fringe_start, &
             this%fringe_end, this%fringe_rise, this%fringe_fall)
     else
-       call fst_apply_cpu(this%u%dof%size(), this%zone%size, this%mask, &
+       call fst_source_term_compute_cpu(this%u%dof%size(), this%zone%size, &
+            this%mask, &
             this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
             this%u%x, this%v%x, this%w%x, fu%x, fv%x, fw%x, &
             this%u_bf, this%v_bf, this%w_bf, &
@@ -725,131 +733,10 @@ contains
 
   end subroutine fst_compute
 
-  !> CPU kernel: adds the fringe forcing at the masked points.
-  !! Coordinates and velocities are read through explicit-shape dummies so
-  !! that the (lx, ly, lz, nelv) field arrays can be indexed linearly in a
-  !! standard-conforming way. Coordinates are the CURRENT ones (ALE-safe).
-  subroutine fst_apply_cpu(n, n_mask, mask, xc, yc, zc, u, v, w, &
-       fu, fv, fw, u_bf, v_bf, w_bf, k_length, kx, ky, kz, ax, ay, az, &
-       phase, shift, coeff, fringe_smooth, fringe_start, &
-       fringe_end, fringe_rise, fringe_fall)
-    integer, intent(in) :: n, n_mask, k_length
-    integer, intent(in) :: mask(n_mask)
-    real(kind=rp), intent(in) :: xc(n), yc(n), zc(n)
-    real(kind=rp), intent(in) :: u(n), v(n), w(n)
-    real(kind=rp), intent(inout) :: fu(n), fv(n), fw(n)
-    real(kind=rp), intent(in) :: u_bf(n_mask), v_bf(n_mask), w_bf(n_mask)
-    real(kind=rp), intent(in) :: kx(k_length), ky(k_length), kz(k_length)
-    real(kind=rp), intent(in) :: ax(k_length), ay(k_length), az(k_length)
-    real(kind=rp), intent(in) :: phase(k_length)
-    real(kind=rp), intent(in) :: shift(3), coeff
-    logical, intent(in) :: fringe_smooth(3)
-    real(kind=rp), intent(in) :: fringe_start(3), fringe_end(3), &
-         fringe_rise(3), fringe_fall(3)
 
-    integer :: idx, i
-    real(kind=rp) :: lam, c, rv(3)
 
-    do idx = 1, n_mask
-       i = mask(idx)
 
-       lam = fringe3(xc(i), yc(i), zc(i), fringe_smooth, fringe_start, &
-            fringe_end, fringe_rise, fringe_fall)
-       if (lam .le. 0.0_rp) cycle
 
-       call fst_mode_sum(xc(i), yc(i), zc(i), shift, k_length, kx, ky, kz, &
-            ax, ay, az, phase, rv)
-
-       c = coeff*lam
-       fu(i) = fu(i) + c*(u_bf(idx) + rv(1) - u(i))
-       fv(i) = fv(i) + c*(v_bf(idx) + rv(2) - v(i))
-       fw(i) = fw(i) + c*(w_bf(idx) + rv(3) - w(i))
-    end do
-
-  end subroutine fst_apply_cpu
-
-  !> Sum of all Fourier modes at a point:
-  !! u'_j = sum_m a_j(m) * sin(k(m).(x - U_c t) + phase(m))
-  !! with shift = U_c*t (frozen turbulence at the constant velocity
-  !! vector U_c, oblique/cross flow supported) and a_j the
-  !! amplitude-weighted direction vectors built by `pack_modes`.
-  pure subroutine fst_mode_sum(x, y, z, shift, k_length, kx, ky, kz, &
-       ax, ay, az, phase, rv)
-    real(kind=rp), intent(in) :: x, y, z, shift(3)
-    integer, intent(in) :: k_length
-    real(kind=rp), intent(in) :: kx(k_length), ky(k_length), kz(k_length)
-    real(kind=rp), intent(in) :: ax(k_length), ay(k_length), az(k_length)
-    real(kind=rp), intent(in) :: phase(k_length)
-    real(kind=rp), intent(out) :: rv(3)
-
-    integer :: m
-    real(kind=rp) :: xs, ys, zs, sn
-
-    xs = x - shift(1)
-    ys = y - shift(2)
-    zs = z - shift(3)
-
-    rv = 0.0_rp
-    do m = 1, k_length
-       sn = sin(kx(m)*xs + ky(m)*ys + kz(m)*zs + phase(m))
-       rv(1) = rv(1) + ax(m)*sn
-       rv(2) = rv(2) + ay(m)*sn
-       rv(3) = rv(3) + az(m)*sn
-    end do
-
-  end subroutine fst_mode_sum
-
-  !> Product of the per-direction fringes; flat directions contribute 1.
-  pure function fringe3(x, y, z, smooth, fstart, fend, frise, ffall) &
-       result(lam)
-    real(kind=rp), intent(in) :: x, y, z
-    logical, intent(in) :: smooth(3)
-    real(kind=rp), intent(in) :: fstart(3), fend(3), frise(3), ffall(3)
-    real(kind=rp) :: lam
-
-    real(kind=rp) :: c(3)
-    integer :: d
-
-    c(1) = x
-    c(2) = y
-    c(3) = z
-
-    lam = 1.0_rp
-    do d = 1, 3
-       if (smooth(d)) then
-          lam = lam*fringe_1d(c(d), fstart(d), fend(d), frise(d), ffall(d))
-       end if
-    end do
-
-  end function fringe3
-
-  !> SIMSON fringe in one direction: 0 for x <= start, ramps to 1 over
-  !! rise, ramps back to 0 over fall, exactly 0 for x >= end
-  !! (compact support [start, end]).
-  pure function fringe_1d(x, xstart, xend, rise, fall) result(f)
-    real(kind=rp), intent(in) :: x, xstart, xend, rise, fall
-    real(kind=rp) :: f
-
-    f = smooth_step((x - xstart)/rise) &
-         - smooth_step((x - xend)/fall + 1.0_rp)
-
-  end function fringe_1d
-
-  !> Smooth step: 0 for x <= 0, 1 for x >= 1,
-  !! 1/(1 + exp(1/(x-1) + 1/x)) in between (infinitely differentiable).
-  pure function smooth_step(x) result(y)
-    real(kind=rp), intent(in) :: x
-    real(kind=rp) :: y
-
-    if (x .le. 0.0_rp) then
-       y = 0.0_rp
-    else if (x .ge. 1.0_rp) then
-       y = 1.0_rp
-    else
-       y = 1.0_rp/(1.0_rp + exp(1.0_rp/(x - 1.0_rp) + 1.0_rp/x))
-    end if
-
-  end function smooth_step
 
   !> Linear time ramp: 0 at start_time, 1 at start_time + ramp_time.
   pure function time_ramp(t, t_start, t_ramp) result(ramp)
@@ -894,7 +781,7 @@ contains
     real(kind=rp) :: h_min, h_max, h_avg_max, h_avg, gap_sum
     real(kind=rp) :: lambda_min, ppw, bbox_min(3), bbox_max(3)
     integer :: gap_count
-    real(kind=rp) :: tu_target, tu_rel_err, g_nondim
+    real(kind=rp) :: tu_target, tu_rel_err, g_nondim, iso(3)
     integer :: idx, i, d, ierr
 
     call neko_log%message("--- FST validation diagnostics " // &
@@ -1032,6 +919,21 @@ contains
             "[FST] Tu*U target: ", tu_target, &
             " realized: ", this%spectrum%tu_uinf_estimate
        call neko_log%message(log_buf)
+       ! Isotropy of the generated mode set: with M modes the component
+       ! energies scatter by roughly 1/sqrt(M); a larger imbalance points
+       ! to too few modes or to periodic quantization at low shells.
+       iso = 3.0_rp*this%spectrum%energy/sum(this%spectrum%energy)
+       write(log_buf, '(A,3F7.3)') &
+            "[FST] component energy ratio E_u:E_v:E_w (x3/sum): ", iso
+       call neko_log%message(log_buf)
+       if (maxval(abs(iso - 1.0_rp)) .gt. 0.2_rp) then
+          call neko_warning("(FST) Component energies deviate more " // &
+               "than 20% from isotropy." // new_line('A') // &
+               "      Increase spectrum.modes_per_shell / n_shells, or " // &
+               "raise k_min relative" // new_line('A') // &
+               "      to 2*pi/L in periodic directions.")
+       end if
+
        if (tu_rel_err .gt. 0.1_rp) then
           call neko_warning("(FST) Realized Tu deviates more than 10%" // &
                new_line('A') // "      from the target: increase " // &
@@ -1150,8 +1052,7 @@ contains
 
   !> Write the fringe field and a snapshot of the FST perturbation u'
   !! (without gain and ramp) at the current time and coordinates to an fld
-  !! file for inspection. The fringe is stored in the pressure slot; u' in
-  !! the velocity slots.
+  !! file for inspection, as fields 1-4: fringe, u', v', w'.
   subroutine dump_preview(this, time)
     class(fst_source_term_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -1160,16 +1061,16 @@ contains
     type(field_t), pointer :: f_lam, f_up, f_vp, f_wp
     integer :: i1, i2, i3, i4
 
-    call neko_log%message("[FST] Writing fringe (pressure slot) and " // &
-         "u' snapshot (velocity slots) to '" // trim(this%dump_fname) // &
-         "'")
+    call neko_log%message("[FST] Writing preview fields 1-4 " // &
+         "(fringe, u', v', w') to '" // trim(this%dump_fname) // "'")
 
     call neko_scratch_registry%request_field(f_lam, i1, .true.)
     call neko_scratch_registry%request_field(f_up, i2, .true.)
     call neko_scratch_registry%request_field(f_vp, i3, .true.)
     call neko_scratch_registry%request_field(f_wp, i4, .true.)
 
-    call fill_preview(this%u%dof%size(), this%zone%size, this%mask, &
+    call fst_source_term_preview_cpu(this%u%dof%size(), this%zone%size, &
+         this%mask, &
          this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
          f_lam%x, f_up%x, f_vp%x, f_wp%x, &
          this%k_length, this%kx, this%ky, this%kz, &
@@ -1204,40 +1105,5 @@ contains
     call neko_scratch_registry%relinquish_field(i4)
 
   end subroutine dump_preview
-
-  !> Fill the preview fields at the masked points: lam = fringe, and the
-  !! raw perturbation u' (no gain, no ramp, no velocity difference).
-  subroutine fill_preview(n, n_mask, mask, xc, yc, zc, lam_f, up, vp, wp, &
-       k_length, kx, ky, kz, ax, ay, az, phase, shift, &
-       fringe_smooth, fringe_start, fringe_end, fringe_rise, fringe_fall)
-    integer, intent(in) :: n, n_mask, k_length
-    integer, intent(in) :: mask(n_mask)
-    real(kind=rp), intent(in) :: xc(n), yc(n), zc(n)
-    real(kind=rp), intent(inout) :: lam_f(n), up(n), vp(n), wp(n)
-    real(kind=rp), intent(in) :: kx(k_length), ky(k_length), kz(k_length)
-    real(kind=rp), intent(in) :: ax(k_length), ay(k_length), az(k_length)
-    real(kind=rp), intent(in) :: phase(k_length)
-    real(kind=rp), intent(in) :: shift(3)
-    logical, intent(in) :: fringe_smooth(3)
-    real(kind=rp), intent(in) :: fringe_start(3), fringe_end(3), &
-         fringe_rise(3), fringe_fall(3)
-
-    integer :: idx, i
-    real(kind=rp) :: rv(3)
-
-    do idx = 1, n_mask
-       i = mask(idx)
-
-       lam_f(i) = fringe3(xc(i), yc(i), zc(i), fringe_smooth, &
-            fringe_start, fringe_end, fringe_rise, fringe_fall)
-
-       call fst_mode_sum(xc(i), yc(i), zc(i), shift, k_length, kx, ky, kz, &
-            ax, ay, az, phase, rv)
-       up(i) = rv(1)
-       vp(i) = rv(2)
-       wp(i) = rv(3)
-    end do
-
-  end subroutine fill_preview
 
 end module fst_source_term
