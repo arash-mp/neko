@@ -40,7 +40,8 @@
 !!  - all sizes and parameters are runtime inputs,
 !!  - the seed is honoured (the plugin always used -143),
 !!  - periodic wavenumbers are rounded to the nearest multiple instead of
-!!    down, which removes a 5-15% energy bias between components,
+!!    down, which removes a 5-15% energy bias between components, and
+!!    are never reduced to zero,
 !!  - unused plugin code is dropped.
 module fst_spectrum
   use num_types, only : rp
@@ -916,9 +917,9 @@ contains
 
   end subroutine make_periodic_1d
 
-  !> Snap kp1 and kp2 to multiples of 2*pi/l1 and 2*pi/l2 and set k1 from
-  !! the shell radius. The lowest shells stay slightly anisotropic since
-  !! both quantized components must be nonzero.
+  !> Snap kp1 and kp2 to nonzero multiples of 2*pi/l1 and 2*pi/l2 and set
+  !! k1 from the shell radius. The lowest shells stay slightly anisotropic
+  !! since both quantized components must be nonzero.
   subroutine make_periodic_2d(k1, kp1, kp2, np, k_total, l1, l2)
     real(kind=rp), intent(inout) :: k1(:), kp1(:), kp2(:)
     integer, intent(in) :: np
@@ -978,13 +979,23 @@ contains
        rtmp = k_total_sq - kp1(j)**2 - kp2(j)**2
        valid_config = (rtmp .gt. 1.0_rp)
 
+       ! Step the larger component down until the pair fits the shell,
+       ! but never to zero
        do while (.not. valid_config)
-          if (kp1(j) .gt. kp2(j)) then
+          if (abs(n_j1_signed) .gt. 1 .and. (abs(kp1(j)) .ge. abs(kp2(j)) &
+               .or. abs(n_j2_signed) .eq. 1)) then
              n_j1_signed = n_j1_signed - int(sign(1.0_rp, kp1(j)))
              kp1(j) = real(n_j1_signed, kind=rp)*twopi_over_l1
-          else
+          else if (abs(n_j2_signed) .gt. 1) then
              n_j2_signed = n_j2_signed - int(sign(1.0_rp, kp2(j)))
              kp2(j) = real(n_j2_signed, kind=rp)*twopi_over_l2
+          else if (rtmp .gt. 0.0_rp) then
+             exit
+          else
+             call neko_error("(FST) k_min is too small for two periodic " // &
+                  "directions." // new_line('A') // &
+                  "      It must satisfy k_min**2 > (2*pi/L1)**2 + " // &
+                  "(2*pi/L2)**2.")
           end if
 
           rtmp = k_total_sq - kp1(j)**2 - kp2(j)**2

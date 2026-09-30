@@ -1,0 +1,214 @@
+module test_fst_spectrum
+  use mpi
+  use pfunit
+  use num_types, only : rp
+  use math, only : pi
+  use fst_spectrum, only : fst_spectrum_t
+  use logger, only : neko_log
+  use comm, only : NEKO_COMM, pe_rank, pe_size
+  use pfunit_comm_utils, only : comm_init_test, comm_free_test
+  use device, only : device_init, device_finalize
+  use neko_config, only : NEKO_BCKND_DEVICE
+  implicit none
+
+  @TestCase
+  type, extends(MPITestCase) :: test_fst
+   contains
+     procedure :: setUp
+     procedure :: tearDown
+  end type test_fst
+
+  !> Domain lengths used in all tests.
+  real(kind=rp), parameter :: lx = 10.0_rp, ly = 2.0_rp, lz = 1.5_rp
+
+contains
+
+  subroutine setUp(this)
+    class(test_fst), intent(inout) :: this
+    call comm_init_test(this%getMpiCommunicator())
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_init
+    end if
+    call neko_log%init()
+  end subroutine setUp
+
+  subroutine tearDown(this)
+    class(test_fst), intent(inout) :: this
+    if (NEKO_BCKND_DEVICE .eq. 1) then
+       call device_finalize
+    end if
+    call comm_free_test()
+  end subroutine tearDown
+
+  !> Generate a mode set with fixed spectral parameters.
+  subroutine make_spectrum(spec, periodic, seed)
+    type(fst_spectrum_t), intent(inout) :: spec
+    logical, intent(in) :: periodic(3)
+    integer, intent(in) :: seed
+
+    call spec%init(12, 20, 8.0_rp, 60.0_rp, 0.05_rp, 0.1_rp, 1.3_rp, &
+         periodic, seed, .false., ".")
+    call spec%generate(lx, ly, lz)
+  end subroutine make_spectrum
+
+  !> Tolerance that holds in both single and double precision builds.
+  pure function tol() result(t)
+    real(kind=rp) :: t
+    t = 1000.0_rp*epsilon(1.0_rp)
+  end function tol
+
+  !> Every mode is divergence free, k . u_hat = 0, with |u_hat| = 1.
+  subroutine check_directions(spec)
+    type(fst_spectrum_t), intent(in) :: spec
+    real(kind=rp) :: knorm, kdotu
+    integer :: m
+
+    do m = 1, spec%k_length
+       knorm = norm2(spec%k_num(m, :))
+       kdotu = dot_product(spec%k_num(m, :), spec%u_hat(m, :))
+       @assertLessThan(abs(kdotu)/knorm, tol())
+       @assertEqual(1.0_rp, norm2(spec%u_hat(m, :)), tol())
+    end do
+  end subroutine check_directions
+
+  !> Every mode lies on the radius of its shell.
+  subroutine check_shell_radii(spec)
+    type(fst_spectrum_t), intent(in) :: spec
+    real(kind=rp) :: kshell
+    integer :: m
+
+    do m = 1, spec%k_length
+       kshell = spec%k_start + (spec%shell(m) - 1) &
+            * (spec%k_end - spec%k_start)/real(spec%n_shells - 1, kind=rp)
+       @assertEqual(1.0_rp, norm2(spec%k_num(m, :))/kshell, tol())
+    end do
+  end subroutine check_shell_radii
+
+  !> Component d of every mode is a nonzero multiple of 2*pi/l.
+  subroutine check_quantized(spec, d, l)
+    type(fst_spectrum_t), intent(in) :: spec
+    integer, intent(in) :: d
+    real(kind=rp), intent(in) :: l
+    real(kind=rp) :: n
+    integer :: m
+
+    do m = 1, spec%k_length
+       n = spec%k_num(m, d)/(2.0_rp*pi/l)
+       @assertEqual(real(nint(n), kind=rp), n, tol()*abs(n))
+       @assertTrue(nint(n) .ne. 0)
+    end do
+  end subroutine check_quantized
+
+  !> The modes carry the target energy: sum |a|^2/2 = 3 (Ti U)^2, which
+  !! gives tke = 3/2 (Ti U)^2.
+  subroutine check_energy(spec)
+    type(fst_spectrum_t), intent(in) :: spec
+    real(kind=rp) :: e
+    integer :: m
+
+    e = 0.0_rp
+    do m = 1, spec%k_length
+       e = e + spec%shell_amp(spec%shell(m))**2/2.0_rp
+    end do
+    @assertEqual(1.0_rp, e/(3.0_rp*(spec%ti*spec%u_ref)**2), tol())
+  end subroutine check_energy
+
+  @test(npes=[1])
+  subroutine test_no_periodic(this)
+    class(test_fst), intent(inout) :: this
+    type(fst_spectrum_t) :: spec
+
+    call make_spectrum(spec, [.false., .false., .false.], -143)
+    @assertTrue(spec%k_length .gt. 0)
+    call check_directions(spec)
+    call check_shell_radii(spec)
+    call check_energy(spec)
+    call spec%free()
+  end subroutine test_no_periodic
+
+  @test(npes=[1])
+  subroutine test_one_periodic(this)
+    class(test_fst), intent(inout) :: this
+    type(fst_spectrum_t) :: spec
+
+    call make_spectrum(spec, [.false., .false., .true.], -143)
+    call check_quantized(spec, 3, lz)
+    call check_directions(spec)
+    call check_shell_radii(spec)
+    call check_energy(spec)
+    call spec%free()
+  end subroutine test_one_periodic
+
+  @test(npes=[1])
+  subroutine test_two_periodic(this)
+    class(test_fst), intent(inout) :: this
+    type(fst_spectrum_t) :: spec
+
+    call make_spectrum(spec, [.false., .true., .true.], -143)
+    call check_quantized(spec, 2, ly)
+    call check_quantized(spec, 3, lz)
+    call check_directions(spec)
+    call check_shell_radii(spec)
+    call check_energy(spec)
+    call spec%free()
+  end subroutine test_two_periodic
+
+  !> Two periodic directions with the lowest shell just above the smallest
+  !! nonzero pair, sqrt((2 pi/ly)**2 + (2 pi/lz)**2). Both components must
+  !! stay nonzero there.
+  @test(npes=[1])
+  subroutine test_two_periodic_low_shell(this)
+    class(test_fst), intent(inout) :: this
+    type(fst_spectrum_t) :: spec
+
+    call spec%init(10, 12, 1.5_rp, 8.0_rp, 0.05_rp, 0.5_rp, 1.0_rp, &
+         [.false., .true., .true.], -143, .false., ".")
+    call spec%generate(8.0_rp, 8.0_rp, 6.0_rp)
+    call check_quantized(spec, 2, 8.0_rp)
+    call check_quantized(spec, 3, 6.0_rp)
+    call check_directions(spec)
+    call check_shell_radii(spec)
+    call check_energy(spec)
+    call spec%free()
+  end subroutine test_two_periodic_low_shell
+
+  !> The same seed gives the same modes; another seed gives other modes.
+  @test(npes=[1])
+  subroutine test_seed(this)
+    class(test_fst), intent(inout) :: this
+    type(fst_spectrum_t) :: a, b
+
+    call make_spectrum(a, [.false., .false., .true.], -143)
+    call make_spectrum(b, [.false., .false., .true.], -143)
+    @assertEqual(a%k_length, b%k_length)
+    @assertTrue(all(a%k_num .eq. b%k_num))
+    @assertTrue(all(a%u_hat .eq. b%u_hat))
+    @assertTrue(all(a%phase .eq. b%phase))
+    call b%free()
+
+    call make_spectrum(b, [.false., .false., .true.], -77)
+    @assertFalse(all(a%phase .eq. b%phase))
+    call a%free()
+    call b%free()
+  end subroutine test_seed
+
+  !> The modes are generated on rank 0 and must be identical on all ranks.
+  @test(npes=[2])
+  subroutine test_broadcast(this)
+    class(test_fst), intent(inout) :: this
+    type(fst_spectrum_t) :: spec
+    double precision :: local(4), lo(4), hi(4)
+    integer :: ierr
+
+    call make_spectrum(spec, [.false., .false., .true.], -143)
+    local = [dble(spec%k_length), dble(sum(spec%k_num)), &
+         dble(sum(spec%u_hat)), dble(sum(spec%phase))]
+    call MPI_Allreduce(local, lo, 4, MPI_DOUBLE_PRECISION, MPI_MIN, &
+         this%getMpiCommunicator(), ierr)
+    call MPI_Allreduce(local, hi, 4, MPI_DOUBLE_PRECISION, MPI_MAX, &
+         this%getMpiCommunicator(), ierr)
+    @assertTrue(all(lo .eq. hi))
+    call spec%free()
+  end subroutine test_broadcast
+
+end module test_fst_spectrum

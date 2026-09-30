@@ -1830,7 +1830,8 @@ Some rules of thumb, which the checks also report:
 - `gain` times the time step should stay well below 1.
 - A fringe one to two integral length scales long is a good start.
 - In a periodic direction of length \f$ L \f$, `k_min` must be larger than
-  \f$ 2\pi / L \f$.
+  \f$ 2\pi / L \f$. With two periodic directions it must also satisfy
+  \f$ k_{min}^2 > (2\pi/L_1)^2 + (2\pi/L_2)^2 \f$.
 - The smallest wavelength, \f$ 2\pi / \f$ `k_max`, needs about 4 points per
   wavelength of the mean grid spacing inside the zone.
 

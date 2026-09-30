@@ -494,6 +494,7 @@ AC_CONFIG_FILES([tests/unit/stack/Makefile\
         tests/unit/errors/Makefile\
         tests/unit/tensor3/Makefile\
         tests/unit/tensor4/Makefile\
+        tests/unit/fst_spectrum/Makefile\
         tests/unit/case_file_utils/Makefile\
         tests/unit/scratch_registry/Makefile\
         tests/unit/registry/Makefile\

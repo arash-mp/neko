@@ -922,10 +922,15 @@ contains
     call neko_log%message("[FST] Writing preview fields 1-4 " // &
          "(fringe, u', v', w') to '" // trim(this%dump_fname) // "'")
 
-    call neko_scratch_registry%request_field(f_lam, i1, .true.)
-    call neko_scratch_registry%request_field(f_up, i2, .true.)
-    call neko_scratch_registry%request_field(f_vp, i3, .true.)
-    call neko_scratch_registry%request_field(f_wp, i4, .true.)
+    call neko_scratch_registry%request_field(f_lam, i1, .false.)
+    call neko_scratch_registry%request_field(f_up, i2, .false.)
+    call neko_scratch_registry%request_field(f_vp, i3, .false.)
+    call neko_scratch_registry%request_field(f_wp, i4, .false.)
+
+    f_lam%x = 0.0_rp
+    f_up%x = 0.0_rp
+    f_vp%x = 0.0_rp
+    f_wp%x = 0.0_rp
 
     call fst_source_term_preview_cpu(this%u%dof%size(), this%zone%size, &
          this%mask, &
