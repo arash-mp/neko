@@ -88,10 +88,8 @@ module fst_spectrum
      real(kind=rp), allocatable :: phase(:)
      integer, allocatable :: shell(:)
      real(kind=rp), allocatable :: shell_amp(:)
+     !> Modes per shell, used on rank 0 while generating.
      integer, allocatable :: shell_modes(:)
-
-     !> Component energies of the modes, valid on rank 0 only.
-     real(kind=rp) :: energy(3) = 0.0_rp
    contains
      procedure, pass(this) :: init => fst_spectrum_init
      procedure, pass(this) :: generate => fst_spectrum_generate
@@ -251,8 +249,6 @@ contains
          0, NEKO_COMM, ierr)
     call MPI_Bcast(this%shell_amp, this%n_shells, MPI_REAL_PRECISION, &
          0, NEKO_COMM, ierr)
-    call MPI_Bcast(this%shell_modes, this%n_shells, MPI_INTEGER, &
-         0, NEKO_COMM, ierr)
 
   end subroutine bcast_modes
 
@@ -361,9 +357,7 @@ contains
     allocate(this%phase(this%k_length))
     allocate(this%shell(this%k_length))
     allocate(this%shell_amp(this%n_shells))
-    allocate(this%shell_modes(this%n_shells))
     this%shell_amp = 0.0_rp
-    this%shell_modes = 0
 
     ok = .true.
     if (pe_rank .eq. 0) then
@@ -377,8 +371,6 @@ contains
              ok = .false.
           else
              this%shell_amp(this%shell(m)) = amp
-             this%shell_modes(this%shell(m)) = &
-                  this%shell_modes(this%shell(m)) + 1
           end if
        end do
        close(unit)
@@ -755,10 +747,6 @@ contains
        ve = ve + (vamp**2)/2.0_rp
        we = we + (wamp**2)/2.0_rp
     end do
-
-    this%energy(1) = ue
-    this%energy(2) = ve
-    this%energy(3) = we
 
     write(log_buf, '(A18,10x,E12.5E2)') 'FST - Energy in u', ue
     call neko_log%message(log_buf)

@@ -49,7 +49,7 @@ module fst_source_term
   use coefs, only : coef_t
   use source_term, only : source_term_t
   use fst_modes, only : fst_modes_t, fst_free_mapped
-  use fst_fringe, only : fst_fringe_t
+  use fst_fringe, only : fst_fringe_t, fst_time_ramp
   use point_zone, only : point_zone_t
   use point_zone_registry, only : neko_point_zone_registry
   use registry, only : neko_registry
@@ -126,11 +126,10 @@ contains
     character(len=*), intent(in) :: variable_name
 
     character(len=:), allocatable :: zone_name, read_str, dump_name
-    real(kind=rp), allocatable :: conv_vel(:)
     real(kind=rp) :: start_time, end_time
     integer :: n_zone_global, ierr
     character(len=LOG_SIZE) :: log_buf
-    type(json_file) :: baseflow_subdict, spectrum_subdict
+    type(json_file) :: baseflow_subdict
 
     call this%free()
 
@@ -177,10 +176,6 @@ contains
     if (this%gain .le. 0.0_rp) then
        call neko_error("(FST) gain must be > 0")
     end if
-    call json_get_or_lookup(json, "convection_velocity", conv_vel)
-    if (size(conv_vel) .ne. 3) then
-       call neko_error("(FST) convection_velocity must have 3 elements")
-    end if
     call json_get_or_lookup_or_default(json, "ramp_time", this%ramp_time, &
          0.0_rp)
     if (this%ramp_time .lt. 0.0_rp) then
@@ -194,8 +189,7 @@ contains
     end if
     call this%fringe%init(json, "fringe", .false.)
 
-    call json_get(json, "spectrum", spectrum_subdict)
-    call this%modes%init(spectrum_subdict, conv_vel, coef)
+    call this%modes%init(json, coef)
 
     call json_get_or_default(json, "dump_fields", this%dump_flds, .false.)
     call json_get_or_default(json, "dump_file_name", dump_name, "fst_fields")
@@ -415,7 +409,7 @@ contains
        end if
     end if
 
-    ramp = time_ramp(real(time%t, kind=rp), this%start_time, &
+    ramp = fst_time_ramp(real(time%t, kind=rp), this%start_time, &
          this%ramp_time)
     if (ramp .le. 0.0_rp) return
 
@@ -479,21 +473,6 @@ contains
     end if
 
   end subroutine fst_apply
-
-  !> Linear ramp from 0 at t_start to 1 at t_start + t_ramp.
-  pure function time_ramp(t, t_start, t_ramp) result(ramp)
-    real(kind=rp), intent(in) :: t, t_start, t_ramp
-    real(kind=rp) :: ramp
-
-    if (t .le. t_start) then
-       ramp = 0.0_rp
-    else if (t_ramp .le. 0.0_rp) then
-       ramp = 1.0_rp
-    else
-       ramp = min(1.0_rp, (t - t_start)/t_ramp)
-    end if
-
-  end function time_ramp
 
   !> Log resolution, fringe strength and spectrum checks, and warn when a
   !! value looks wrong. The thresholds are rules of thumb.

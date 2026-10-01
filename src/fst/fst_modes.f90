@@ -81,16 +81,16 @@ module fst_modes
 
 contains
 
-  !> Build the mode set from a `spectrum` json object.
-  !! @param json The `spectrum` object.
-  !! @param conv_vel Convection velocity of the turbulence.
+  !> Build the mode set.
+  !! @param json The object with `convection_velocity` and `spectrum`.
   !! @param coef SEM coefficients, for the domain lengths.
-  subroutine fst_modes_init(this, json, conv_vel, coef)
+  subroutine fst_modes_init(this, json, coef)
     class(fst_modes_t), intent(inout) :: this
     type(json_file), intent(inout) :: json
-    real(kind=rp), intent(in) :: conv_vel(3)
     type(coef_t), intent(in) :: coef
+    type(json_file) :: spec_json
     type(fst_spectrum_t) :: spectrum
+    real(kind=rp), allocatable :: conv_vel(:)
     character(len=*), parameter :: gen_keys(13) = [character(len=21) :: &
          "turbulence_intensity", "integral_length_scale", "n_shells", &
          "modes_per_shell", "k_min", "k_max", "periodic", "seed", &
@@ -106,6 +106,11 @@ contains
 
     call this%free()
 
+    call json_get_or_lookup(json, "convection_velocity", conv_vel)
+    if (size(conv_vel) .ne. 3) then
+       call neko_error("(FST) convection_velocity must have 3 elements")
+    end if
+    call json_get(json, "spectrum", spec_json)
     this%conv_vel = conv_vel
     this%u_ref = norm2(conv_vel)
     if (this%u_ref .le. 0.0_rp) then
@@ -117,16 +122,16 @@ contains
     ly = glmax(coef%dof%y%x, n) - glmin(coef%dof%y%x, n)
     lz = glmax(coef%dof%z%x, n) - glmin(coef%dof%z%x, n)
 
-    if (json%valid_path("read_from_file")) then
+    if (spec_json%valid_path("read_from_file")) then
        do i = 1, size(gen_keys)
-          if (json%valid_path(trim(gen_keys(i)))) then
+          if (spec_json%valid_path(trim(gen_keys(i)))) then
              call neko_error("(FST) spectrum: give either read_from_file " // &
                   "or the spectrum parameters, not both")
           end if
        end do
-       call json_get(json, "read_from_file.config_file", config_file)
-       call json_get(json, "read_from_file.modes_file", modes_file)
-       call json_get(json, "read_from_file.phases_file", phases_file)
+       call json_get(spec_json, "read_from_file.config_file", config_file)
+       call json_get(spec_json, "read_from_file.modes_file", modes_file)
+       call json_get(spec_json, "read_from_file.phases_file", phases_file)
        call spectrum%load(config_file, modes_file, phases_file, lx, ly, lz)
 
        if (abs(spectrum%u_ref - this%u_ref) .gt. &
@@ -137,29 +142,29 @@ contains
                "      The turbulence intensity refers to the second.")
        end if
     else
-       call json_get_or_lookup(json, "turbulence_intensity", ti)
-       call json_get_or_lookup(json, "integral_length_scale", il)
-       call json_get_or_lookup(json, "n_shells", n_shells)
-       call json_get_or_lookup(json, "modes_per_shell", modes_per_shell)
-       call json_get_or_lookup(json, "k_min", k_min)
-       call json_get_or_lookup(json, "k_max", k_max)
+       call json_get_or_lookup(spec_json, "turbulence_intensity", ti)
+       call json_get_or_lookup(spec_json, "integral_length_scale", il)
+       call json_get_or_lookup(spec_json, "n_shells", n_shells)
+       call json_get_or_lookup(spec_json, "modes_per_shell", modes_per_shell)
+       call json_get_or_lookup(spec_json, "k_min", k_min)
+       call json_get_or_lookup(spec_json, "k_max", k_max)
        periodic = .false.
-       if (json%valid_path("periodic")) then
-          call json_get(json, "periodic", periodic_json)
+       if (spec_json%valid_path("periodic")) then
+          call json_get(spec_json, "periodic", periodic_json)
           if (size(periodic_json) .ne. 3) then
              call neko_error("(FST) periodic must have 3 elements")
           end if
           periodic = periodic_json
        end if
-       call json_get_or_lookup_or_default(json, "seed", seed, -143)
-       call json_get_or_default(json, "output_path", path, "./fst_files")
-       call json_get_or_default(json, "config_file", config_file, &
+       call json_get_or_lookup_or_default(spec_json, "seed", seed, -143)
+       call json_get_or_default(spec_json, "output_path", path, "./fst_files")
+       call json_get_or_default(spec_json, "config_file", config_file, &
             "fst.config")
-       call json_get_or_default(json, "modes_file", modes_file, &
+       call json_get_or_default(spec_json, "modes_file", modes_file, &
             "fst_spectrum.csv")
-       call json_get_or_default(json, "phases_file", phases_file, &
+       call json_get_or_default(spec_json, "phases_file", phases_file, &
             "fst_phases.csv")
-       call json_get_or_default(json, "sphere_file", sphere_file, &
+       call json_get_or_default(spec_json, "sphere_file", sphere_file, &
             "sphere.dat")
 
        if (pe_rank .eq. 0) call mkdir(trim(path))

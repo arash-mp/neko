@@ -42,7 +42,7 @@ module fst_fringe
   implicit none
   private
 
-  public :: fst_fringe_value
+  public :: fst_fringe_value, fst_time_ramp
 
   type, public :: fst_fringe_t
      !> Directions with a smooth fringe; the others are flat.
@@ -141,5 +141,20 @@ contains
     end do
 
   end function fst_fringe_value
+
+  !> Linear ramp in time: 0 until t_start, then up to 1 over t_ramp.
+  pure function fst_time_ramp(t, t_start, t_ramp) result(ramp)
+    real(kind=rp), intent(in) :: t, t_start, t_ramp
+    real(kind=rp) :: ramp
+
+    if (t .le. t_start) then
+       ramp = 0.0_rp
+    else if (t_ramp .le. 0.0_rp) then
+       ramp = 1.0_rp
+    else
+       ramp = min(1.0_rp, (t - t_start)/t_ramp)
+    end if
+
+  end function fst_time_ramp
 
 end module fst_fringe

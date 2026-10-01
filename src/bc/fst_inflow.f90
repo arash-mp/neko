@@ -44,7 +44,7 @@ module fst_inflow
   use field, only : field_t
   use field_series, only : field_series_t
   use fst_modes, only : fst_modes_t, fst_mode_sum, fst_free_mapped
-  use fst_fringe, only : fst_fringe_t, fst_fringe_value
+  use fst_fringe, only : fst_fringe_t, fst_fringe_value, fst_time_ramp
   use fst_inflow_device, only : fst_inflow_update_device, &
        fst_inflow_add_device
   use neko_config, only : NEKO_BCKND_DEVICE
@@ -113,8 +113,7 @@ contains
     class(fst_inflow_t), intent(inout), target :: this
     type(coef_t), target, intent(in) :: coef
     type(json_file), intent(inout) :: json
-    type(json_file) :: fst, spectrum
-    real(kind=rp), allocatable :: conv_vel(:)
+    type(json_file) :: fst
     character(len=:), allocatable :: dump_name
 
     if (.not. associated(this%base)) then
@@ -126,12 +125,7 @@ contains
 
     call neko_log%section("FST INFLOW")
     call json_get(json, "fst", fst)
-    call json_get_or_lookup(fst, "convection_velocity", conv_vel)
-    if (size(conv_vel) .ne. 3) then
-       call neko_error("(FST) convection_velocity must have 3 elements")
-    end if
-    call json_get(fst, "spectrum", spectrum)
-    call this%modes%init(spectrum, conv_vel, coef)
+    call this%modes%init(fst, coef)
     call this%fringe%init(fst, "fringe", .true.)
 
     call json_get_or_lookup_or_default(fst, "start_time", this%start_time, &
@@ -291,12 +285,9 @@ contains
     end if
 
     t = real(time%t, kind=rp)
-    if (t .le. this%start_time .or. t .gt. this%end_time) then
-       coeff = 0.0_rp
-    else if (this%ramp_time .gt. 0.0_rp) then
-       coeff = min(1.0_rp, (t - this%start_time)/this%ramp_time)
-    else
-       coeff = 1.0_rp
+    coeff = 0.0_rp
+    if (t .le. this%end_time) then
+       coeff = fst_time_ramp(t, this%start_time, this%ramp_time)
     end if
     this%active = coeff .gt. 0.0_rp
 
