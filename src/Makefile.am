@@ -212,6 +212,7 @@ neko_fortran_SOURCES = \
 	bc/no_slip.f90\
 	bc/shear_stress.f90\
 	bc/dong_outflow.f90\
+	bc/fst_inflow.f90\
 	bc/zero_dirichlet.f90\
 	bc/inflow.f90\
 	bc/field_dirichlet.f90\
@@ -377,6 +378,7 @@ neko_fortran_SOURCES = \
 	bc/bcknd/device/device_neumann.F90\
 	bc/bcknd/device/device_inhom_dirichlet.F90\
 	bc/bcknd/device/device_dong_outflow.F90\
+	bc/bcknd/device/fst_inflow_device.F90\
 	bc/bcknd/device/device_constrain_mixed_bc.F90\
 	bc/bcknd/device/device_coupled_vector_bc_projector.F90\
 	scalar/bcknd/device/scalar_residual_device.F90\
@@ -437,7 +439,9 @@ neko_fortran_SOURCES = \
 	source_terms/sponge_source_term.f90\
 	source_terms/bcknd/cpu/sponge_source_term_cpu.f90\
 	source_terms/bcknd/device/sponge_source_term_device.f90\
-	source_terms/fst_spectrum.f90\
+	fst/fst_spectrum.f90\
+	fst/fst_fringe.f90\
+	fst/fst_modes.f90\
 	source_terms/fst_source_term.f90\
 	source_terms/bcknd/cpu/fst_source_term_cpu.f90\
 	source_terms/bcknd/device/fst_source_term_device.F90\
@@ -580,6 +584,7 @@ libneko_la_SOURCES += \
 	bc/bcknd/device/hip/neumann.hip\
 	bc/bcknd/device/hip/inhom_dirichlet.hip\
 	bc/bcknd/device/hip/dong_outflow.hip\
+	bc/bcknd/device/hip/fst_inflow.hip\
 	common/bcknd/device/hip/rhs_maker.hip\
 	common/bcknd/device/hip/projection.hip\
 	fluid/bcknd/device/hip/pnpn_res.hip\
@@ -652,6 +657,7 @@ libneko_la_SOURCES += \
 	bc/bcknd/device/cuda/neumann.cu\
 	bc/bcknd/device/cuda/inhom_dirichlet.cu\
 	bc/bcknd/device/cuda/dong_outflow.cu\
+	bc/bcknd/device/cuda/fst_inflow.cu\
 	bc/bcknd/device/cuda/constrain_mixed_bc.cu\
 	bc/bcknd/device/cuda/coupled_vector_bc_projector.cu\
 	common/bcknd/device/cuda/rhs_maker.cu\
@@ -1115,6 +1121,9 @@ EXTRA_DIST = \
 	bc/bcknd/device/cuda/bc_utils.h\
 	bc/bcknd/device/cuda/inhom_dirichlet_kernel.h\
 	bc/bcknd/device/cuda/dong_outflow_kernel.h\
+	bc/bcknd/device/cuda/fst_inflow_kernel.h\
+	fst/bcknd/device/cuda/fst_device.h\
+	source_terms/bcknd/device/cuda/fst_kernel.h\
 	bc/bcknd/device/cuda/constrain_mixed_bc_kernel.h\
 	bc/bcknd/device/cuda/coupled_vector_bc_projector_kernel.h\
 	gs/bcknd/device/cuda/gs_kernels.h\
@@ -1180,6 +1189,9 @@ EXTRA_DIST = \
 	bc/bcknd/device/hip/bc_utils.h\
 	bc/bcknd/device/hip/inhom_dirichlet_kernel.h\
 	bc/bcknd/device/hip/dong_outflow_kernel.h\
+	bc/bcknd/device/hip/fst_inflow_kernel.h\
+	fst/bcknd/device/hip/fst_device.h\
+	source_terms/bcknd/device/hip/fst_kernel.h\
 	gs/bcknd/device/hip/gs_kernels.h\
 	math/bcknd/device/hip/math_kernel.h\
 	math/bcknd/device/hip/tensor_kernel.h\

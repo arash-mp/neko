@@ -46,6 +46,7 @@ submodule(fluid_pnpn) fluid_pnpn_bc_fctry
   use blasius, only : blasius_t
   use dirichlet, only : dirichlet_t
   use dong_outflow, only : dong_outflow_t
+  use fst_inflow, only : fst_inflow_t
   use symmetry_aligned, only : symmetry_aligned_t
   use symmetry, only : symmetry_t
   use non_normal_aligned, only : non_normal_aligned_t
@@ -62,7 +63,7 @@ submodule(fluid_pnpn) fluid_pnpn_bc_fctry
   implicit none
 
   ! List of all possible types created by the boundary condition factories
-  character(len=25) :: FLUID_PNPN_KNOWN_BCS(17) = [character(len=25) :: &
+  character(len=25) :: FLUID_PNPN_KNOWN_BCS(21) = [character(len=25) :: &
        "symmetry", &
        "velocity_value", &
        "expression_velocity", &
@@ -79,7 +80,11 @@ submodule(fluid_pnpn) fluid_pnpn_bc_fctry
        "user_pressure", &
        "blasius_profile", &
        "wall_model", &
-       "overset_interface"]
+       "overset_interface", &
+       "velocity_value+fst", &
+       "expression_velocity+fst", &
+       "blasius_profile+fst", &
+       "user_velocity+fst"]
 
 contains
 
@@ -194,7 +199,9 @@ contains
     type(json_file), intent(inout) :: json
     type(coef_t), target, intent(in) :: coef
     type(user_t), target, intent(in) :: user
-    character(len=:), allocatable :: type
+    character(len=:), allocatable :: type, base_type
+    type(fst_inflow_t), pointer :: fst_bc
+    logical :: fst
     integer :: i, j, k
     integer, allocatable :: zone_indices(:)
     character(len=:), allocatable :: default_name
@@ -203,7 +210,16 @@ contains
 
     call json_get(json, "type", type)
 
-    select case (trim(type))
+    ! "<type>+fst" adds free-stream turbulence to the inflow <type>
+    fst = len_trim(type) .gt. 4
+    if (fst) fst = type(len_trim(type)-3:len_trim(type)) .eq. "+fst"
+    if (fst) then
+       base_type = type(1:len_trim(type)-4)
+    else
+       base_type = trim(type)
+    end if
+
+    select case (trim(base_type))
     case ("symmetry")
        if (scheme%full_stress_formulation) then
           allocate(symmetry_t::object)
@@ -257,6 +273,19 @@ contains
        call neko_type_error("fluid_pnpn boundary conditions", type, &
             FLUID_PNPN_KNOWN_BCS)
     end select
+
+    if (fst) then
+       if (base_type .ne. "velocity_value" .and. &
+            base_type .ne. "expression_velocity" .and. &
+            base_type .ne. "blasius_profile" .and. &
+            base_type .ne. "user_velocity") then
+          call neko_error("+fst can only be added to velocity_value, " // &
+               "expression_velocity, blasius_profile or user_velocity")
+       end if
+       allocate(fst_bc)
+       fst_bc%base => object
+       object => fst_bc
+    end if
 
     call json_get_or_lookup(json, "zone_indices", zone_indices)
     write(buf,'("velocity_bc_",I0)') zone_indices(1)

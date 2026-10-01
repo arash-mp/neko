@@ -34,54 +34,12 @@
  POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <fst/bcknd/device/cuda/fst_device.h>
+
 /**
- * Device kernel for the FST fringe forcing, one thread per zone point.
- * All threads walk the mode list in lockstep, so mode data is broadcast
- * from cache. Constants are typed as T to avoid double promotion in
- * single precision builds.
+ * FST fringe forcing, one thread per zone point. All threads walk the mode
+ * list in lockstep, so mode data is broadcast from cache.
  */
-
-/** Fringe description per direction, passed by value. */
-template< typename T >
-struct fst_fringe_t {
-  int smooth[3];
-  T start[3];
-  T end[3];
-  T rise[3];
-  T fall[3];
-};
-
-/** Smooth step, same function and bounds as math_stepf on the host. */
-template< typename T >
-__device__ __forceinline__ T fst_stepf(const T x) {
-  const T zero = 0.0;
-  const T one = 1.0;
-  const T xdmin = 0.0001;
-  const T xdmax = 0.9999;
-
-  if (x <= xdmin) return zero;
-  if (x >= xdmax) return one;
-  return one / (one + exp(one / (x - one) + one / x));
-}
-
-/** Product of the smooth fringes; flat directions contribute 1. */
-template< typename T >
-__device__ __forceinline__ T fst_fringe(const T x, const T y, const T z,
-                                        const fst_fringe_t<T> f) {
-  const T c[3] = {x, y, z};
-  const T one = 1.0;
-  T lam = one;
-
-#pragma unroll
-  for (int d = 0; d < 3; d++) {
-    if (f.smooth[d]) {
-      lam *= fst_stepf<T>((c[d] - f.start[d]) / f.rise[d])
-           - fst_stepf<T>((c[d] - f.end[d]) / f.fall[d] + one);
-    }
-  }
-  return lam;
-}
-
 /**
  * f += coeff * lambda * (u_bf + u' - u) at the zone points, with
  * u'_j = sum_m a_j(m) sin(k(m) . (x - shift) + phase(m)).
@@ -133,16 +91,9 @@ __global__ void fst_apply_kernel(const int n_mask,
   const T ys = y - sy;
   const T zs = z - sz;
 
-  T rx = zero;
-  T ry = zero;
-  T rz = zero;
-
-  for (int m = 0; m < k_length; m++) {
-    const T s = sin(kx[m] * xs + ky[m] * ys + kz[m] * zs + phase[m]);
-    rx += ax[m] * s;
-    ry += ay[m] * s;
-    rz += az[m] * s;
-  }
+  T rx, ry, rz;
+  fst_mode_sum<T>(xs, ys, zs, k_length, kx, ky, kz, ax, ay, az, phase,
+                  rx, ry, rz);
 
   const T c = coeff * lam;
   fu[i] += c * (u_bf[idx] + rx - u[i]);

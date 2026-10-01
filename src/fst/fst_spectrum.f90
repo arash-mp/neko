@@ -46,10 +46,10 @@
 module fst_spectrum
   use num_types, only : rp
   use math, only : pi
-  use utils, only : neko_error
+  use utils, only : neko_error, neko_warning
   use logger, only : neko_log, LOG_SIZE
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION, pe_rank
-  use mpi_f08, only : MPI_Bcast, MPI_INTEGER
+  use mpi_f08, only : MPI_Bcast, MPI_INTEGER, MPI_LOGICAL
   implicit none
   private
 
@@ -78,9 +78,8 @@ module fst_spectrum
      !> Directions whose wavenumbers are quantized to 2*pi*n/L.
      logical :: periodic(3) = .false.
      integer :: seed = -143
-     !> Write sphere.dat, bb.txt and fst_spectrum.csv on rank 0.
-     logical :: write_files = .false.
-     character(len=:), allocatable :: path
+     !> If not empty, the sphere points of every shell are written here.
+     character(len=:), allocatable :: sphere_file
 
      !> Number of valid modes; the arrays below are valid up to k_length.
      integer :: k_length = 0
@@ -91,12 +90,13 @@ module fst_spectrum
      real(kind=rp), allocatable :: shell_amp(:)
      integer, allocatable :: shell_modes(:)
 
-     !> Realized Tu*U and component energies, valid on rank 0 only.
-     real(kind=rp) :: tu_uinf_estimate = 0.0_rp
+     !> Component energies of the modes, valid on rank 0 only.
      real(kind=rp) :: energy(3) = 0.0_rp
    contains
      procedure, pass(this) :: init => fst_spectrum_init
      procedure, pass(this) :: generate => fst_spectrum_generate
+     procedure, pass(this) :: save => fst_spectrum_save
+     procedure, pass(this) :: load => fst_spectrum_load
      procedure, pass(this) :: free => fst_spectrum_free
   end type fst_spectrum_t
 
@@ -133,15 +133,14 @@ contains
 
   !> Check the parameters and allocate the mode arrays.
   subroutine fst_spectrum_init(this, n_shells, npmax, k_start, k_end, &
-       ti, il, u_ref, periodic, seed, write_files, path)
+       ti, il, u_ref, periodic, seed, sphere_file)
     class(fst_spectrum_t), intent(inout) :: this
     integer, intent(in) :: n_shells
     integer, intent(in) :: npmax
     real(kind=rp), intent(in) :: k_start, k_end, ti, il, u_ref
     logical, intent(in) :: periodic(3)
     integer, intent(in) :: seed
-    logical, intent(in) :: write_files
-    character(len=*), intent(in) :: path
+    character(len=*), intent(in) :: sphere_file
 
     call this%free()
 
@@ -182,8 +181,7 @@ contains
     this%u_ref = u_ref
     this%periodic = periodic
     this%seed = seed
-    this%write_files = write_files
-    this%path = trim(path)
+    this%sphere_file = trim(sphere_file)
 
     allocate(this%k_num(this%n_modes_max, 3))
     allocate(this%u_hat(this%n_modes_max, 3))
@@ -211,7 +209,7 @@ contains
     if (allocated(this%shell)) deallocate(this%shell)
     if (allocated(this%shell_amp)) deallocate(this%shell_amp)
     if (allocated(this%shell_modes)) deallocate(this%shell_modes)
-    if (allocated(this%path)) deallocate(this%path)
+    if (allocated(this%sphere_file)) deallocate(this%sphere_file)
 
     this%n_shells = 0
     this%npmax = 0
@@ -226,13 +224,21 @@ contains
     class(fst_spectrum_t), intent(inout) :: this
     real(kind=rp), intent(in) :: lx, ly, lz
 
-    integer :: ierr
-
     call neko_log%section('Generating FST spectrum')
 
     if (pe_rank .eq. 0) then
        call generate_rank0(this, lx, ly, lz)
     end if
+    call bcast_modes(this)
+
+    call neko_log%end_section('Done --> Generating FST spectrum')
+
+  end subroutine fst_spectrum_generate
+
+  !> Broadcast the mode set from rank 0.
+  subroutine bcast_modes(this)
+    class(fst_spectrum_t), intent(inout) :: this
+    integer :: ierr
 
     call MPI_Bcast(this%k_length, 1, MPI_INTEGER, 0, NEKO_COMM, ierr)
     call MPI_Bcast(this%k_num, this%n_modes_max*3, MPI_REAL_PRECISION, &
@@ -248,9 +254,209 @@ contains
     call MPI_Bcast(this%shell_modes, this%n_shells, MPI_INTEGER, &
          0, NEKO_COMM, ierr)
 
-    call neko_log%end_section('Done --> Generating FST spectrum')
+  end subroutine bcast_modes
 
-  end subroutine fst_spectrum_generate
+  !> Write the parameters, the modes and the phases on rank 0, at full
+  !! precision, so that load gives back exactly the same mode set.
+  !! @param config_file, modes_file, phases_file File names.
+  subroutine fst_spectrum_save(this, config_file, modes_file, phases_file)
+    class(fst_spectrum_t), intent(in) :: this
+    character(len=*), intent(in) :: config_file, modes_file, phases_file
+    integer :: unit, m
+
+    if (pe_rank .ne. 0) return
+
+    open(newunit = unit, file = config_file)
+    write(unit, '(A,1X,ES26.17E3)') 'u_ref', this%u_ref
+    write(unit, '(A,1X,ES26.17E3)') 'turbulence_intensity', this%ti
+    write(unit, '(A,1X,ES26.17E3)') 'integral_length_scale', this%il
+    write(unit, '(A,1X,ES26.17E3)') 'k_min', this%k_start
+    write(unit, '(A,1X,ES26.17E3)') 'k_max', this%k_end
+    write(unit, '(A,1X,I0)') 'n_shells', this%n_shells
+    write(unit, '(A,1X,I0)') 'modes_per_shell', this%npmax
+    write(unit, '(A,1X,I0)') 'n_modes', this%k_length
+    write(unit, '(A,1X,L1)') 'periodic_x', this%periodic(1)
+    write(unit, '(A,1X,L1)') 'periodic_y', this%periodic(2)
+    write(unit, '(A,1X,L1)') 'periodic_z', this%periodic(3)
+    write(unit, '(A,1X,I0)') 'seed', this%seed
+    close(unit)
+
+    open(newunit = unit, file = modes_file)
+    write(unit, '(A)') 'shell,kx,ky,kz,amplitude,u_hat_x,u_hat_y,u_hat_z'
+    do m = 1, this%k_length
+       write(unit, '(I0,7(",",ES26.17E3))') this%shell(m), &
+            this%k_num(m, 1), this%k_num(m, 2), this%k_num(m, 3), &
+            this%shell_amp(this%shell(m)), &
+            this%u_hat(m, 1), this%u_hat(m, 2), this%u_hat(m, 3)
+    end do
+    close(unit)
+
+    open(newunit = unit, file = phases_file)
+    write(unit, '(A)') 'mode,phase'
+    do m = 1, this%k_length
+       write(unit, '(I0,",",ES26.17E3)') m, this%phase(m)
+    end do
+    close(unit)
+
+  end subroutine fst_spectrum_save
+
+  !> Read a mode set written by save. Rank 0 reads and broadcasts. A missing
+  !! file or an invalid shell or mode index stops the run; physics checks
+  !! (continuity, periodicity for this domain) only warn.
+  !! @param config_file, modes_file, phases_file File names.
+  !! @param lx, ly, lz Domain lengths, to check periodic wavenumbers.
+  subroutine fst_spectrum_load(this, config_file, modes_file, phases_file, &
+       lx, ly, lz)
+    class(fst_spectrum_t), intent(inout) :: this
+    character(len=*), intent(in) :: config_file, modes_file, phases_file
+    real(kind=rp), intent(in) :: lx, ly, lz
+    character(len=32) :: key
+    character(len=LOG_SIZE) :: header
+    integer :: unit, m, idx, n_bad, ierr
+    real(kind=rp) :: amp
+    logical :: ok
+
+    call this%free()
+    call neko_log%section('Reading FST spectrum')
+
+    call require_file(config_file)
+    call require_file(modes_file)
+    call require_file(phases_file)
+
+    if (pe_rank .eq. 0) then
+       open(newunit = unit, file = config_file, status = 'old')
+       read(unit, *) key, this%u_ref
+       read(unit, *) key, this%ti
+       read(unit, *) key, this%il
+       read(unit, *) key, this%k_start
+       read(unit, *) key, this%k_end
+       read(unit, *) key, this%n_shells
+       read(unit, *) key, this%npmax
+       read(unit, *) key, this%k_length
+       read(unit, *) key, this%periodic(1)
+       read(unit, *) key, this%periodic(2)
+       read(unit, *) key, this%periodic(3)
+       read(unit, *) key, this%seed
+       close(unit)
+    end if
+    call MPI_Bcast(this%u_ref, 1, MPI_REAL_PRECISION, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%ti, 1, MPI_REAL_PRECISION, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%il, 1, MPI_REAL_PRECISION, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%k_start, 1, MPI_REAL_PRECISION, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%k_end, 1, MPI_REAL_PRECISION, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%n_shells, 1, MPI_INTEGER, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%npmax, 1, MPI_INTEGER, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%k_length, 1, MPI_INTEGER, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%periodic, 3, MPI_LOGICAL, 0, NEKO_COMM, ierr)
+    call MPI_Bcast(this%seed, 1, MPI_INTEGER, 0, NEKO_COMM, ierr)
+
+    if (this%k_length .lt. 1 .or. this%n_shells .lt. 1) then
+       call neko_error("(FST) " // trim(config_file) // &
+            ": n_modes and n_shells must be at least 1")
+    end if
+    this%n_modes_max = this%k_length
+    this%sphere_file = ""
+    allocate(this%k_num(this%k_length, 3))
+    allocate(this%u_hat(this%k_length, 3))
+    allocate(this%phase(this%k_length))
+    allocate(this%shell(this%k_length))
+    allocate(this%shell_amp(this%n_shells))
+    allocate(this%shell_modes(this%n_shells))
+    this%shell_amp = 0.0_rp
+    this%shell_modes = 0
+
+    ok = .true.
+    if (pe_rank .eq. 0) then
+       open(newunit = unit, file = modes_file, status = 'old')
+       read(unit, '(A)') header
+       do m = 1, this%k_length
+          read(unit, *) this%shell(m), this%k_num(m, 1), this%k_num(m, 2), &
+               this%k_num(m, 3), amp, this%u_hat(m, 1), this%u_hat(m, 2), &
+               this%u_hat(m, 3)
+          if (this%shell(m) .lt. 1 .or. this%shell(m) .gt. this%n_shells) then
+             ok = .false.
+          else
+             this%shell_amp(this%shell(m)) = amp
+             this%shell_modes(this%shell(m)) = &
+                  this%shell_modes(this%shell(m)) + 1
+          end if
+       end do
+       close(unit)
+
+       open(newunit = unit, file = phases_file, status = 'old')
+       read(unit, '(A)') header
+       do m = 1, this%k_length
+          read(unit, *) idx, this%phase(m)
+          if (idx .ne. m) ok = .false.
+       end do
+       close(unit)
+    end if
+    call MPI_Bcast(ok, 1, MPI_LOGICAL, 0, NEKO_COMM, ierr)
+    if (.not. ok) then
+       call neko_error("(FST) Invalid shell or mode index in " // &
+            trim(modes_file) // " or " // trim(phases_file))
+    end if
+
+    call bcast_modes(this)
+
+    if (pe_rank .eq. 0) then
+       n_bad = 0
+       do m = 1, this%k_length
+          if (abs(dot_product(this%k_num(m, :), this%u_hat(m, :))) .gt. &
+               1.0e3_rp*epsilon(1.0_rp)*norm2(this%k_num(m, :)) .or. &
+               abs(norm2(this%u_hat(m, :)) - 1.0_rp) .gt. &
+               1.0e3_rp*epsilon(1.0_rp)) then
+             n_bad = n_bad + 1
+          end if
+       end do
+       if (n_bad .gt. 0) then
+          call neko_warning("(FST) Some modes read from " // &
+               trim(modes_file) // " are not divergence free.")
+       end if
+       call check_periodic(this, 1, lx)
+       call check_periodic(this, 2, ly)
+       call check_periodic(this, 3, lz)
+       call energy_check(this)
+    end if
+
+    call neko_log%end_section('Done --> Reading FST spectrum')
+
+  end subroutine fst_spectrum_load
+
+  !> Stop on all ranks if a file does not exist.
+  subroutine require_file(fname)
+    character(len=*), intent(in) :: fname
+    logical :: found
+    integer :: ierr
+
+    if (pe_rank .eq. 0) inquire(file = fname, exist = found)
+    call MPI_Bcast(found, 1, MPI_LOGICAL, 0, NEKO_COMM, ierr)
+    if (.not. found) call neko_error("(FST) File not found: " // trim(fname))
+
+  end subroutine require_file
+
+  !> Warn if the wavenumbers of a periodic direction are not nonzero
+  !! multiples of 2*pi/l, i.e. the spectrum was made for another domain.
+  subroutine check_periodic(this, d, l)
+    class(fst_spectrum_t), intent(in) :: this
+    integer, intent(in) :: d
+    real(kind=rp), intent(in) :: l
+    real(kind=rp) :: n
+    integer :: m
+    character(len=1), parameter :: dir_char(3) = ['x', 'y', 'z']
+
+    if (.not. this%periodic(d)) return
+    do m = 1, this%k_length
+       n = this%k_num(m, d)/(2.0_rp*pi/l)
+       if (abs(n - real(nint(n), kind=rp)) .gt. &
+            1.0e3_rp*epsilon(1.0_rp)*abs(n) .or. nint(n) .eq. 0) then
+          call neko_warning("(FST) The spectrum read does not fit the " // &
+               "periodic length in " // dir_char(d) // " of this domain.")
+          return
+       end if
+    end do
+
+  end subroutine check_periodic
 
   !> Shells, sphere points, amplitudes and continuity projection.
   !! The order of random draws matches the plugin.
@@ -323,7 +529,6 @@ contains
     write (log_buf, '(A,I0,A,E13.5)') 'FST - discretized on ', &
          this%n_shells, ' shells : ', tke_tot
     call neko_log%message(log_buf)
-    call print_param("Truncated TKE", tke_scaled/tke_tot)
 
     do i = 1, this%n_shells
        dk = (this%k_end - this%k_start)/real(this%n_shells - 1, kind=rp)
@@ -345,19 +550,21 @@ contains
     integer, intent(out) :: np
 
     real(kind=rp) :: kk, rotx, roty, rotz
-    integer :: i, j
+    integer :: i, j, unit
+    logical :: write_sphere
 
     np = this%npmax
+    write_sphere = len(this%sphere_file) .gt. 0
 
-    if (this%write_files) then
-       open(file = trim(this%path) // '/sphere.dat', unit = 10)
-       write(10, *) 'energy shell parameters'
-       write(10, '(a20,i18)') 'Nshells', this%n_shells
-       write(10, '(a20,f18.9)') 'kstart', this%k_start
-       write(10, '(a20,f18.9)') 'kend', this%k_end
-       write(10, '(a20,i18)') 'Np', np
-       write(10, *) 'isotropic coordinates'
-       write(10, '(2a5,3a18)') 'i', 'j', 'x', 'y', 'z'
+    if (write_sphere) then
+       open(newunit = unit, file = this%sphere_file)
+       write(unit, *) 'energy shell parameters'
+       write(unit, '(a20,i18)') 'Nshells', this%n_shells
+       write(unit, '(a20,f18.9)') 'kstart', this%k_start
+       write(unit, '(a20,f18.9)') 'kend', this%k_end
+       write(unit, '(a20,i18)') 'Np', np
+       write(unit, *) 'isotropic coordinates'
+       write(unit, '(2a5,3a18)') 'i', 'j', 'x', 'y', 'z'
     end if
 
     do i = 1, this%n_shells
@@ -379,15 +586,16 @@ contains
           co(j, i, 3) = -co(j - np, i, 3)
        end do
 
-       if (this%write_files) then
+       if (write_sphere) then
           do j = 1, 2*np
-             write(10, '(2i5,3e18.9)') i, j, co(j, i, 1), co(j, i, 2), &
+             write(unit, '(2i5,3e18.9)') i, j, co(j, i, 1), co(j, i, 2), &
                   co(j, i, 3)
           end do
        end if
     end do
 
-    if (this%write_files) close(10)
+    if (write_sphere) close(unit)
+
 
   end subroutine shell_points
 
@@ -419,7 +627,6 @@ contains
     end do
     this%k_length = l
 
-    call neko_log%message('FST - (0,0,0) wavenumber removed')
     write(log_buf, '(A,I0,A,I0,A)') 'Saved ', l, ' of ', &
          l + n_removed, ' fst modes.'
     call neko_log%message(log_buf)
@@ -486,23 +693,15 @@ contains
     allocate(bb(this%n_modes_max, 3))
     allocate(bb1(this%n_modes_max, 3))
 
-    if (this%write_files) then
-       open(unit = 137, form = 'formatted', &
-            file = trim(this%path) // '/bb.txt')
-    end if
-
     ! Three columns are drawn though only one phase column is used, to keep
     ! the plugin's random sequence
     do k = 1, 3
        do i = 1, this%n_modes_max
           bb(i, k) = rng%next(idum)*2.0_rp*pi   ! random phase shift
           bb1(i, k) = 2.0_rp*rng%next(idum) - 1.0_rp ! random amplitude
-          if (this%write_files) write(137, *) bb(i, 1), bb1(i, 1)
        end do
     end do
 
-    if (this%write_files) close(137)
-    call neko_log%message("FST - Random amplitude generated")
 
     this%phase(:) = bb(:, 1)
 
@@ -527,7 +726,6 @@ contains
        end do
     end do
 
-    call neko_log%message('FST - Amplitudes projection done')
 
     deallocate(bb, bb1)
 
@@ -545,12 +743,6 @@ contains
     ve = 0.0_rp
     we = 0.0_rp
 
-    if (this%write_files) then
-       open(file = trim(this%path) // '/fst_spectrum.csv', unit = 13)
-       write(13, '(9(A, ","),A)') 'ShellNo', 'kx', 'ky', 'kz', &
-            'u_amp', 'v_amp', 'w_amp', 'u_hat1', 'u_hat2', 'u_hat3'
-    end if
-
     do i = 1, this%k_length
        shellno = this%shell(i)
        amp = this%shell_amp(shellno)
@@ -559,23 +751,14 @@ contains
        vamp = this%u_hat(i, 2)*amp
        wamp = this%u_hat(i, 3)*amp
 
-       if (this%write_files) then
-          write(13, '(9(g0, ","), g0)') shellno, this%k_num(i, 1), &
-               this%k_num(i, 2), this%k_num(i, 3), uamp, vamp, wamp, &
-               this%u_hat(i, 1), this%u_hat(i, 2), this%u_hat(i, 3)
-       end if
-
        ue = ue + (uamp**2)/2.0_rp
        ve = ve + (vamp**2)/2.0_rp
        we = we + (wamp**2)/2.0_rp
     end do
 
-    if (this%write_files) close(13)
-
     this%energy(1) = ue
     this%energy(2) = ve
     this%energy(3) = we
-    this%tu_uinf_estimate = sqrt((ue + ve + we)/3.0_rp)
 
     write(log_buf, '(A18,10x,E12.5E2)') 'FST - Energy in u', ue
     call neko_log%message(log_buf)
@@ -587,7 +770,7 @@ contains
          (ue + ve + we)/2.0_rp
     call neko_log%message(log_buf)
     write(log_buf, '(A24,9x,E12.5E2)') 'FST - Estimated Tu*U_inf', &
-         this%tu_uinf_estimate
+         sqrt((ue + ve + we)/3.0_rp)
     call neko_log%message(log_buf)
 
   end subroutine energy_check

@@ -660,6 +660,7 @@ table below.
 | wall_model          | Shear stress condition based on a wall model for large-eddy simulation.                                                          |
 | blasius_profile     | A Blasius velocity profile.                                                                                                      |
 | user_velocity       | The `field_dirichlet_vector_t` user-defined Dirichlet condition for velocity.                                                    |
+| `<inflow>+fst`      | One of the four inflows above with free-stream turbulence added, see [the +fst inflow](@ref case-file_fluid-fst-inflow).        |
 | user_pressure       | The `field_dirichlet_t` user-defined Dirichlet condition for pressure.                                                           |
 | overset_interface   | A Dirichlet condition that prescribes values from another Neko simulation running concurrently.                                  |
 
@@ -1718,18 +1719,20 @@ towards a base flow plus a turbulent field,
 
 where \f$ \gamma \f$ is the `gain`, \f$ r(t) \f$ a linear ramp and
 \f$ \lambda(\mathbf{x}) \f$ a smooth fringe. The field \f$ \mathbf{u}' \f$ is a
-sum of divergence-free Fourier modes drawn from a von Kármán spectrum with the
-given turbulence intensity and integral length scale, and it is carried along
-with `convection_velocity` (frozen turbulence). The convection velocity can
-point in any direction, so cross flow, for example on a swept wing, is
-supported.
+sum of divergence-free Fourier modes drawn from a von Kármán spectrum, carried
+along with the constant `convection_velocity` (frozen turbulence). The
+convection velocity can point in any direction, so cross flow, for example on
+a swept wing, is supported. For a non-uniform base flow, set it to the mean
+velocity of the flow that carries the turbulence. The turbulence intensity
+refers to its magnitude. The same turbulence can be imposed at an inflow
+boundary instead, see [the +fst inflow](@ref case-file_fluid-fst-inflow).
 
 The fringe is set per direction under `fringe`. A direction you leave out is
 flat, which is what you want for periodic directions. A direction you give
 needs all of `start`, `end`, `rise` and `fall`: the fringe is zero outside
-`[start, end]` and reaches one after `rise` and before `fall`. Make the point
-zone a bit larger than the fringe, since points outside the zone are never
-forced.
+`[start, end]` and reaches one after `rise` and before `fall`. `"none"` makes
+it flat in every direction. Make the point zone a bit larger than the fringe,
+since points outside the zone are never forced.
 
 The forcing is evaluated at the current mesh coordinates every time step, so it
 works with ALE. The zone is fixed to the mesh points when the case starts,
@@ -1739,11 +1742,11 @@ flow: `initial_condition` and `field` store the base flow on those same mesh
 points.
 
 The term is off unless `enabled` is `true`. With `validate_only` the run
-generates the turbulence, prints its checks (resolution, fringe strength,
-realized intensity and isotropy), writes the fringe and \f$ \mathbf{u}' \f$ to
-an `fld` file as fields 1 to 4, and stops. Use it before a long run.
+generates the turbulence, prints its checks (resolution, fringe strength and
+isotropy), writes the fringe and \f$ \mathbf{u}' \f$ to an `fld` file as fields
+1 to 4, and stops. Use it before a long run.
 
-A complete entry. Remove what you do not need, see the table for what is
+A complete entry. Remove what you do not need, see the tables for what is
 required:
 
 ```json
@@ -1753,13 +1756,15 @@ required:
   "zone_name": "fst_zone",
   "gain": 20.0,
   "convection_velocity": [1.0, 0.0, 0.0],
-  "turbulence_intensity": 0.05,
-  "integral_length_scale": 0.5,
   "spectrum": {
+    "turbulence_intensity": 0.05,
+    "integral_length_scale": 0.5,
     "n_shells": 20,
     "modes_per_shell": 12,
     "k_min": 1.5,
-    "k_max": 12.0
+    "k_max": 12.0,
+    "periodic": [false, false, true],
+    "seed": -143
   },
   "baseflow": {
     "method": "constant",
@@ -1769,16 +1774,12 @@ required:
     "x": { "start": -8.0, "end": -5.0, "rise": 1.0, "fall": 1.0 },
     "y": { "start": -13.0, "end": 13.0, "rise": 2.0, "fall": 2.0 }
   },
-  "periodic": [false, false, true],
   "start_time": 0.0,
   "end_time": 100.0,
   "ramp_time": 2.0,
-  "seed": -143,
   "validate_only": false,
   "dump_fields": false,
-  "dump_file_name": "fst_fields",
-  "write_files": false,
-  "files_output_path": "./fst_files"
+  "dump_file_name": "fst_fields"
 }
 ```
 
@@ -1796,33 +1797,69 @@ The zone is a regular point zone, for example
 ]
 ```
 
-| Name                    | Description                                                             | Required        | Default         |
-| ----------------------- | ----------------------------------------------------------------------- | --------------- | --------------- |
-| `enabled`               | Turns the term on                                                       | No              | `false`         |
-| `zone_name`             | Point zone where the forcing is applied                                 | Yes             | -               |
-| `gain`                  | Relaxation rate \f$ \gamma \f$, in 1/time                               | Yes             | -               |
-| `convection_velocity`   | Velocity carrying the turbulence, also the reference for the intensity | Yes             | -               |
-| `turbulence_intensity`  | Target intensity as a fraction, 0.05 means 5%                           | Yes             | -               |
-| `integral_length_scale` | Integral length scale, in mesh units                                    | Yes             | -               |
-| `spectrum.n_shells`     | Number of wavenumber shells, at least 2                                 | Yes             | -               |
-| `spectrum.modes_per_shell` | Modes per shell, 3 to 1000                                           | Yes             | -               |
-| `spectrum.k_min`, `k_max` | Wavenumber range                                                      | Yes             | -               |
-| `baseflow.method`       | `initial_condition`, `constant` or `field`                              | Yes             | -               |
-| `baseflow.value`        | Base flow for `constant`                                                | With `constant` | -               |
-| `baseflow.file_name`    | File for `field`; `mesh_file_name`, `interpolate` and `interpolation` work as for the sponge | With `field` | - |
-| `fringe.x`, `.y`, `.z`  | Smooth fringe with `start`, `end`, `rise`, `fall`                       | No              | flat            |
-| `periodic`              | Periodic directions; their wavenumbers fit the domain length            | No              | all `false`     |
-| `start_time`, `end_time` | When the term is active                                                | No              | whole run       |
-| `ramp_time`             | Linear ramp after `start_time`                                          | No              | `0.0`           |
-| `seed`                  | Random seed                                                             | No              | `-143`          |
-| `validate_only`         | Print the checks, dump the fields and stop                              | No              | `false`         |
-| `dump_fields`           | Dump the fields at the first step and continue                          | No              | `false`         |
-| `dump_file_name`        | Name of the dump file                                                   | No              | `"fst_fields"`  |
-| `write_files`           | Write the generated spectrum to text files                              | No              | `false`         |
-| `files_output_path`     | Folder for those files                                                  | No              | `"./fst_files"` |
+| Name                       | Description                                                          | Required        | Default       |
+| -------------------------- | -------------------------------------------------------------------- | --------------- | ------------- |
+| `enabled`                  | Turns the term on                                                    | No              | `false`       |
+| `zone_name`                | Point zone where the forcing is applied                              | Yes             | -             |
+| `gain`                     | Relaxation rate \f$ \gamma \f$, in 1/time                            | Yes             | -             |
+| `convection_velocity`      | Constant velocity carrying the turbulence                            | Yes             | -             |
+| `spectrum`                 | The turbulence, see below                                            | Yes             | -             |
+| `baseflow.method`          | `initial_condition`, `constant` or `field`                           | Yes             | -             |
+| `baseflow.value`           | Base flow for `constant`                                             | With `constant` | -             |
+| `baseflow.file_name`       | File for `field`; `mesh_file_name`, `interpolate` and `interpolation` work as for the sponge | With `field` | - |
+| `fringe`                   | `"none"`, or `x`, `y`, `z` entries with `start`, `end`, `rise`, `fall` | No            | flat          |
+| `start_time`, `end_time`   | When the term is active                                              | No              | whole run     |
+| `ramp_time`                | Linear ramp after `start_time`                                       | No              | `0.0`         |
+| `validate_only`            | Print the checks, dump the fields and stop                           | No              | `false`       |
+| `dump_fields`              | Dump the fields at the first step and continue                       | No              | `false`       |
+| `dump_file_name`           | Name of the dump file                                                | No              | `"fst_fields"`|
 
 Real values have to be written with a decimal point, for example `20.0` and not
 `20`.
+
+##### The spectrum
+
+`spectrum` either gives the parameters, and the modes are generated, or names
+files to read the modes from. Not both.
+
+When the modes are generated, three files are written to `output_path`: the
+parameters, the modes and their phases, at full precision. Reading these
+files back with `read_from_file` gives exactly the same turbulence, whatever
+the compiler or code version, at the same working precision. Reading never
+writes files. Keeping the file names distinct between several FST entries is
+up to you.
+
+| Name                    | Description                                                     | Required | Default              |
+| ----------------------- | --------------------------------------------------------------- | -------- | -------------------- |
+| `turbulence_intensity`  | Target intensity as a fraction, 0.05 means 5%                   | Yes      | -                    |
+| `integral_length_scale` | Integral length scale, in mesh units                            | Yes      | -                    |
+| `n_shells`              | Number of wavenumber shells, at least 2                         | Yes      | -                    |
+| `modes_per_shell`       | Modes per shell, 3 to 1000                                      | Yes      | -                    |
+| `k_min`, `k_max`        | Wavenumber range                                                | Yes      | -                    |
+| `periodic`              | Periodic directions; their wavenumbers fit the domain length    | No       | all `false`          |
+| `seed`                  | Random seed                                                     | No       | `-143`               |
+| `output_path`           | Folder for the files below                                      | No       | `"./fst_files"`      |
+| `config_file`           | Parameters                                                      | No       | `"fst.config"`       |
+| `modes_file`            | Wavenumbers, amplitudes and directions                          | No       | `"fst_spectrum.csv"` |
+| `phases_file`           | Phases                                                          | No       | `"fst_phases.csv"`   |
+| `sphere_file`           | Shell points before the modes are packed                        | No       | `"sphere.dat"`       |
+
+To read instead:
+
+```json
+"spectrum": {
+  "read_from_file": {
+    "config_file": "./fst_files/fst.config",
+    "modes_file": "./fst_files/fst_spectrum.csv",
+    "phases_file": "./fst_files/fst_phases.csv"
+  }
+}
+```
+
+All three names are required and a missing file stops the run. After reading,
+a warning is printed if a mode is not divergence free, if a periodic
+wavenumber does not fit this domain, or if `convection_velocity` does not have
+the magnitude the spectrum was made with.
 
 Some rules of thumb, which the checks also report:
 - `gain` times the time the flow needs to cross the fringe should be at least 5,
@@ -1835,6 +1872,66 @@ Some rules of thumb, which the checks also report:
 - The smallest wavelength, \f$ 2\pi / \f$ `k_max`, needs about 4 points per
   wavelength of the mean grid spacing inside the zone.
 
+#### Free-stream turbulence at an inflow {#case-file_fluid-fst-inflow}
+
+Adding `+fst` to `velocity_value`, `expression_velocity`, `blasius_profile` or
+`user_velocity` adds free-stream turbulence to that inflow. The base condition
+gives the mean, and \f$ r(t) \, \lambda(\mathbf{x}) \, \mathbf{u}'(\mathbf{x}, t) \f$
+is added at the boundary points, once per time step. The turbulence is the
+same as for the [fst source term](@ref case-file_fluid-source-term) and is set
+in an `fst` object inside the boundary condition:
+
+```json
+{
+  "type": "velocity_value+fst",
+  "zone_indices": [1],
+  "value": [1.0, 0.0, 0.0],
+  "fst": {
+    "convection_velocity": [1.0, 0.0, 0.0],
+    "spectrum": {
+      "turbulence_intensity": 0.05,
+      "integral_length_scale": 0.2,
+      "n_shells": 20,
+      "modes_per_shell": 12,
+      "k_min": 3.5,
+      "k_max": 30.0,
+      "periodic": [false, false, true]
+    },
+    "fringe": {
+      "y": { "start": -1.0, "end": 1.0, "rise": 0.1, "fall": 0.1 }
+    },
+    "start_time": 0.0,
+    "ramp_time": 1.0,
+    "dump_fields": false,
+    "dump_file_name": "fst_inflow_fields"
+  }
+}
+```
+
+`convection_velocity`, `spectrum` and `fringe` are required. The other keys
+work as for the source term. The inflow can have any orientation and shape,
+since the turbulence and the fringe are evaluated at each boundary point.
+
+`fringe` is either `"none"` or a taper, and it is required, because points on
+an edge of the inflow also belong to the neighbouring boundary:
+
+| Boundary next to the inflow                  | Edge points get                                     | `"none"` is fine |
+| -------------------------------------------- | --------------------------------------------------- | ---------------- |
+| periodic                                     | -                                                   | Yes              |
+| `symmetry`, `normal_outflow`, `outflow`      | the inflow, turbulence included                     | Yes              |
+| `no_slip` or any other velocity condition    | the condition listed last in `boundary_conditions`  | No               |
+
+Next to a wall, taper the turbulence to zero at the wall, with `start` or `end`
+on the wall coordinate. The fringe is then exactly zero there, and the edge
+behaves as for any inflow. Without the taper, the wall edge gets fluctuating
+velocity whenever the inflow is listed after the wall.
+
+The turbulence leaves through an outflow boundary. Its net flux through the
+inflow is zero on average but not at every instant, so it is not suited to a
+closed domain.
+
+With `dump_fields`, the fringe and \f$ \mathbf{u}' \f$ at the boundary points
+are written to `dump_file_name` at the first step, as fields 1 to 4.
 
 ### Arbitrary Lagrangian-Eulerian Framework {#case-file_fluid-ale}
 Neko supports the simulation of moving walls through the Arbitrary Lagrangian-Eulerian (ALE) framework. The current implementation allows for an arbitrary number of individually moving or deformable walls, collectively referred to as bodies.

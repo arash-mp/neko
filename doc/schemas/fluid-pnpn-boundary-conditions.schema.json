@@ -801,6 +801,131 @@
             }
           },
           "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "zone_indices",
+            "value",
+            "fst"
+          ],
+          "properties": {
+            "type": {
+              "const": "velocity_value+fst"
+            },
+            "zone_indices": {
+              "$ref": "urn:neko:schema:common#/$defs/integerArrayOrRef"
+            },
+            "name": {
+              "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+            },
+            "value": {
+              "$ref": "urn:neko:schema:common#/$defs/vector3OrRef"
+            },
+            "fst": {
+              "$ref": "urn:neko:schema:fst#/$defs/inflow"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "zone_indices",
+            "value",
+            "fst"
+          ],
+          "properties": {
+            "type": {
+              "const": "expression_velocity+fst"
+            },
+            "zone_indices": {
+              "$ref": "urn:neko:schema:common#/$defs/integerArrayOrRef"
+            },
+            "name": {
+              "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+            },
+            "value": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+              }
+            },
+            "fst": {
+              "$ref": "urn:neko:schema:fst#/$defs/inflow"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "zone_indices",
+            "delta",
+            "freestream_velocity",
+            "approximation",
+            "fst"
+          ],
+          "properties": {
+            "type": {
+              "const": "blasius_profile+fst"
+            },
+            "zone_indices": {
+              "$ref": "urn:neko:schema:common#/$defs/integerArrayOrRef"
+            },
+            "name": {
+              "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+            },
+            "delta": {
+              "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+            },
+            "freestream_velocity": {
+              "$ref": "urn:neko:schema:common#/$defs/vector3OrRef"
+            },
+            "approximation": {
+              "type": "string",
+              "enum": [
+                "linear",
+                "quadratic",
+                "cubic",
+                "quartic",
+                "sin",
+                "tanh"
+              ]
+            },
+            "fst": {
+              "$ref": "urn:neko:schema:fst#/$defs/inflow"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "zone_indices",
+            "fst"
+          ],
+          "properties": {
+            "type": {
+              "const": "user_velocity+fst"
+            },
+            "zone_indices": {
+              "$ref": "urn:neko:schema:common#/$defs/integerArrayOrRef"
+            },
+            "name": {
+              "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+            },
+            "fst": {
+              "$ref": "urn:neko:schema:fst#/$defs/inflow"
+            }
+          },
+          "additionalProperties": false
         }
       ]
     }

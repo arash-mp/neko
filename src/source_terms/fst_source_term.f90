@@ -48,7 +48,8 @@ module fst_source_term
   use field_list, only : field_list_t
   use coefs, only : coef_t
   use source_term, only : source_term_t
-  use fst_spectrum, only : fst_spectrum_t
+  use fst_modes, only : fst_modes_t, fst_free_mapped
+  use fst_fringe, only : fst_fringe_t
   use point_zone, only : point_zone_t
   use point_zone_registry, only : neko_point_zone_registry
   use registry, only : neko_registry
@@ -59,13 +60,13 @@ module fst_source_term
   use logger, only : neko_log, LOG_SIZE
   use utils, only : neko_error, neko_warning, NEKO_FNAME_LEN
   use neko_config, only : NEKO_BCKND_DEVICE
-  use device, only : device_map, device_unmap, device_memcpy, &
+  use device, only : device_map, device_memcpy, &
        HOST_TO_DEVICE, DEVICE_TO_HOST
   use fst_source_term_cpu, only : fst_source_term_compute_cpu, &
        fst_source_term_fringe_cpu
   use fst_source_term_device, only : fst_source_term_compute_device
-  use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR, c_associated
-  use math, only : glmax, glmin, pi
+  use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR
+  use math, only : pi, masked_gather_copy
   use comm, only : NEKO_COMM, MPI_REAL_PRECISION, pe_rank
   use mpi_f08, only : MPI_Allreduce, MPI_IN_PLACE, MPI_MIN, MPI_MAX, &
        MPI_SUM, MPI_INTEGER
@@ -75,8 +76,9 @@ module fst_source_term
   type, public, extends(source_term_t) :: fst_source_term_t
      !> The term does nothing unless enabled.
      logical :: enabled = .false.
-     !> Generated mode set.
-     type(fst_spectrum_t) :: spectrum
+     !> Mode set and fringe.
+     type(fst_modes_t) :: modes
+     type(fst_fringe_t) :: fringe
      !> Forcing region. Its mask follows the mesh (material points).
      class(point_zone_t), pointer :: zone => null()
      integer, pointer :: mask(:) => null()
@@ -86,32 +88,11 @@ module fst_source_term
      type(field_t), pointer :: w => null()
      !> Relaxation rate [1/time].
      real(kind=rp) :: gain = 0.0_rp
-     !> Convection velocity of the frozen turbulence and its magnitude.
-     real(kind=rp) :: conv_vel(3) = 0.0_rp
-     real(kind=rp) :: u_ref = 0.0_rp
      !> Length of the linear ramp after start_time.
      real(kind=rp) :: ramp_time = 0.0_rp
-     !> Fringe per direction; directions that are not smooth are flat.
-     logical :: fringe_smooth(3) = .false.
-     real(kind=rp) :: fringe_start(3) = 0.0_rp
-     real(kind=rp) :: fringe_end(3) = 0.0_rp
-     real(kind=rp) :: fringe_rise(3) = 0.0_rp
-     real(kind=rp) :: fringe_fall(3) = 0.0_rp
      !> One of initial_condition, constant or field.
      character(len=:), allocatable :: baseflow_method
-     !> Modes in the layout used by the kernels, a_j = u_hat_j * amplitude.
-     integer :: k_length = 0
-     real(kind=rp), allocatable :: kx(:), ky(:), kz(:)
-     real(kind=rp), allocatable :: ax(:), ay(:), az(:)
-     real(kind=rp), allocatable :: mode_phase(:)
-     !> Device copies of the modes and of the base flow.
-     type(c_ptr) :: kx_d = C_NULL_PTR
-     type(c_ptr) :: ky_d = C_NULL_PTR
-     type(c_ptr) :: kz_d = C_NULL_PTR
-     type(c_ptr) :: ax_d = C_NULL_PTR
-     type(c_ptr) :: ay_d = C_NULL_PTR
-     type(c_ptr) :: az_d = C_NULL_PTR
-     type(c_ptr) :: phase_d = C_NULL_PTR
+     !> Device copies of the base flow.
      type(c_ptr) :: u_bf_d = C_NULL_PTR
      type(c_ptr) :: v_bf_d = C_NULL_PTR
      type(c_ptr) :: w_bf_d = C_NULL_PTR
@@ -144,14 +125,10 @@ contains
     type(coef_t), intent(in), target :: coef
     character(len=*), intent(in) :: variable_name
 
-    character(len=:), allocatable :: zone_name, path, read_str, dump_name
-    character(len=1), parameter :: dir_char(3) = ['x', 'y', 'z']
-    logical, allocatable :: periodic_json(:)
-    logical :: periodic(3), write_files
-    real(kind=rp) :: start_time, end_time, ti, il, k_min, k_max
-    real(kind=rp) :: lx_dom, ly_dom, lz_dom
-    integer :: n_shells, modes_per_shell, seed
-    integer :: d, n, n_zone_global, ierr
+    character(len=:), allocatable :: zone_name, read_str, dump_name
+    real(kind=rp), allocatable :: conv_vel(:)
+    real(kind=rp) :: start_time, end_time
+    integer :: n_zone_global, ierr
     character(len=LOG_SIZE) :: log_buf
     type(json_file) :: baseflow_subdict, spectrum_subdict
 
@@ -200,88 +177,25 @@ contains
     if (this%gain .le. 0.0_rp) then
        call neko_error("(FST) gain must be > 0")
     end if
-    block
-      real(kind=rp), allocatable :: cv(:)
-      call json_get_or_lookup(json, "convection_velocity", cv)
-      if (size(cv) .ne. 3) then
-         call neko_error("(FST) convection_velocity must have 3 elements")
-      end if
-      this%conv_vel = cv
-      this%u_ref = norm2(this%conv_vel)
-    end block
+    call json_get_or_lookup(json, "convection_velocity", conv_vel)
+    if (size(conv_vel) .ne. 3) then
+       call neko_error("(FST) convection_velocity must have 3 elements")
+    end if
     call json_get_or_lookup_or_default(json, "ramp_time", this%ramp_time, &
          0.0_rp)
     if (this%ramp_time .lt. 0.0_rp) then
        call neko_error("(FST) ramp_time must be >= 0")
     end if
 
-    do d = 1, 3
-       if (json%valid_path("fringe." // dir_char(d))) then
-          this%fringe_smooth(d) = .true.
-          call json_get_or_lookup(json, "fringe." // dir_char(d) // &
-               ".start", &
-               this%fringe_start(d))
-          call json_get_or_lookup(json, "fringe." // dir_char(d) // &
-               ".end", &
-               this%fringe_end(d))
-          call json_get_or_lookup(json, "fringe." // dir_char(d) // &
-               ".rise", &
-               this%fringe_rise(d))
-          call json_get_or_lookup(json, "fringe." // dir_char(d) // &
-               ".fall", &
-               this%fringe_fall(d))
-
-          if (this%fringe_end(d) .le. this%fringe_start(d)) then
-             call neko_error("(FST) fringe." // dir_char(d) // &
-                  ": end must be > start")
-          end if
-          if (this%fringe_rise(d) .le. 0.0_rp .or. &
-               this%fringe_fall(d) .le. 0.0_rp) then
-             call neko_error("(FST) fringe." // dir_char(d) // &
-                  ": rise and fall must be > 0")
-          end if
-          if (this%fringe_end(d) - this%fringe_start(d) .lt. &
-               this%fringe_rise(d) + this%fringe_fall(d)) then
-             if (pe_rank .eq. 0) then
-                call neko_warning("(FST) fringe." // dir_char(d) // &
-                     ": rise + fall exceeds end - start." // &
-                     new_line('A') // "      The ramps overlap and " // &
-                     "lambda never reaches 1, so the effective" // &
-                     new_line('A') // "      forcing is weaker than " // &
-                     "gain suggests.")
-             end if
-          end if
-       end if
-    end do
-    if (.not. any(this%fringe_smooth)) then
-       if (pe_rank .eq. 0) then
-          call neko_warning("(FST) No fringe direction given." // &
-               new_line('A') // "      The forcing is applied at full " // &
-               "strength on the entire zone.")
-       end if
+    if (.not. json%valid_path("fringe") .and. pe_rank .eq. 0) then
+       call neko_warning("(FST) No fringe given." // new_line('A') // &
+            "      The forcing is applied at full strength on the " // &
+            "entire zone.")
     end if
+    call this%fringe%init(json, "fringe", .false.)
 
-    periodic = .false.
-    if (json%valid_path("periodic")) then
-       call json_get(json, "periodic", periodic_json)
-       if (size(periodic_json) .ne. 3) then
-          call neko_error("(FST) periodic must have 3 elements")
-       end if
-       periodic = periodic_json
-    end if
-
-    call json_get_or_lookup(json, "turbulence_intensity", ti)
-    call json_get_or_lookup(json, "integral_length_scale", il)
     call json_get(json, "spectrum", spectrum_subdict)
-    call json_get_or_lookup(spectrum_subdict, "n_shells", n_shells)
-    call json_get_or_lookup(spectrum_subdict, "modes_per_shell", &
-         modes_per_shell)
-    call json_get_or_lookup(spectrum_subdict, "k_min", k_min)
-    call json_get_or_lookup(spectrum_subdict, "k_max", k_max)
-
-    call json_get_or_lookup_or_default(json, "seed", seed, -143)
-    call json_get_or_default(json, "write_files", write_files, .false.)
-    call json_get_or_default(json, "files_output_path", path, "./fst_files")
+    call this%modes%init(spectrum_subdict, conv_vel, coef)
 
     call json_get_or_default(json, "dump_fields", this%dump_flds, .false.)
     call json_get_or_default(json, "dump_file_name", dump_name, "fst_fields")
@@ -290,20 +204,6 @@ contains
          .false.)
     if (this%validate_only) this%dump_flds = .true.
 
-    if (write_files .and. pe_rank .eq. 0) then
-       call execute_command_line("mkdir -p " // trim(path))
-    end if
-
-    n = coef%dof%size()
-    lx_dom = glmax(coef%dof%x%x, n) - glmin(coef%dof%x%x, n)
-    ly_dom = glmax(coef%dof%y%x, n) - glmin(coef%dof%y%x, n)
-    lz_dom = glmax(coef%dof%z%x, n) - glmin(coef%dof%z%x, n)
-
-    call this%spectrum%init(n_shells, modes_per_shell, k_min, k_max, &
-         ti, il, this%u_ref, periodic, seed, write_files, path)
-    call this%spectrum%generate(lx_dom, ly_dom, lz_dom)
-
-    call pack_modes(this)
 
     allocate(this%u_bf(this%zone%size))
     allocate(this%v_bf(this%zone%size))
@@ -341,28 +241,6 @@ contains
     end select
 
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_map(this%kx, this%kx_d, this%k_length)
-       call device_map(this%ky, this%ky_d, this%k_length)
-       call device_map(this%kz, this%kz_d, this%k_length)
-       call device_map(this%ax, this%ax_d, this%k_length)
-       call device_map(this%ay, this%ay_d, this%k_length)
-       call device_map(this%az, this%az_d, this%k_length)
-       call device_map(this%mode_phase, this%phase_d, this%k_length)
-
-       call device_memcpy(this%kx, this%kx_d, this%k_length, &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(this%ky, this%ky_d, this%k_length, &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(this%kz, this%kz_d, this%k_length, &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(this%ax, this%ax_d, this%k_length, &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(this%ay, this%ay_d, this%k_length, &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(this%az, this%az_d, this%k_length, &
-            HOST_TO_DEVICE, sync = .false.)
-       call device_memcpy(this%mode_phase, this%phase_d, this%k_length, &
-            HOST_TO_DEVICE, sync = .true.)
 
        if (this%zone%size .gt. 0) then
           call device_map(this%u_bf, this%u_bf_d, this%zone%size)
@@ -418,17 +296,15 @@ contains
          u = pu, v = pv, w = pw, interpolate = interpolate)
 
     ! On device the imported values are only on the device
-    if (NEKO_BCKND_DEVICE .eq. 1) then
-       call wku%copy_from(DEVICE_TO_HOST, .false.)
-       call wkv%copy_from(DEVICE_TO_HOST, .false.)
-       call wkw%copy_from(DEVICE_TO_HOST, .true.)
-    end if
+    call wku%copy_from(DEVICE_TO_HOST, .false.)
+    call wkv%copy_from(DEVICE_TO_HOST, .false.)
+    call wkw%copy_from(DEVICE_TO_HOST, .true.)
 
-    call gather_masked(this%u_bf, wku%x, this%mask, wku%size(), &
+    call masked_gather_copy(this%u_bf, wku%x, this%mask, wku%size(), &
          this%zone%size)
-    call gather_masked(this%v_bf, wkv%x, this%mask, wkv%size(), &
+    call masked_gather_copy(this%v_bf, wkv%x, this%mask, wkv%size(), &
          this%zone%size)
-    call gather_masked(this%w_bf, wkw%x, this%mask, wkw%size(), &
+    call masked_gather_copy(this%w_bf, wkw%x, this%mask, wkw%size(), &
          this%zone%size)
 
     call wku%free()
@@ -436,36 +312,6 @@ contains
     call wkw%free()
 
   end subroutine baseflow_from_field
-
-  !> Copy the modes into flat arrays and fold the shell amplitude into a_j.
-  subroutine pack_modes(this)
-    class(fst_source_term_t), intent(inout) :: this
-
-    integer :: m
-    real(kind=rp) :: amp
-
-    this%k_length = this%spectrum%k_length
-
-    allocate(this%kx(this%k_length))
-    allocate(this%ky(this%k_length))
-    allocate(this%kz(this%k_length))
-    allocate(this%ax(this%k_length))
-    allocate(this%ay(this%k_length))
-    allocate(this%az(this%k_length))
-    allocate(this%mode_phase(this%k_length))
-
-    do m = 1, this%k_length
-       amp = this%spectrum%shell_amp(this%spectrum%shell(m))
-       this%kx(m) = this%spectrum%k_num(m, 1)
-       this%ky(m) = this%spectrum%k_num(m, 2)
-       this%kz(m) = this%spectrum%k_num(m, 3)
-       this%ax(m) = this%spectrum%u_hat(m, 1)*amp
-       this%ay(m) = this%spectrum%u_hat(m, 2)*amp
-       this%az(m) = this%spectrum%u_hat(m, 3)*amp
-       this%mode_phase(m) = this%spectrum%phase(m)
-    end do
-
-  end subroutine pack_modes
 
   !> Copy the base flow to the device.
   subroutine fst_baseflow_to_device(this)
@@ -484,18 +330,10 @@ contains
   subroutine fst_free(this)
     class(fst_source_term_t), intent(inout) :: this
 
-    call this%spectrum%free()
-
-    call free_mapped(this%kx, this%kx_d)
-    call free_mapped(this%ky, this%ky_d)
-    call free_mapped(this%kz, this%kz_d)
-    call free_mapped(this%ax, this%ax_d)
-    call free_mapped(this%ay, this%ay_d)
-    call free_mapped(this%az, this%az_d)
-    call free_mapped(this%mode_phase, this%phase_d)
-    call free_mapped(this%u_bf, this%u_bf_d)
-    call free_mapped(this%v_bf, this%v_bf_d)
-    call free_mapped(this%w_bf, this%w_bf_d)
+    call this%modes%free()
+    call fst_free_mapped(this%u_bf, this%u_bf_d)
+    call fst_free_mapped(this%v_bf, this%v_bf_d)
+    call fst_free_mapped(this%w_bf, this%w_bf_d)
     if (allocated(this%baseflow_method)) deallocate(this%baseflow_method)
 
     nullify(this%zone)
@@ -505,26 +343,12 @@ contains
     nullify(this%w)
 
     this%enabled = .false.
-    this%fringe_smooth = .false.
     this%setup_done = .false.
     this%gain_dt_warned = .false.
-    this%k_length = 0
 
     call this%free_base()
 
   end subroutine fst_free
-
-  !> Unmap (on device) and deallocate a host array created with device_map.
-  subroutine free_mapped(x, x_d)
-    real(kind=rp), allocatable, intent(inout) :: x(:)
-    type(c_ptr), intent(inout) :: x_d
-
-    if (allocated(x)) then
-       if (c_associated(x_d)) call device_unmap(x, x_d)
-       deallocate(x)
-    end if
-
-  end subroutine free_mapped
 
   !> Add the forcing to the right-hand side.
   !! @param time Current time state.
@@ -542,20 +366,15 @@ contains
 
        if (this%baseflow_method .eq. "initial_condition") then
           ! The host copy of the velocity is stale on device backends
-          if (NEKO_BCKND_DEVICE .eq. 1) then
-             call device_memcpy(this%u%x, this%u%x_d, this%u%size(), &
-                  DEVICE_TO_HOST, sync = .false.)
-             call device_memcpy(this%v%x, this%v%x_d, this%v%size(), &
-                  DEVICE_TO_HOST, sync = .false.)
-             call device_memcpy(this%w%x, this%w%x_d, this%w%size(), &
-                  DEVICE_TO_HOST, sync = .true.)
-          end if
+          call this%u%copy_from(DEVICE_TO_HOST, .false.)
+          call this%v%copy_from(DEVICE_TO_HOST, .false.)
+          call this%w%copy_from(DEVICE_TO_HOST, .true.)
 
-          call gather_masked(this%u_bf, this%u%x, this%mask, &
+          call masked_gather_copy(this%u_bf, this%u%x, this%mask, &
                this%u%size(), this%zone%size)
-          call gather_masked(this%v_bf, this%v%x, this%mask, &
+          call masked_gather_copy(this%v_bf, this%v%x, this%mask, &
                this%v%size(), this%zone%size)
-          call gather_masked(this%w_bf, this%w%x, this%mask, &
+          call masked_gather_copy(this%w_bf, this%w%x, this%mask, &
                this%w%size(), this%zone%size)
 
           if (NEKO_BCKND_DEVICE .eq. 1 .and. this%zone%size .gt. 0) then
@@ -609,7 +428,7 @@ contains
     call fst_apply(this, this%u, this%v, this%w, fu, fv, fw, &
          this%u_bf, this%v_bf, this%w_bf, &
          this%u_bf_d, this%v_bf_d, this%w_bf_d, &
-         coeff, this%fringe_smooth, real(time%t, kind=rp))
+         coeff, this%fringe%smooth, real(time%t, kind=rp))
 
   end subroutine fst_compute
 
@@ -640,22 +459,23 @@ contains
             this%coef%dof%x%x_d, this%coef%dof%y%x_d, this%coef%dof%z%x_d, &
             u%x_d, v%x_d, w%x_d, fu%x_d, fv%x_d, fw%x_d, &
             u_bf_d, v_bf_d, w_bf_d, &
-            this%k_length, this%kx_d, this%ky_d, this%kz_d, &
-            this%ax_d, this%ay_d, this%az_d, this%phase_d, &
-            this%conv_vel*t, coeff, &
-            merge(1, 0, smooth), this%fringe_start, &
-            this%fringe_end, this%fringe_rise, this%fringe_fall)
+            this%modes%k_length, this%modes%kx_d, this%modes%ky_d, &
+            this%modes%kz_d, this%modes%ax_d, this%modes%ay_d, &
+            this%modes%az_d, this%modes%phase_d, &
+            this%modes%conv_vel*t, coeff, &
+            merge(1, 0, smooth), this%fringe%start, &
+            this%fringe%end, this%fringe%rise, this%fringe%fall)
     else
        call fst_source_term_compute_cpu(u%dof%size(), this%zone%size, &
             this%mask, &
             this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
             u%x, v%x, w%x, fu%x, fv%x, fw%x, &
             u_bf, v_bf, w_bf, &
-            this%k_length, this%kx, this%ky, this%kz, &
-            this%ax, this%ay, this%az, this%mode_phase, &
-            this%conv_vel*t, coeff, &
-            smooth, this%fringe_start, this%fringe_end, &
-            this%fringe_rise, this%fringe_fall)
+            this%modes%k_length, this%modes%kx, this%modes%ky, this%modes%kz, &
+            this%modes%ax, this%modes%ay, this%modes%az, this%modes%phase, &
+            this%modes%conv_vel*t, coeff, &
+            smooth, this%fringe%start, this%fringe%end, &
+            this%fringe%rise, this%fringe%fall)
     end if
 
   end subroutine fst_apply
@@ -675,21 +495,6 @@ contains
 
   end function time_ramp
 
-  !> dst(i) = src(mask(i)).
-  subroutine gather_masked(dst, src, mask, n, n_mask)
-    integer, intent(in) :: n, n_mask
-    real(kind=rp), intent(out) :: dst(n_mask)
-    real(kind=rp), intent(in) :: src(n)
-    integer, intent(in) :: mask(n_mask)
-
-    integer :: idx
-
-    do idx = 1, n_mask
-       dst(idx) = src(mask(idx))
-    end do
-
-  end subroutine gather_masked
-
   !> Log resolution, fringe strength and spectrum checks, and warn when a
   !! value looks wrong. The thresholds are rules of thumb.
   subroutine diagnostics_init(this, coef)
@@ -701,7 +506,7 @@ contains
     real(kind=rp) :: h_min, h_max, h_avg_max, h_avg, gap_sum
     real(kind=rp) :: lambda_min, ppw, bbox_min(3), bbox_max(3)
     integer :: gap_count
-    real(kind=rp) :: tu_target, tu_rel_err, g_nondim, iso(3)
+    real(kind=rp) :: g_nondim, iso(3)
     integer :: idx, i, d, ierr
 
     call neko_log%message("--- FST validation diagnostics " // &
@@ -724,7 +529,7 @@ contains
          MPI_SUM, NEKO_COMM, ierr)
     h_avg = gap_sum/real(gap_count, kind=rp)
 
-    lambda_min = 2.0_rp*pi/this%spectrum%k_end
+    lambda_min = 2.0_rp*pi/this%modes%k_max
     ppw = lambda_min/h_avg_max
 
     write(log_buf, '(A,E13.5,A,E13.5)') "[FST] GLL gap in zone: min ", &
@@ -776,9 +581,9 @@ contains
          MPI_MAX, NEKO_COMM, ierr)
 
     do d = 1, 3
-       if (this%fringe_smooth(d)) then
-          if (this%fringe_start(d) .lt. bbox_min(d) .or. &
-               this%fringe_end(d) .gt. bbox_max(d)) then
+       if (this%fringe%smooth(d)) then
+          if (this%fringe%start(d) .lt. bbox_min(d) .or. &
+               this%fringe%end(d) .gt. bbox_max(d)) then
              if (pe_rank .eq. 0) then
                 call neko_warning("(FST) fringe." // dir_char(d) // &
                      " support [start, end] extends beyond" // &
@@ -790,10 +595,10 @@ contains
           end if
 
           ! gain times the time the flow spends crossing the fringe
-          if (abs(this%conv_vel(d)) .gt. 0.0_rp) then
+          if (abs(this%modes%conv_vel(d)) .gt. 0.0_rp) then
              g_nondim = this%gain &
-                  * (this%fringe_end(d) - this%fringe_start(d)) &
-                  / abs(this%conv_vel(d))
+                  * (this%fringe%end(d) - this%fringe%start(d)) &
+                  / abs(this%modes%conv_vel(d))
              write(log_buf, '(A,A,A,F10.3)') &
                   "[FST] gain * L_fringe/|U_c." , dir_char(d), "|: ", &
                   g_nondim
@@ -815,36 +620,16 @@ contains
        end if
     end do
 
-    ! Spectrum energies are only known on rank 0
-    if (pe_rank .eq. 0) then
-       tu_target = this%spectrum%ti*this%u_ref
-       tu_rel_err = abs(this%spectrum%tu_uinf_estimate - tu_target) &
-            / tu_target
-       write(log_buf, '(A,E13.5,A,E13.5)') &
-            "[FST] Tu*U target: ", tu_target, &
-            " realized: ", this%spectrum%tu_uinf_estimate
-       call neko_log%message(log_buf)
-       iso = 3.0_rp*this%spectrum%energy/sum(this%spectrum%energy)
-       write(log_buf, '(A,3F7.3)') &
-            "[FST] component energy ratio E_u:E_v:E_w (x3/sum): ", iso
-       call neko_log%message(log_buf)
-       if (maxval(abs(iso - 1.0_rp)) .gt. 0.2_rp) then
-          call neko_warning("(FST) Component energies deviate more " // &
-               "than 20% from isotropy." // new_line('A') // &
-               "      Increase spectrum.modes_per_shell / n_shells, or " // &
-               "raise k_min relative" // new_line('A') // &
-               "      to 2*pi/L in periodic directions.")
-       end if
-
-       if (tu_rel_err .gt. 0.1_rp) then
-          call neko_warning("(FST) Realized Tu deviates more than 10%" // &
-               new_line('A') // "      from the target: increase " // &
-               "spectrum.n_shells and/or" // new_line('A') // &
-               "      spectrum.modes_per_shell, or check that " // &
-               "[k_min, k_max]" // new_line('A') // &
-               "      captures the spectrum peak for the given " // &
-               "integral_length_scale.")
-       end if
+    iso = 3.0_rp*this%modes%energy/sum(this%modes%energy)
+    write(log_buf, '(A,3F7.3)') &
+         "[FST] component energy ratio E_u:E_v:E_w (x3/sum): ", iso
+    call neko_log%message(log_buf)
+    if (maxval(abs(iso - 1.0_rp)) .gt. 0.2_rp .and. pe_rank .eq. 0) then
+       call neko_warning("(FST) Component energies deviate more " // &
+            "than 20% from isotropy." // new_line('A') // &
+            "      Increase spectrum.modes_per_shell / n_shells, or " // &
+            "raise k_min relative" // new_line('A') // &
+            "      to 2*pi/L in periodic directions.")
     end if
 
     call neko_log%message("--- End FST validation diagnostics ---")
@@ -968,12 +753,9 @@ contains
     call fst_source_term_fringe_cpu(f_lam%size(), this%zone%size, &
          this%mask, &
          this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
-         f_lam%x, this%fringe_smooth, this%fringe_start, this%fringe_end, &
-         this%fringe_rise, this%fringe_fall)
-    if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_memcpy(f_lam%x, f_lam%x_d, f_lam%size(), &
-            HOST_TO_DEVICE, sync = .true.)
-    end if
+         f_lam%x, this%fringe%smooth, this%fringe%start, this%fringe%end, &
+         this%fringe%rise, this%fringe%fall)
+    call f_lam%copy_from(HOST_TO_DEVICE, .true.)
 
     ! u' with a flat fringe, gain 1 and
     ! zero base flow and velocity it adds 1 * 1 * (0 + u' - 0) = u'

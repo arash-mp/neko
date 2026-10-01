@@ -33,7 +33,8 @@
 !> CPU kernels for `fst_source_term_t`.
 module fst_source_term_cpu
   use num_types, only : rp
-  use math, only : math_stepf
+  use fst_modes, only : fst_mode_sum
+  use fst_fringe, only : fst_fringe_value
   implicit none
   private
 
@@ -72,8 +73,8 @@ contains
     do idx = 1, n_mask
        i = mask(idx)
 
-       lam = fst_fringe(xc(i), yc(i), zc(i), fringe_smooth, fringe_start, &
-            fringe_end, fringe_rise, fringe_fall)
+       lam = fst_fringe_value(xc(i), yc(i), zc(i), fringe_smooth, &
+            fringe_start, fringe_end, fringe_rise, fringe_fall)
        if (lam .le. 0.0_rp) cycle
 
        call fst_mode_sum(xc(i), yc(i), zc(i), shift, k_length, kx, ky, kz, &
@@ -87,73 +88,6 @@ contains
     !$omp end parallel do
 
   end subroutine fst_source_term_compute_cpu
-
-  !> u'_j = sum_m a_j(m) sin(k(m) . (x - shift) + phase(m)) at one point.
-  pure subroutine fst_mode_sum(x, y, z, shift, k_length, kx, ky, kz, &
-       ax, ay, az, phase, rv)
-    real(kind=rp), intent(in) :: x, y, z, shift(3)
-    integer, intent(in) :: k_length
-    real(kind=rp), intent(in) :: kx(k_length), ky(k_length), kz(k_length)
-    real(kind=rp), intent(in) :: ax(k_length), ay(k_length), az(k_length)
-    real(kind=rp), intent(in) :: phase(k_length)
-    real(kind=rp), intent(out) :: rv(3)
-
-    integer :: m
-    real(kind=rp) :: xs, ys, zs, sn, rx, ry, rz
-
-    xs = x - shift(1)
-    ys = y - shift(2)
-    zs = z - shift(3)
-
-    rx = 0.0_rp
-    ry = 0.0_rp
-    rz = 0.0_rp
-    !$omp simd private(sn) reduction(+:rx, ry, rz)
-    do m = 1, k_length
-       sn = sin(kx(m)*xs + ky(m)*ys + kz(m)*zs + phase(m))
-       rx = rx + ax(m)*sn
-       ry = ry + ay(m)*sn
-       rz = rz + az(m)*sn
-    end do
-
-    rv(1) = rx
-    rv(2) = ry
-    rv(3) = rz
-
-  end subroutine fst_mode_sum
-
-  !> Product of the smooth fringes at a point; flat directions give 1.
-  function fst_fringe(x, y, z, smooth, fstart, fend, frise, ffall) &
-       result(lam)
-    real(kind=rp), intent(in) :: x, y, z
-    logical, intent(in) :: smooth(3)
-    real(kind=rp), intent(in) :: fstart(3), fend(3), frise(3), ffall(3)
-    real(kind=rp) :: lam
-
-    real(kind=rp) :: c(3)
-    integer :: d
-
-    c(1) = x
-    c(2) = y
-    c(3) = z
-
-    lam = 1.0_rp
-    do d = 1, 3
-       if (smooth(d)) then
-          lam = lam*fringe_1d(c(d), fstart(d), fend(d), frise(d), ffall(d))
-       end if
-    end do
-
-  end function fst_fringe
-
-  !> Rises from 0 at start over `rise`, falls back to 0 at end over `fall`.
-  function fringe_1d(x, xstart, xend, rise, fall) result(f)
-    real(kind=rp), intent(in) :: x, xstart, xend, rise, fall
-    real(kind=rp) :: f
-
-    f = math_stepf((x - xstart)/rise) - math_stepf((x - xend)/fall + 1.0_rp)
-
-  end function fringe_1d
 
   !> Fringe lambda at the zone points, for the dump.
   subroutine fst_source_term_fringe_cpu(n, n_mask, mask, xc, yc, zc, lam, &
@@ -170,7 +104,7 @@ contains
 
     do idx = 1, n_mask
        i = mask(idx)
-       lam(i) = fst_fringe(xc(i), yc(i), zc(i), fringe_smooth, &
+       lam(i) = fst_fringe_value(xc(i), yc(i), zc(i), fringe_smooth, &
             fringe_start, fringe_end, fringe_rise, fringe_fall)
     end do
 

@@ -20,6 +20,7 @@ module test_fst_spectrum
 
   !> Domain lengths used in all tests.
   real(kind=rp), parameter :: lx = 10.0_rp, ly = 2.0_rp, lz = 1.5_rp
+  integer :: ierr_
 
 contains
 
@@ -47,7 +48,7 @@ contains
     integer, intent(in) :: seed
 
     call spec%init(12, 20, 8.0_rp, 60.0_rp, 0.05_rp, 0.1_rp, 1.3_rp, &
-         periodic, seed, .false., ".")
+         periodic, seed, "")
     call spec%generate(lx, ly, lz)
   end subroutine make_spectrum
 
@@ -162,7 +163,7 @@ contains
     type(fst_spectrum_t) :: spec
 
     call spec%init(10, 12, 1.5_rp, 8.0_rp, 0.05_rp, 0.5_rp, 1.0_rp, &
-         [.false., .true., .true.], -143, .false., ".")
+         [.false., .true., .true.], -143, "")
     call spec%generate(8.0_rp, 8.0_rp, 6.0_rp)
     call check_quantized(spec, 2, 8.0_rp)
     call check_quantized(spec, 3, 6.0_rp)
@@ -210,5 +211,45 @@ contains
     @assertTrue(all(lo .eq. hi))
     call spec%free()
   end subroutine test_broadcast
+
+  !> Saving and loading gives back exactly the same modes on every rank.
+  @test(npes=[2])
+  subroutine test_save_load(this)
+    class(test_fst), intent(inout) :: this
+    type(fst_spectrum_t) :: a, b
+
+    call make_spectrum(a, [.false., .false., .true.], -143)
+    call a%save("test_fst.config", "test_fst_modes.csv", &
+         "test_fst_phases.csv")
+    call MPI_Barrier(this%getMpiCommunicator(), ierr_)
+    call b%load("test_fst.config", "test_fst_modes.csv", &
+         "test_fst_phases.csv", lx, ly, lz)
+
+    @assertEqual(a%k_length, b%k_length)
+    @assertTrue(all(a%k_num(1:a%k_length, :) .eq. b%k_num))
+    @assertTrue(all(a%u_hat(1:a%k_length, :) .eq. b%u_hat))
+    @assertTrue(all(a%phase(1:a%k_length) .eq. b%phase))
+    @assertTrue(all(a%shell(1:a%k_length) .eq. b%shell))
+    @assertTrue(all(a%shell_amp .eq. b%shell_amp))
+    @assertTrue(all(a%periodic .eqv. b%periodic))
+    @assertEqual(a%seed, b%seed)
+    call a%free()
+    call b%free()
+
+    call MPI_Barrier(this%getMpiCommunicator(), ierr_)
+    if (pe_rank .eq. 0) then
+       call delete_file("test_fst.config")
+       call delete_file("test_fst_modes.csv")
+       call delete_file("test_fst_phases.csv")
+    end if
+  end subroutine test_save_load
+
+  subroutine delete_file(fname)
+    character(len=*), intent(in) :: fname
+    integer :: unit
+
+    open(newunit = unit, file = fname, status = 'old')
+    close(unit, status = 'delete')
+  end subroutine delete_file
 
 end module test_fst_spectrum
