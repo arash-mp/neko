@@ -42,14 +42,13 @@ module fst_source_term
   use num_types, only : rp, sp
   use json_module, only : json_file
   use json_utils, only : json_get, json_get_or_default, &
-       json_get_or_lookup, json_get_or_lookup_or_default, &
-       json_get_subdict_or_empty
+       json_get_or_lookup, json_get_subdict_or_empty
   use field, only : field_t
   use field_list, only : field_list_t
   use coefs, only : coef_t
   use source_term, only : source_term_t
   use fst_modes, only : fst_modes_t, fst_free_mapped
-  use fst_fringe, only : fst_fringe_t, fst_time_ramp
+  use fst_fringe, only : fst_fringe_t, fst_ramp_t
   use point_zone, only : point_zone_t
   use point_zone_registry, only : neko_point_zone_registry
   use registry, only : neko_registry
@@ -62,8 +61,7 @@ module fst_source_term
   use neko_config, only : NEKO_BCKND_DEVICE
   use device, only : device_map, device_memcpy, &
        HOST_TO_DEVICE, DEVICE_TO_HOST
-  use fst_source_term_cpu, only : fst_source_term_compute_cpu, &
-       fst_source_term_fringe_cpu
+  use fst_source_term_cpu, only : fst_source_term_compute_cpu
   use fst_source_term_device, only : fst_source_term_compute_device
   use, intrinsic :: iso_c_binding, only : c_ptr, C_NULL_PTR
   use math, only : masked_gather_copy
@@ -88,8 +86,8 @@ module fst_source_term
      type(field_t), pointer :: w => null()
      !> Relaxation rate [1/time].
      real(kind=rp) :: gain = 0.0_rp
-     !> Length of the linear ramp after start_time.
-     real(kind=rp) :: ramp_time = 0.0_rp
+     !> Active window and ramp in time.
+     type(fst_ramp_t) :: ramp
      !> One of initial_condition, constant or field.
      character(len=:), allocatable :: baseflow_method
      !> Device copies of the base flow.
@@ -126,7 +124,6 @@ contains
     character(len=*), intent(in) :: variable_name
 
     character(len=:), allocatable :: zone_name, read_str, dump_name
-    real(kind=rp) :: start_time, end_time
     integer :: n_zone_global, ierr
     character(len=LOG_SIZE) :: log_buf
     type(json_file) :: baseflow_subdict
@@ -135,11 +132,8 @@ contains
 
     call neko_log%section("FST SOURCE TERM")
 
-    call json_get_or_lookup_or_default(json, "start_time", start_time, &
-         0.0_rp)
-    call json_get_or_lookup_or_default(json, "end_time", end_time, &
-         huge(0.0_rp))
-    call this%init_base(fields, coef, start_time, end_time)
+    call this%ramp%init(json)
+    call this%init_base(fields, coef, this%ramp%start, this%ramp%end)
 
     call json_get_or_default(json, "enabled", this%enabled, .false.)
     if (.not. this%enabled) then
@@ -175,11 +169,6 @@ contains
     call json_get_or_lookup(json, "gain", this%gain)
     if (this%gain .le. 0.0_rp) then
        call neko_error("(FST) gain must be > 0")
-    end if
-    call json_get_or_lookup_or_default(json, "ramp_time", this%ramp_time, &
-         0.0_rp)
-    if (this%ramp_time .lt. 0.0_rp) then
-       call neko_error("(FST) ramp_time must be >= 0")
     end if
 
     if (.not. json%valid_path("fringe") .and. pe_rank .eq. 0) then
@@ -249,7 +238,7 @@ contains
     call neko_log%message(log_buf)
     write(log_buf, '(A,E13.5)') "Gain: ", this%gain
     call neko_log%message(log_buf)
-    write(log_buf, '(A,E13.5)') "Ramp time: ", this%ramp_time
+    write(log_buf, '(A,E13.5)') "Ramp time: ", this%ramp%ramp
     call neko_log%message(log_buf)
 
     call neko_log%end_section()
@@ -408,8 +397,7 @@ contains
        end if
     end if
 
-    ramp = fst_time_ramp(real(time%t, kind=rp), this%start_time, &
-         this%ramp_time)
+    ramp = this%ramp%value(real(time%t, kind=rp))
     if (ramp .le. 0.0_rp) return
 
     coeff = this%gain*ramp
@@ -573,11 +561,8 @@ contains
     ! The fringe is cheap and built on the host.
     call neko_scratch_registry%request_field(f_lam, i1, .false.)
     f_lam%x = 0.0_rp
-    call fst_source_term_fringe_cpu(f_lam%size(), this%zone%size, &
-         this%mask, &
-         this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
-         f_lam%x, this%fringe%smooth, this%fringe%start, this%fringe%end, &
-         this%fringe%rise, this%fringe%fall)
+    call this%fringe%fill(f_lam%size(), this%zone%size, this%mask, &
+         this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, f_lam%x)
     call f_lam%copy_from(HOST_TO_DEVICE, .true.)
 
     ! u' with a flat fringe, gain 1 and

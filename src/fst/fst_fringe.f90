@@ -30,19 +30,21 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-!> Smooth fringe for free-stream turbulence, a product of one smooth step
-!! per direction. A direction without an entry is flat (1).
+!> Fringe for free-stream turbulence: in space, a product of one smooth step
+!! per direction (a direction without an entry is flat), and in time, an
+!! active window with a linear ramp.
 module fst_fringe
   use num_types, only : rp
   use json_module, only : json_file, json_string
-  use json_utils, only : json_get, json_get_or_lookup
+  use json_utils, only : json_get, json_get_or_lookup, &
+       json_get_or_lookup_or_default
   use math, only : math_stepf
   use utils, only : neko_error, neko_warning
   use comm, only : pe_rank
   implicit none
   private
 
-  public :: fst_fringe_value, fst_time_ramp
+  public :: fst_fringe_value
 
   type, public :: fst_fringe_t
      !> Directions with a smooth fringe; the others are flat.
@@ -54,7 +56,18 @@ module fst_fringe
      real(kind=rp) :: fall(3) = 0.0_rp
    contains
      procedure, pass(this) :: init => fst_fringe_init
+     procedure, pass(this) :: fill => fst_fringe_fill
   end type fst_fringe_t
+
+  !> Activation in time: active between start and end, ramped over ramp.
+  type, public :: fst_ramp_t
+     real(kind=rp) :: start = 0.0_rp
+     real(kind=rp) :: end = huge(0.0_rp)
+     real(kind=rp) :: ramp = 0.0_rp
+   contains
+     procedure, pass(this) :: init => fst_ramp_init
+     procedure, pass(this) :: value => fst_ramp_value
+  end type fst_ramp_t
 
 contains
 
@@ -142,19 +155,58 @@ contains
 
   end function fst_fringe_value
 
-  !> Linear ramp in time: 0 until t_start, then up to 1 over t_ramp.
-  pure function fst_time_ramp(t, t_start, t_ramp) result(ramp)
-    real(kind=rp), intent(in) :: t, t_start, t_ramp
-    real(kind=rp) :: ramp
+  !> Fringe at a list of points, lam(mask(i)) for i = 1, ..., n_mask.
+  !! @param n Size of the coordinate and output arrays.
+  !! @param n_mask Number of points.
+  !! @param mask The points (1-based).
+  !! @param xc, yc, zc Coordinates.
+  !! @param lam Output.
+  subroutine fst_fringe_fill(this, n, n_mask, mask, xc, yc, zc, lam)
+    class(fst_fringe_t), intent(in) :: this
+    integer, intent(in) :: n, n_mask
+    integer, intent(in) :: mask(n_mask)
+    real(kind=rp), intent(in) :: xc(n), yc(n), zc(n)
+    real(kind=rp), intent(inout) :: lam(n)
+    integer :: idx, i
 
-    if (t .le. t_start) then
-       ramp = 0.0_rp
-    else if (t_ramp .le. 0.0_rp) then
-       ramp = 1.0_rp
-    else
-       ramp = min(1.0_rp, (t - t_start)/t_ramp)
+    do idx = 1, n_mask
+       i = mask(idx)
+       lam(i) = fst_fringe_value(xc(i), yc(i), zc(i), this%smooth, &
+            this%start, this%end, this%rise, this%fall)
+    end do
+
+  end subroutine fst_fringe_fill
+
+  !> Read start_time, end_time and ramp_time from `json`.
+  subroutine fst_ramp_init(this, json)
+    class(fst_ramp_t), intent(inout) :: this
+    type(json_file), intent(inout) :: json
+
+    call json_get_or_lookup_or_default(json, "start_time", this%start, &
+         0.0_rp)
+    call json_get_or_lookup_or_default(json, "end_time", this%end, &
+         huge(0.0_rp))
+    call json_get_or_lookup_or_default(json, "ramp_time", this%ramp, 0.0_rp)
+    if (this%ramp .lt. 0.0_rp) then
+       call neko_error("(FST) ramp_time must be >= 0")
     end if
 
-  end function fst_time_ramp
+  end subroutine fst_ramp_init
+
+  !> 0 before start and after end, rising linearly to 1 over the ramp.
+  pure function fst_ramp_value(this, t) result(r)
+    class(fst_ramp_t), intent(in) :: this
+    real(kind=rp), intent(in) :: t
+    real(kind=rp) :: r
+
+    if (t .le. this%start .or. t .gt. this%end) then
+       r = 0.0_rp
+    else if (this%ramp .le. 0.0_rp) then
+       r = 1.0_rp
+    else
+       r = min(1.0_rp, (t - this%start)/this%ramp)
+    end if
+
+  end function fst_ramp_value
 
 end module fst_fringe

@@ -38,13 +38,12 @@ module fst_inflow
   use bc, only : bc_t, BC_DIRICHLET
   use coefs, only : coef_t
   use json_module, only : json_file
-  use json_utils, only : json_get, json_get_or_default, &
-       json_get_or_lookup_or_default
+  use json_utils, only : json_get, json_get_or_default
   use time_state, only : time_state_t
   use field, only : field_t
   use field_series, only : field_series_t
   use fst_modes, only : fst_modes_t, fst_mode_sum, fst_free_mapped
-  use fst_fringe, only : fst_fringe_t, fst_fringe_value, fst_time_ramp
+  use fst_fringe, only : fst_fringe_t, fst_fringe_value, fst_ramp_t
   use fst_inflow_device, only : fst_inflow_update_device, &
        fst_inflow_add_device
   use neko_config, only : NEKO_BCKND_DEVICE
@@ -65,10 +64,8 @@ module fst_inflow
      !> Mode set and fringe.
      type(fst_modes_t) :: modes
      type(fst_fringe_t) :: fringe
-     !> Active between start_time and end_time, ramped over ramp_time.
-     real(kind=rp) :: start_time = 0.0_rp
-     real(kind=rp) :: end_time = huge(0.0_rp)
-     real(kind=rp) :: ramp_time = 0.0_rp
+     !> Active window and ramp in time.
+     type(fst_ramp_t) :: ramp
      !> ramp * lambda * u' at the boundary points for the current step.
      logical :: active = .false.
      real(kind=rp), allocatable :: gx(:), gy(:), gz(:)
@@ -128,15 +125,7 @@ contains
     call this%modes%init(fst, coef)
     call this%fringe%init(fst, "fringe", .true.)
 
-    call json_get_or_lookup_or_default(fst, "start_time", this%start_time, &
-         0.0_rp)
-    call json_get_or_lookup_or_default(fst, "end_time", this%end_time, &
-         huge(0.0_rp))
-    call json_get_or_lookup_or_default(fst, "ramp_time", this%ramp_time, &
-         0.0_rp)
-    if (this%ramp_time .lt. 0.0_rp) then
-       call neko_error("(FST) ramp_time must be >= 0")
-    end if
+    call this%ramp%init(fst)
     call json_get_or_default(fst, "dump_fields", this%dump, .false.)
     call json_get_or_default(fst, "dump_file_name", dump_name, &
          "fst_inflow_fields")
@@ -290,10 +279,7 @@ contains
     end if
 
     t = real(time%t, kind=rp)
-    coeff = 0.0_rp
-    if (t .le. this%end_time) then
-       coeff = fst_time_ramp(t, this%start_time, this%ramp_time)
-    end if
+    coeff = this%ramp%value(t)
     this%active = coeff .gt. 0.0_rp
 
     if (this%dump) then
@@ -383,10 +369,11 @@ contains
     f_vp%x = 0.0_rp
     f_wp%x = 0.0_rp
 
-    call dump_values(f_lam%size(), this%msk(0), this%msk, &
+    call this%fringe%fill(f_lam%size(), this%msk(0), this%msk(1:), &
+         this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, f_lam%x)
+    call this%modes%fill(f_up%size(), this%msk(0), this%msk(1:), &
          this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
-         f_lam%x, f_up%x, f_vp%x, f_wp%x, this%modes, this%fringe, &
-         this%modes%conv_vel*real(time%t, kind=rp))
+         f_up%x, f_vp%x, f_wp%x, this%modes%conv_vel*real(time%t, kind=rp))
 
     call f_lam%copy_from(HOST_TO_DEVICE, .false.)
     call f_up%copy_from(HOST_TO_DEVICE, .false.)
@@ -407,32 +394,5 @@ contains
     call neko_scratch_registry%relinquish_field(i4)
 
   end subroutine fst_inflow_dump
-
-  !> Fringe and raw u' (no ramp) at the points of a bc_t mask.
-  subroutine dump_values(n, m, msk, xc, yc, zc, lam, up, vp, wp, modes, &
-       fringe, shift)
-    integer, intent(in) :: n, m
-    integer, intent(in) :: msk(0:m)
-    real(kind=rp), intent(in) :: xc(n), yc(n), zc(n)
-    real(kind=rp), intent(inout) :: lam(n), up(n), vp(n), wp(n)
-    type(fst_modes_t), intent(in) :: modes
-    type(fst_fringe_t), intent(in) :: fringe
-    real(kind=rp), intent(in) :: shift(3)
-    real(kind=rp) :: rv(3)
-    integer :: i, k
-
-    do i = 1, m
-       k = msk(i)
-       lam(k) = fst_fringe_value(xc(k), yc(k), zc(k), fringe%smooth, &
-            fringe%start, fringe%end, fringe%rise, fringe%fall)
-       call fst_mode_sum(xc(k), yc(k), zc(k), shift, modes%k_length, &
-            modes%kx, modes%ky, modes%kz, modes%ax, modes%ay, modes%az, &
-            modes%phase, rv)
-       up(k) = rv(1)
-       vp(k) = rv(2)
-       wp(k) = rv(3)
-    end do
-
-  end subroutine dump_values
 
 end module fst_inflow

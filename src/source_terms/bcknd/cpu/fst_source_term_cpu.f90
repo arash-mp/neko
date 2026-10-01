@@ -38,7 +38,7 @@ module fst_source_term_cpu
   implicit none
   private
 
-  public :: fst_source_term_compute_cpu, fst_source_term_fringe_cpu
+  public :: fst_source_term_compute_cpu
 
 contains
 
@@ -88,26 +88,5 @@ contains
     !$omp end parallel do
 
   end subroutine fst_source_term_compute_cpu
-
-  !> Fringe lambda at the zone points, for the dump.
-  subroutine fst_source_term_fringe_cpu(n, n_mask, mask, xc, yc, zc, lam, &
-       fringe_smooth, fringe_start, fringe_end, fringe_rise, fringe_fall)
-    integer, intent(in) :: n, n_mask
-    integer, intent(in) :: mask(n_mask)
-    real(kind=rp), intent(in) :: xc(n), yc(n), zc(n)
-    real(kind=rp), intent(inout) :: lam(n)
-    logical, intent(in) :: fringe_smooth(3)
-    real(kind=rp), intent(in) :: fringe_start(3), fringe_end(3), &
-         fringe_rise(3), fringe_fall(3)
-
-    integer :: idx, i
-
-    do idx = 1, n_mask
-       i = mask(idx)
-       lam(i) = fst_fringe_value(xc(i), yc(i), zc(i), fringe_smooth, &
-            fringe_start, fringe_end, fringe_rise, fringe_fall)
-    end do
-
-  end subroutine fst_source_term_fringe_cpu
 
 end module fst_source_term_cpu

@@ -80,6 +80,7 @@ module fst_modes
      procedure, pass(this) :: init => fst_modes_init
      procedure, pass(this) :: check_resolution => &
           fst_modes_check_resolution
+     procedure, pass(this) :: fill => fst_modes_fill
      procedure, pass(this) :: free => fst_modes_free
   end type fst_modes_t
 
@@ -425,6 +426,36 @@ contains
     this%k_length = 0
 
   end subroutine fst_modes_free
+
+  !> u' at a list of points, up(mask(i)) etc. for i = 1, ..., n_mask.
+  !! @param n Size of the coordinate and output arrays.
+  !! @param n_mask Number of points.
+  !! @param mask The points (1-based).
+  !! @param xc, yc, zc Coordinates.
+  !! @param up, vp, wp Output.
+  !! @param shift The convective shift U_c t.
+  subroutine fst_modes_fill(this, n, n_mask, mask, xc, yc, zc, up, vp, wp, &
+       shift)
+    class(fst_modes_t), intent(in) :: this
+    integer, intent(in) :: n, n_mask
+    integer, intent(in) :: mask(n_mask)
+    real(kind=rp), intent(in) :: xc(n), yc(n), zc(n)
+    real(kind=rp), intent(inout) :: up(n), vp(n), wp(n)
+    real(kind=rp), intent(in) :: shift(3)
+    real(kind=rp) :: rv(3)
+    integer :: idx, i
+
+    do idx = 1, n_mask
+       i = mask(idx)
+       call fst_mode_sum(xc(i), yc(i), zc(i), shift, this%k_length, &
+            this%kx, this%ky, this%kz, this%ax, this%ay, this%az, &
+            this%phase, rv)
+       up(i) = rv(1)
+       vp(i) = rv(2)
+       wp(i) = rv(3)
+    end do
+
+  end subroutine fst_modes_fill
 
   !> Unmap (on device) and deallocate an array created with device_map.
   subroutine fst_free_mapped(x, x_d)
