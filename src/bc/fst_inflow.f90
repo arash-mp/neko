@@ -39,7 +39,7 @@ module fst_inflow
   use coefs, only : coef_t
   use json_module, only : json_file
   use json_utils, only : json_get, json_get_or_default, &
-       json_get_or_lookup, json_get_or_lookup_or_default
+       json_get_or_lookup_or_default
   use time_state, only : time_state_t
   use field, only : field_t
   use field_series, only : field_series_t
@@ -164,6 +164,11 @@ contains
        call device_map(this%gy, this%gy_d, m)
        call device_map(this%gz, this%gz_d, m)
     end if
+
+    ! On every rank, also those without points: the check is collective
+    call neko_log%section("FST INFLOW CHECKS")
+    call this%modes%check_resolution(this%coef, this%msk(1:m), m)
+    call neko_log%end_section()
 
   end subroutine fst_inflow_finalize
 

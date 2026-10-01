@@ -1933,6 +1933,10 @@ closed domain.
 With `dump_fields`, the fringe and \f$ \mathbf{u}' \f$ at the boundary points
 are written to `dump_file_name` at the first step, as fields 1 to 4.
 
+At start-up the inflow prints the same resolution and isotropy checks as the
+source term. The resolution is measured in the elements next to the boundary,
+in all three directions.
+
 ### Arbitrary Lagrangian-Eulerian Framework {#case-file_fluid-ale}
 Neko supports the simulation of moving walls through the Arbitrary Lagrangian-Eulerian (ALE) framework. The current implementation allows for an arbitrary number of individually moving or deformable walls, collectively referred to as bodies.
 

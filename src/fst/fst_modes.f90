@@ -40,10 +40,12 @@ module fst_modes
        json_get_or_lookup, json_get_or_lookup_or_default
   use fst_spectrum, only : fst_spectrum_t
   use coefs, only : coef_t
-  use math, only : glmax, glmin
+  use math, only : glmax, glmin, pi
   use utils, only : neko_error, neko_warning, mkdir
-  use logger, only : LOG_SIZE
-  use comm, only : pe_rank
+  use logger, only : neko_log, LOG_SIZE
+  use comm, only : NEKO_COMM, MPI_REAL_PRECISION, pe_rank
+  use mpi_f08, only : MPI_Allreduce, MPI_IN_PLACE, MPI_MIN, MPI_MAX, &
+       MPI_SUM, MPI_INTEGER
   use neko_config, only : NEKO_BCKND_DEVICE
   use device, only : device_map, device_unmap, device_memcpy, &
        HOST_TO_DEVICE
@@ -76,6 +78,8 @@ module fst_modes
      type(c_ptr) :: phase_d = C_NULL_PTR
    contains
      procedure, pass(this) :: init => fst_modes_init
+     procedure, pass(this) :: check_resolution => &
+          fst_modes_check_resolution
      procedure, pass(this) :: free => fst_modes_free
   end type fst_modes_t
 
@@ -102,6 +106,7 @@ contains
     logical :: periodic(3)
     real(kind=rp) :: lx, ly, lz, ti, il, k_min, k_max
     integer :: n, n_shells, modes_per_shell, seed, i
+    real(kind=rp) :: iso(3)
     character(len=LOG_SIZE) :: log_buf
 
     call this%free()
@@ -181,6 +186,18 @@ contains
     call pack_modes(this, spectrum)
     call spectrum%free()
 
+    iso = 3.0_rp*this%energy/sum(this%energy)
+    write(log_buf, '(A,3F7.3)') &
+         "[FST] component energy ratio E_u:E_v:E_w (x3/sum): ", iso
+    call neko_log%message(log_buf)
+    if (maxval(abs(iso - 1.0_rp)) .gt. 0.2_rp .and. pe_rank .eq. 0) then
+       call neko_warning("(FST) Component energies deviate more " // &
+            "than 20% from isotropy." // new_line('A') // &
+            "      Increase spectrum.modes_per_shell / n_shells, or " // &
+            "raise k_min relative" // new_line('A') // &
+            "      to 2*pi/L in periodic directions.")
+    end if
+
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call map_and_copy(this%kx, this%kx_d)
        call map_and_copy(this%ky, this%ky_d)
@@ -223,6 +240,166 @@ contains
     this%energy(3) = sum(this%az**2)/2.0_rp
 
   end subroutine pack_modes
+
+  !> Log how well the smallest wavelength is resolved in the elements that
+  !! contain the given points, and warn below 4 points per wavelength.
+  !! Collective: every rank calls it, also with no points.
+  !! @param coef SEM coefficients.
+  !! @param mask The points (1-based).
+  !! @param n_mask Number of points on this rank.
+  subroutine fst_modes_check_resolution(this, coef, mask, n_mask)
+    class(fst_modes_t), intent(in) :: this
+    type(coef_t), intent(in) :: coef
+    integer, intent(in) :: n_mask
+    integer, intent(in) :: mask(n_mask)
+    real(kind=rp) :: h_min, h_max, h_avg_max, h_avg, gap_sum, lambda_min, ppw
+    integer :: gap_count, ierr
+    character(len=LOG_SIZE) :: log_buf
+
+    ! The smallest wavelength has to be resolved where the grid is coarsest.
+    ! Spectral elements need about pi points per wavelength of the average
+    ! spacing, so the check uses the coarsest line average (4 for margin).
+    call gll_spacing(coef, mask, n_mask, h_min, h_max, &
+         h_avg_max, gap_sum, gap_count)
+    call MPI_Allreduce(MPI_IN_PLACE, h_min, 1, MPI_REAL_PRECISION, &
+         MPI_MIN, NEKO_COMM, ierr)
+    call MPI_Allreduce(MPI_IN_PLACE, h_max, 1, MPI_REAL_PRECISION, &
+         MPI_MAX, NEKO_COMM, ierr)
+    call MPI_Allreduce(MPI_IN_PLACE, h_avg_max, 1, MPI_REAL_PRECISION, &
+         MPI_MAX, NEKO_COMM, ierr)
+    call MPI_Allreduce(MPI_IN_PLACE, gap_sum, 1, MPI_REAL_PRECISION, &
+         MPI_SUM, NEKO_COMM, ierr)
+    call MPI_Allreduce(MPI_IN_PLACE, gap_count, 1, MPI_INTEGER, &
+         MPI_SUM, NEKO_COMM, ierr)
+    h_avg = gap_sum/real(gap_count, kind=rp)
+
+    lambda_min = 2.0_rp*pi/this%k_max
+    ppw = lambda_min/h_avg_max
+
+    write(log_buf, '(A,E13.5,A,E13.5)') "[FST] GLL gap: min ", &
+         h_min, " mean ", h_avg
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,E13.5)') "[FST] GLL gap: max ", h_max
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,E13.5)') &
+         "[FST] coarsest line-average spacing (criterion basis): ", &
+         h_avg_max
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,E13.5)') "[FST] smallest FST wavelength: ", &
+         lambda_min
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,F8.2,A,F8.2)') "[FST] points per wavelength: best ", &
+         lambda_min/h_min, " mean ", lambda_min/h_avg
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,F8.2)') "[FST] points per wavelength: worst gap ", &
+         lambda_min/h_max
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,F8.2)') &
+         "[FST] points per wavelength (criterion): ", ppw
+    call neko_log%message(log_buf)
+    if (ppw .lt. 4.0_rp .and. pe_rank .eq. 0) then
+       call neko_warning("(FST) Fewer than 4 points per smallest FST" // &
+            new_line('A') // "      wavelength at the coarsest average " // &
+            "spacing (spectral" // new_line('A') // &
+            "      criterion ~pi with margin): the smallest scales may" // &
+            new_line('A') // "      be under-resolved there. " // &
+            "Reduce spectrum.k_max or refine.")
+    end if
+
+  end subroutine fst_modes_check_resolution
+
+  !> GLL spacing over the elements that contain the points: smallest and largest
+  !! gap, the sum and count of all gaps, and the largest line average.
+  !! Local values; reduce over ranks outside.
+  subroutine gll_spacing(coef, mask, n_mask, h_min, h_max, &
+       h_avg_max, gap_sum, gap_count)
+    type(coef_t), intent(in) :: coef
+    integer, intent(in) :: n_mask
+    integer, intent(in) :: mask(n_mask)
+    real(kind=rp), intent(out) :: h_min, h_max, h_avg_max
+    real(kind=rp), intent(out) :: gap_sum
+    integer, intent(out) :: gap_count
+
+    logical, allocatable :: in_zone(:)
+    integer :: lx, ly, lz, nelv, npts, idx, e, i, j, k
+    real(kind=rp) :: d, line_len
+
+    lx = coef%Xh%lx
+    ly = coef%Xh%ly
+    lz = coef%Xh%lz
+    nelv = coef%msh%nelv
+    npts = lx*ly*lz
+
+    allocate(in_zone(nelv))
+    in_zone = .false.
+    do idx = 1, n_mask
+       e = (mask(idx) - 1)/npts + 1
+       in_zone(e) = .true.
+    end do
+
+    h_min = huge(0.0_rp)
+    h_max = 0.0_rp
+    h_avg_max = 0.0_rp
+    gap_sum = 0.0_rp
+    gap_count = 0
+    do e = 1, nelv
+       if (.not. in_zone(e)) cycle
+
+       do k = 1, lz
+          do j = 1, ly
+             line_len = 0.0_rp
+             do i = 2, lx
+                d = sqrt((coef%dof%x%x(i,j,k,e) - coef%dof%x%x(i-1,j,k,e))**2 &
+                     + (coef%dof%y%x(i,j,k,e) - coef%dof%y%x(i-1,j,k,e))**2 &
+                     + (coef%dof%z%x(i,j,k,e) - coef%dof%z%x(i-1,j,k,e))**2)
+                h_min = min(h_min, d)
+                h_max = max(h_max, d)
+                gap_sum = gap_sum + d
+                gap_count = gap_count + 1
+                line_len = line_len + d
+             end do
+             h_avg_max = max(h_avg_max, line_len/real(lx - 1, kind=rp))
+          end do
+       end do
+
+       do k = 1, lz
+          do i = 1, lx
+             line_len = 0.0_rp
+             do j = 2, ly
+                d = sqrt((coef%dof%x%x(i,j,k,e) - coef%dof%x%x(i,j-1,k,e))**2 &
+                     + (coef%dof%y%x(i,j,k,e) - coef%dof%y%x(i,j-1,k,e))**2 &
+                     + (coef%dof%z%x(i,j,k,e) - coef%dof%z%x(i,j-1,k,e))**2)
+                h_min = min(h_min, d)
+                h_max = max(h_max, d)
+                gap_sum = gap_sum + d
+                gap_count = gap_count + 1
+                line_len = line_len + d
+             end do
+             h_avg_max = max(h_avg_max, line_len/real(ly - 1, kind=rp))
+          end do
+       end do
+
+       do j = 1, ly
+          do i = 1, lx
+             line_len = 0.0_rp
+             do k = 2, lz
+                d = sqrt((coef%dof%x%x(i,j,k,e) - coef%dof%x%x(i,j,k-1,e))**2 &
+                     + (coef%dof%y%x(i,j,k,e) - coef%dof%y%x(i,j,k-1,e))**2 &
+                     + (coef%dof%z%x(i,j,k,e) - coef%dof%z%x(i,j,k-1,e))**2)
+                h_min = min(h_min, d)
+                h_max = max(h_max, d)
+                gap_sum = gap_sum + d
+                gap_count = gap_count + 1
+                line_len = line_len + d
+             end do
+             h_avg_max = max(h_avg_max, line_len/real(lz - 1, kind=rp))
+          end do
+       end do
+    end do
+
+    deallocate(in_zone)
+
+  end subroutine gll_spacing
 
   !> Map an array to the device and copy it there.
   subroutine map_and_copy(x, x_d)
