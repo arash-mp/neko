@@ -190,10 +190,11 @@ contains
     ! The solver resets only our flag each step, so pass it on to the base
     if (strong_ .and. .not. this%updated) this%base%updated = .false.
     call this%base%apply_vector(x, y, z, n, time, strong)
-    if (.not. strong_ .or. this%msk(0) .eq. 0) return
+    if (.not. strong_) return
 
+    ! On every rank, also those without points: the dump is collective
     call fst_inflow_update(this, time)
-    if (.not. this%active) return
+    if (.not. this%active .or. this%msk(0) .eq. 0) return
     do i = 1, this%msk(0)
        k = this%msk(i)
        x(k) = x(k) + this%gx(i)
@@ -218,10 +219,11 @@ contains
 
     if (strong_ .and. .not. this%updated) this%base%updated = .false.
     call this%base%apply_vector_dev(x_d, y_d, z_d, time, strong, strm)
-    if (.not. strong_ .or. this%msk(0) .eq. 0) return
+    if (.not. strong_) return
 
+    ! On every rank, also those without points: the dump is collective
     call fst_inflow_update(this, time, strm)
-    if (.not. this%active) return
+    if (.not. this%active .or. this%msk(0) .eq. 0) return
     call fst_inflow_add_device(this%msk(0), this%msk_d, x_d, y_d, z_d, &
          this%gx_d, this%gy_d, this%gz_d, strm)
 

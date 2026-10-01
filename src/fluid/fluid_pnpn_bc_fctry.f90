@@ -199,9 +199,8 @@ contains
     type(json_file), intent(inout) :: json
     type(coef_t), target, intent(in) :: coef
     type(user_t), target, intent(in) :: user
-    character(len=:), allocatable :: type, base_type
+    character(len=:), allocatable :: type
     type(fst_inflow_t), pointer :: fst_bc
-    logical :: fst
     integer :: i, j, k
     integer, allocatable :: zone_indices(:)
     character(len=:), allocatable :: default_name
@@ -210,25 +209,16 @@ contains
 
     call json_get(json, "type", type)
 
-    ! "<type>+fst" adds free-stream turbulence to the inflow <type>
-    fst = len_trim(type) .gt. 4
-    if (fst) fst = type(len_trim(type)-3:len_trim(type)) .eq. "+fst"
-    if (fst) then
-       base_type = type(1:len_trim(type)-4)
-    else
-       base_type = trim(type)
-    end if
-
-    select case (trim(base_type))
+    select case (trim(type))
     case ("symmetry")
        if (scheme%full_stress_formulation) then
           allocate(symmetry_t::object)
        else
           allocate(symmetry_aligned_t::object)
        end if
-    case ("velocity_value")
+    case ("velocity_value", "velocity_value+fst")
        allocate(inflow_t::object)
-    case ("expression_velocity")
+    case ("expression_velocity", "expression_velocity+fst")
        allocate(expression_dirichlet_vector_t::object)
     case ("no_slip")
        allocate(no_slip_t::object)
@@ -238,7 +228,7 @@ contains
        else
           allocate(non_normal_aligned_t::object)
        end if
-    case ("blasius_profile")
+    case ("blasius_profile", "blasius_profile+fst")
        allocate(blasius_t::object)
     case ("shear_stress")
        allocate(shear_stress_t::object)
@@ -252,7 +242,7 @@ contains
           wall_bc%user => user
        end select
 
-    case ("user_velocity")
+    case ("user_velocity", "user_velocity+fst")
        allocate(field_dirichlet_vector_t::object)
        select type (obj => object)
        type is (field_dirichlet_vector_t)
@@ -274,18 +264,14 @@ contains
             FLUID_PNPN_KNOWN_BCS)
     end select
 
-    if (fst) then
-       if (base_type .ne. "velocity_value" .and. &
-            base_type .ne. "expression_velocity" .and. &
-            base_type .ne. "blasius_profile" .and. &
-            base_type .ne. "user_velocity") then
-          call neko_error("+fst can only be added to velocity_value, " // &
-               "expression_velocity, blasius_profile or user_velocity")
-       end if
+    ! "<inflow>+fst": the inflow allocated above becomes the base
+    select case (trim(type))
+    case ("velocity_value+fst", "expression_velocity+fst", &
+         "blasius_profile+fst", "user_velocity+fst")
        allocate(fst_bc)
        fst_bc%base => object
        object => fst_bc
-    end if
+    end select
 
     call json_get_or_lookup(json, "zone_indices", zone_indices)
     write(buf,'("velocity_bc_",I0)') zone_indices(1)
