@@ -57,6 +57,8 @@ module fst_inflow
   implicit none
   private
 
+  public :: fst_inflow_wrap
+
   type, public, extends(bc_t) :: fst_inflow_t
      !> The inflow condition the turbulence is added to.
      class(bc_t), pointer :: base => null()
@@ -90,6 +92,19 @@ module fst_inflow
   end type fst_inflow_t
 
 contains
+
+  !> Turn `object` into an fst inflow whose base is the inflow condition
+  !! `object` pointed to.
+  !! @param object An allocated inflow condition; on return the fst inflow.
+  subroutine fst_inflow_wrap(object)
+    class(bc_t), pointer, intent(inout) :: object
+    type(fst_inflow_t), pointer :: fst_bc
+
+    allocate(fst_bc)
+    fst_bc%base => object
+    object => fst_bc
+
+  end subroutine fst_inflow_wrap
 
   !> Constructor. The base condition is set by the factory before this.
   !! @param coef SEM coefficients.

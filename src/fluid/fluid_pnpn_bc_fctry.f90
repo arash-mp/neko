@@ -46,7 +46,7 @@ submodule(fluid_pnpn) fluid_pnpn_bc_fctry
   use blasius, only : blasius_t
   use dirichlet, only : dirichlet_t
   use dong_outflow, only : dong_outflow_t
-  use fst_inflow, only : fst_inflow_t
+  use fst_inflow, only : fst_inflow_wrap
   use symmetry_aligned, only : symmetry_aligned_t
   use symmetry, only : symmetry_t
   use non_normal_aligned, only : non_normal_aligned_t
@@ -200,7 +200,6 @@ contains
     type(coef_t), target, intent(in) :: coef
     type(user_t), target, intent(in) :: user
     character(len=:), allocatable :: type
-    type(fst_inflow_t), pointer :: fst_bc
     integer :: i, j, k
     integer, allocatable :: zone_indices(:)
     character(len=:), allocatable :: default_name
@@ -268,9 +267,7 @@ contains
     select case (trim(type))
     case ("velocity_value+fst", "expression_velocity+fst", &
          "blasius_profile+fst", "user_velocity+fst")
-       allocate(fst_bc)
-       fst_bc%base => object
-       object => fst_bc
+       call fst_inflow_wrap(object)
     end select
 
     call json_get_or_lookup(json, "zone_indices", zone_indices)
