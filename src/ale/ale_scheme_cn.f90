@@ -94,11 +94,13 @@ contains
     if (NEKO_BCKND_DEVICE .eq. 1) then
        call update_ale_mesh_cn_device(c_Xh, wm_x, wm_y, wm_z, &
             wm_x_prev, wm_y_prev, wm_z_prev, &
-            mesh_x_lag(1), mesh_y_lag(1), mesh_z_lag(1), time%dt)
+            mesh_x_lag(1), mesh_y_lag(1), mesh_z_lag(1), &
+            real(time%dt, kind=rp))
     else
        call update_ale_mesh_cn_cpu(c_Xh, wm_x, wm_y, wm_z, &
             wm_x_prev, wm_y_prev, wm_z_prev, &
-            mesh_x_lag(1), mesh_y_lag(1), mesh_z_lag(1), time%dt)
+            mesh_x_lag(1), mesh_y_lag(1), mesh_z_lag(1), &
+            real(time%dt, kind=rp))
     end if
   end subroutine cn_reposition_mesh
 
