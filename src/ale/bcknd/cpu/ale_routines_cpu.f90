@@ -405,14 +405,14 @@ contains
     n = c_Xh%dof%size()
     inv_b0 = 1.0_rp / beta(0)
 
-    call cmult2(c_Xh%dof%x, wm_x%x, gamma, n)
-    call cmult2(c_Xh%dof%y, wm_y%x, gamma, n)
-    call cmult2(c_Xh%dof%z, wm_z%x, gamma, n)
+    call cmult2(c_Xh%dof%x%x, wm_x%x, gamma, n)
+    call cmult2(c_Xh%dof%y%x, wm_y%x, gamma, n)
+    call cmult2(c_Xh%dof%z%x, wm_z%x, gamma, n)
     do j = 1, nadv
        gamma_j = -beta(j) * inv_b0
-       call add2s2(c_Xh%dof%x, mesh_x_lag(j)%x, gamma_j, n)
-       call add2s2(c_Xh%dof%y, mesh_y_lag(j)%x, gamma_j, n)
-       call add2s2(c_Xh%dof%z, mesh_z_lag(j)%x, gamma_j, n)
+       call add2s2(c_Xh%dof%x%x, mesh_x_lag(j)%x, gamma_j, n)
+       call add2s2(c_Xh%dof%y%x, mesh_y_lag(j)%x, gamma_j, n)
+       call add2s2(c_Xh%dof%z%x, mesh_z_lag(j)%x, gamma_j, n)
     end do
   end subroutine update_ale_mesh_bdf_cpu
 
@@ -435,17 +435,17 @@ contains
     half_dt = 0.5_rp * dt
 
     ! x^{n+1} = x^n + (dt/2) wm^{n+1} + (dt/2) wm^n
-    call copy(c_Xh%dof%x, mesh_x_n%x, n)
-    call add2s2(c_Xh%dof%x, wm_x%x, half_dt, n)
-    call add2s2(c_Xh%dof%x, wm_x_prev%x, half_dt, n)
+    call copy(c_Xh%dof%x%x, mesh_x_n%x, n)
+    call add2s2(c_Xh%dof%x%x, wm_x%x, half_dt, n)
+    call add2s2(c_Xh%dof%x%x, wm_x_prev%x, half_dt, n)
 
-    call copy(c_Xh%dof%y, mesh_y_n%x, n)
-    call add2s2(c_Xh%dof%y, wm_y%x, half_dt, n)
-    call add2s2(c_Xh%dof%y, wm_y_prev%x, half_dt, n)
+    call copy(c_Xh%dof%y%x, mesh_y_n%x, n)
+    call add2s2(c_Xh%dof%y%x, wm_y%x, half_dt, n)
+    call add2s2(c_Xh%dof%y%x, wm_y_prev%x, half_dt, n)
 
-    call copy(c_Xh%dof%z, mesh_z_n%x, n)
-    call add2s2(c_Xh%dof%z, wm_z%x, half_dt, n)
-    call add2s2(c_Xh%dof%z, wm_z_prev%x, half_dt, n)
+    call copy(c_Xh%dof%z%x, mesh_z_n%x, n)
+    call add2s2(c_Xh%dof%z%x, wm_z%x, half_dt, n)
+    call add2s2(c_Xh%dof%z%x, wm_z_prev%x, half_dt, n)
   end subroutine update_ale_mesh_cn_cpu
 
 end module ale_routines_cpu

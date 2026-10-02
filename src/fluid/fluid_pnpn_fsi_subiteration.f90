@@ -529,13 +529,13 @@ contains
     end if
 
     do j = 1, this%n_lag
-       call copy(this%mesh_x_lag(j)%x, this%c_Xh%dof%x, this%n_mesh)
-       call copy(this%mesh_y_lag(j)%x, this%c_Xh%dof%y, this%n_mesh)
-       call copy(this%mesh_z_lag(j)%x, this%c_Xh%dof%z, this%n_mesh)
+       call copy(this%mesh_x_lag(j)%x, this%c_Xh%dof%x%x, this%n_mesh)
+       call copy(this%mesh_y_lag(j)%x, this%c_Xh%dof%y%x, this%n_mesh)
+       call copy(this%mesh_z_lag(j)%x, this%c_Xh%dof%z%x, this%n_mesh)
        if (NEKO_BCKND_DEVICE .eq. 1) then
-          call device_copy(this%mesh_x_lag(j)%x_d, this%c_Xh%dof%x_d, this%n_mesh)
-          call device_copy(this%mesh_y_lag(j)%x_d, this%c_Xh%dof%y_d, this%n_mesh)
-          call device_copy(this%mesh_z_lag(j)%x_d, this%c_Xh%dof%z_d, this%n_mesh)
+          call device_copy(this%mesh_x_lag(j)%x_d, this%c_Xh%dof%x%x_d, this%n_mesh)
+          call device_copy(this%mesh_y_lag(j)%x_d, this%c_Xh%dof%y%x_d, this%n_mesh)
+          call device_copy(this%mesh_z_lag(j)%x_d, this%c_Xh%dof%z%x_d, this%n_mesh)
        end if
     end do
 
@@ -1212,13 +1212,13 @@ contains
     ! Rewind geometry to x^n (= lag 1) so that B = mass(x^n), shift the
     ! B-history, then restore the converged x^{n+1} and recompute the metrics.
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_copy(this%c_Xh%dof%x_d, this%mesh_x_lag(1)%x_d, this%n_mesh)
-       call device_copy(this%c_Xh%dof%y_d, this%mesh_y_lag(1)%x_d, this%n_mesh)
-       call device_copy(this%c_Xh%dof%z_d, this%mesh_z_lag(1)%x_d, this%n_mesh)
+       call device_copy(this%c_Xh%dof%x%x_d, this%mesh_x_lag(1)%x_d, this%n_mesh)
+       call device_copy(this%c_Xh%dof%y%x_d, this%mesh_y_lag(1)%x_d, this%n_mesh)
+       call device_copy(this%c_Xh%dof%z%x_d, this%mesh_z_lag(1)%x_d, this%n_mesh)
     else
-       call copy(this%c_Xh%dof%x, this%mesh_x_lag(1)%x, this%n_mesh)
-       call copy(this%c_Xh%dof%y, this%mesh_y_lag(1)%x, this%n_mesh)
-       call copy(this%c_Xh%dof%z, this%mesh_z_lag(1)%x, this%n_mesh)
+       call copy(this%c_Xh%dof%x%x, this%mesh_x_lag(1)%x, this%n_mesh)
+       call copy(this%c_Xh%dof%y%x, this%mesh_y_lag(1)%x, this%n_mesh)
+       call copy(this%c_Xh%dof%z%x, this%mesh_z_lag(1)%x, this%n_mesh)
     end if
     call this%c_Xh%recompute_metrics()
     call this%c_Xh%update_B_history()
@@ -1235,13 +1235,13 @@ contains
        this%mesh_z_lag(j) = this%mesh_z_lag(j - 1)
     end do
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_copy(this%mesh_x_lag(1)%x_d, this%c_Xh%dof%x_d, this%n_mesh)
-       call device_copy(this%mesh_y_lag(1)%x_d, this%c_Xh%dof%y_d, this%n_mesh)
-       call device_copy(this%mesh_z_lag(1)%x_d, this%c_Xh%dof%z_d, this%n_mesh)
+       call device_copy(this%mesh_x_lag(1)%x_d, this%c_Xh%dof%x%x_d, this%n_mesh)
+       call device_copy(this%mesh_y_lag(1)%x_d, this%c_Xh%dof%y%x_d, this%n_mesh)
+       call device_copy(this%mesh_z_lag(1)%x_d, this%c_Xh%dof%z%x_d, this%n_mesh)
     else
-       call copy(this%mesh_x_lag(1)%x, this%c_Xh%dof%x, this%n_mesh)
-       call copy(this%mesh_y_lag(1)%x, this%c_Xh%dof%y, this%n_mesh)
-       call copy(this%mesh_z_lag(1)%x, this%c_Xh%dof%z, this%n_mesh)
+       call copy(this%mesh_x_lag(1)%x, this%c_Xh%dof%x%x, this%n_mesh)
+       call copy(this%mesh_y_lag(1)%x, this%c_Xh%dof%y%x, this%n_mesh)
+       call copy(this%mesh_z_lag(1)%x, this%c_Xh%dof%z%x, this%n_mesh)
     end if
 
     ! Shift the rigid-body position histories

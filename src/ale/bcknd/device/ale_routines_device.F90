@@ -382,14 +382,14 @@ contains
     n = c_Xh%dof%size()
     inv_b0 = 1.0_rp / beta(0)
 
-    call device_cmult2(c_Xh%dof%x_d, wm_x%x_d, gamma, n)
-    call device_cmult2(c_Xh%dof%y_d, wm_y%x_d, gamma, n)
-    call device_cmult2(c_Xh%dof%z_d, wm_z%x_d, gamma, n)
+    call device_cmult2(c_Xh%dof%x%x_d, wm_x%x_d, gamma, n)
+    call device_cmult2(c_Xh%dof%y%x_d, wm_y%x_d, gamma, n)
+    call device_cmult2(c_Xh%dof%z%x_d, wm_z%x_d, gamma, n)
     do j = 1, nadv
        gamma_j = -beta(j) * inv_b0
-       call device_add2s2(c_Xh%dof%x_d, mesh_x_lag(j)%x_d, gamma_j, n)
-       call device_add2s2(c_Xh%dof%y_d, mesh_y_lag(j)%x_d, gamma_j, n)
-       call device_add2s2(c_Xh%dof%z_d, mesh_z_lag(j)%x_d, gamma_j, n)
+       call device_add2s2(c_Xh%dof%x%x_d, mesh_x_lag(j)%x_d, gamma_j, n)
+       call device_add2s2(c_Xh%dof%y%x_d, mesh_y_lag(j)%x_d, gamma_j, n)
+       call device_add2s2(c_Xh%dof%z%x_d, mesh_z_lag(j)%x_d, gamma_j, n)
     end do
   end subroutine update_ale_mesh_bdf_device
 
@@ -412,17 +412,17 @@ contains
     half_dt = 0.5_rp * dt
 
     ! x^{n+1} = x^n + (dt/2) wm^{n+1} + (dt/2) wm^n
-    call device_copy(c_Xh%dof%x_d, mesh_x_n%x_d, n)
-    call device_add2s2(c_Xh%dof%x_d, wm_x%x_d, half_dt, n)
-    call device_add2s2(c_Xh%dof%x_d, wm_x_prev%x_d, half_dt, n)
+    call device_copy(c_Xh%dof%x%x_d, mesh_x_n%x_d, n)
+    call device_add2s2(c_Xh%dof%x%x_d, wm_x%x_d, half_dt, n)
+    call device_add2s2(c_Xh%dof%x%x_d, wm_x_prev%x_d, half_dt, n)
 
-    call device_copy(c_Xh%dof%y_d, mesh_y_n%x_d, n)
-    call device_add2s2(c_Xh%dof%y_d, wm_y%x_d, half_dt, n)
-    call device_add2s2(c_Xh%dof%y_d, wm_y_prev%x_d, half_dt, n)
+    call device_copy(c_Xh%dof%y%x_d, mesh_y_n%x_d, n)
+    call device_add2s2(c_Xh%dof%y%x_d, wm_y%x_d, half_dt, n)
+    call device_add2s2(c_Xh%dof%y%x_d, wm_y_prev%x_d, half_dt, n)
 
-    call device_copy(c_Xh%dof%z_d, mesh_z_n%x_d, n)
-    call device_add2s2(c_Xh%dof%z_d, wm_z%x_d, half_dt, n)
-    call device_add2s2(c_Xh%dof%z_d, wm_z_prev%x_d, half_dt, n)
+    call device_copy(c_Xh%dof%z%x_d, mesh_z_n%x_d, n)
+    call device_add2s2(c_Xh%dof%z%x_d, wm_z%x_d, half_dt, n)
+    call device_add2s2(c_Xh%dof%z%x_d, wm_z_prev%x_d, half_dt, n)
   end subroutine update_ale_mesh_cn_device
 
 end module ale_routines_device
