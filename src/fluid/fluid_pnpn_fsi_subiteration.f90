@@ -50,6 +50,11 @@ module fluid_pnpn_fsi_subiteration
   use json_module, only : json_file
   use json_utils, only : json_get_or_default
   use utils, only : neko_error
+  use profiler, only : profiler_start_region, profiler_end_region
+  use bc, only : bc_t
+  use symmetry, only : symmetry_t
+  use non_normal, only : non_normal_t
+  use shear_stress, only : shear_stress_t
   use logger, only : neko_log, LOG_SIZE
   use mesh, only : mesh_t
   use user_intf, only : user_t, user_fsi_body_params_intf, &
@@ -210,6 +215,12 @@ contains
   
     ! Initialize the base fluid_pnpn scheme (allocates the mesh and ALE scheme)
     call this%fluid_pnpn_t%init(msh, lx, params, user, chkp)
+
+    if (this%freeze) then
+       call neko_error("FSI does not support case.fluid.freeze.")
+    end if
+
+    call subiter_check_bcs(this)
 
     ! User hook for FSI body parameters.
     this%user_fsi_body_params => user%fsi_structural_parameters
@@ -516,6 +527,33 @@ contains
 
   end subroutine fluid_subiter_init
 
+  !> Stop on the coupled boundary conditions.
+  subroutine subiter_check_bcs(this)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    class(bc_t), pointer :: bc_i
+    integer :: i
+
+    ! Sub-iteration has never been tested with these boundary conditions.
+    ! Without this check the code runs with them. Remove it once that
+    ! combination has been tested.
+    do i = 1, this%bcs_vel%size()
+       bc_i => this%bcs_vel%get(i)
+       select type (bc_i)
+       type is (symmetry_t)
+          call neko_error("FSI sub-iteration is not tested with the " // &
+               "coupled symmetry boundary condition. Disable the full " // &
+               "stress formulation to get the axis-aligned variant.")
+       type is (non_normal_t)
+          call neko_error("FSI sub-iteration is not tested with the " // &
+               "coupled normal_outflow boundary condition. Disable the " // &
+               "full stress formulation to get the axis-aligned variant.")
+       type is (shear_stress_t)
+          call neko_error("FSI sub-iteration is not tested with the " // &
+               "shear_stress boundary condition.")
+       end select
+    end do
+  end subroutine subiter_check_bcs
+
   !> Allocate and seed the BDF-k position histories with the current state.
   subroutine subiter_init_histories(this)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
@@ -638,6 +676,9 @@ contains
     ! (= last step's corrected velocity)
     ! DOUBLE CHECK TO BE SURE WM IS CORRECT HERE.
     call this%assemble_rhs(time)
+    call this%ulag%update()
+    call this%vlag%update()
+    call this%wlag%update()
 
     ! snapshot the fluid reference (u^n, f, u_e)
     call this%snapshot_fluid()
@@ -707,9 +748,15 @@ contains
 
        ! Implicit fluid solve on the repositioned mesh. No history commit,
        ! RHS already assembled.
-       call this%step_ext(time, dt_controller, greens_function = .false., &
-            skip_ale_msh_vel_update = .true., skip_rhs_assembly = .true., &
-            skip_ale_advance = .true., skip_projection = (kit /= 1))
+       ! The projection spaces are only used on the first sub-iteration.
+       call profiler_start_region('Fluid', 1)
+       if (this%ale%active) call this%recompute_metrics()
+       if (kit .eq. 1) then
+          call this%solve(time, dt_controller, this%proj_prs, this%proj_vel)
+       else
+          call this%solve(time, dt_controller)
+       end if
+       call profiler_end_region('Fluid', 1)
 
        ! Structural system RHS.
        call this%calc_fsi_terms(time, beta, nadv)

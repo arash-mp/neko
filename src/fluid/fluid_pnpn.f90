@@ -33,7 +33,6 @@
 !> Modular version of the Classic Nek5000 Pn/Pn formulation for fluids
 module fluid_pnpn
   use coefs, only : coef_t
-  use gather_scatter, only : gs_t, GS_OP_MIN, GS_OP_MAX
   use registry, only : neko_registry
   use logger, only : neko_log, LOG_SIZE
   use num_types, only : rp, dp
@@ -79,9 +78,8 @@ module fluid_pnpn
   use neko_config, only : NEKO_BCKND_DEVICE
   use mathops, only : opadd2cm, opcolv
   use zero_dirichlet, only : zero_dirichlet_t
-  use no_slip, only : no_slip_t
   use utils, only : neko_error, neko_type_error
-  use field_math, only : field_add2, field_copy, field_cfill
+  use field_math, only : field_add2, field_copy
   use bc, only : bc_t, BC_DIRICHLET
   use mixed_bc, only : mixed_bc_t
   use scalar_bc_projector, only : scalar_bc_projector_t
@@ -111,7 +109,7 @@ module fluid_pnpn
      type(field_t) :: p_res, u_res, v_res, w_res
 
      !> The unknowns in the linear solves, i.e. the solution increments with
-     ! respect to the previous time-step.
+     !! respect to the previous time-step.
      type(field_t) :: dp, du, dv, dw
 
      !> ALE Manager
@@ -132,9 +130,7 @@ module fluid_pnpn
      !> Pressure projection
      type(projection_t) :: proj_prs
      type(projection_vel_t) :: proj_vel
-     !> Green's Function Projections
-     !type(projection_t) :: proj_prs_green
-     !type(projection_vel_t) :: proj_vel_green
+
      !
      ! Special Karniadakis scheme boundary conditions in the pressure equation
      !
@@ -149,10 +145,6 @@ module fluid_pnpn
      class(vector_bc_projector_t), allocatable :: bcs_vel_projector
      !> Boundary conditions projector for pressure constraints.
      type(scalar_bc_projector_t) :: bcs_prs_projector
-
-     !> NEW: Lists for Green's Function Boundary Conditions
-     !  type(bc_list_t) :: bcs_vel_green
-     !  type(bc_list_t) :: bcs_prs_green
 
 
      ! Checker for wether we have a strong pressure bc. If not, the pressure
@@ -202,24 +194,22 @@ module fluid_pnpn
      procedure, pass(this) :: init => fluid_pnpn_init
      !> Destructor.
      procedure, pass(this) :: free => fluid_pnpn_free
-
-     !> Perform a single time-step of the scheme (Strict override of parent).
+     !> Perform a single time-step of the scheme.
      procedure, pass(this) :: step => fluid_pnpn_step
-
-     !> Extended step allowing Green's function mode (Custom signature).
-     procedure, pass(this) :: step_ext => fluid_pnpn_step_ext
-
-     !> Assemble the explicit (EXT/BDF history) RHS.
+     !> Assemble the explicit part of the right-hand side.
      procedure, pass(this) :: assemble_rhs => fluid_pnpn_assemble_rhs
-
+     !> Recompute geometry-dependent quantities after the mesh has moved.
+     procedure, pass(this) :: recompute_metrics => &
+          fluid_pnpn_recompute_metrics
+     !> Solve for the pressure and velocity.
+     procedure, pass(this) :: solve => fluid_pnpn_solve
      !> Restart from a previous solution.
      procedure, pass(this) :: restart => fluid_pnpn_restart
      !> Set up boundary conditions.
      procedure, pass(this) :: setup_bcs => fluid_pnpn_setup_bcs
      !> Write a field with boundary condition specifications.
      procedure, pass(this) :: write_boundary_conditions => &
-           fluid_pnpn_write_boundary_conditions
-     procedure, pass(this) :: solve_stokes_step => fluid_pnpn_solve_stokes_step
+          fluid_pnpn_write_boundary_conditions
   end type fluid_pnpn_t
 
   interface
@@ -248,9 +238,6 @@ module fluid_pnpn
      !! @param[in] coef SEM coefficients.
      !! @param[in] user The user interface.
      module subroutine velocity_bc_factory(object, scheme, json, coef, user)
-       use inflow, only : inflow_t
-       use field_dirichlet_vector, only : field_dirichlet_vector_t
-       use wall_model_bc, only : wall_model_bc_t
        class(bc_t), pointer, intent(inout) :: object
        type(fluid_pnpn_t), intent(inout) :: scheme
        type(json_file), intent(inout) :: json
@@ -300,7 +287,7 @@ contains
     call this%ext_bdf%init(integer_val)
 
     call json_get_or_default(params, "case.fluid.full_stress_formulation", &
-          this%full_stress_formulation, .false.)
+         this%full_stress_formulation, .false.)
 
     call json_get_or_default(params, "case.fluid.cyclic", this%c_Xh%cyclic, &
          .false.)
@@ -335,8 +322,8 @@ contains
     if (params%valid_path('case.fluid.nut_field')) then
        if (.not. this%full_stress_formulation) then
           call neko_error("You need to set full_stress_formulation to " // &
-                "true for the fluid to have a spatially varying " // &
-                "viscocity field.")
+               "true for the fluid to have a spatially varying " // &
+               "viscocity field.")
        end if
        call json_get(params, 'case.fluid.nut_field', this%nut_field_name)
     else
@@ -361,7 +348,7 @@ contains
 
     ! Initialize variables specific to this plan
     associate(Xh_lx => this%Xh%lx, Xh_ly => this%Xh%ly, Xh_lz => this%Xh%lz, &
-          dm_Xh => this%dm_Xh, nelv => this%msh%nelv)
+         dm_Xh => this%dm_Xh, nelv => this%msh%nelv)
 
       call this%p_res%init(dm_Xh, "p_res")
       call this%u_res%init(dm_Xh, "u_res")
@@ -399,13 +386,9 @@ contains
          this%pr_projection_reorthogonalize_basis)
 
     call this%proj_vel%init(this%dm_Xh%size(), this%vel_projection_dim, &
-          this%vel_projection_activ_step)
+         this%vel_projection_activ_step)
 
-    !  call this%proj_prs_green%init(this%dm_Xh%size(), this%fsi_pr_projection_dim, &
-    !        this%fsi_pr_projection_activ_step)
 
-    ! call this%proj_vel_green%init(this%dm_Xh%size(), this%vel_projection_dim, &
-    !       this%vel_projection_activ_step)
 
     ! Determine the time-interpolation scheme
     call json_get_or_default(params, 'case.numerics.oifs', this%oifs, .false.)
@@ -417,28 +400,28 @@ contains
     call neko_log%section("Pressure solver")
 
     call json_get_or_lookup_or_default(params, &
-          'case.fluid.pressure_solver.max_iterations', &
-          solver_maxiter, 800)
+         'case.fluid.pressure_solver.max_iterations', &
+         solver_maxiter, 800)
     call json_get(params, 'case.fluid.pressure_solver.type', solver_type)
     call json_get(params, 'case.fluid.pressure_solver.preconditioner.type', &
-          precon_type)
+         precon_type)
     call json_get(params, &
-          'case.fluid.pressure_solver.preconditioner', precon_params)
+         'case.fluid.pressure_solver.preconditioner', precon_params)
     call json_get_or_lookup(params, &
-          'case.fluid.pressure_solver.absolute_tolerance', &
-          abs_tol)
+         'case.fluid.pressure_solver.absolute_tolerance', &
+         abs_tol)
     call json_get_or_default(params, 'case.fluid.pressure_solver.monitor', &
-          monitor, .false.)
+         monitor, .false.)
     call neko_log%message('Type       : ('// trim(solver_type) // &
-          ', ' // trim(precon_type) // ')')
+         ', ' // trim(precon_type) // ')')
     write(log_buf, '(A,ES13.6)') 'Abs tol    :', abs_tol
     call neko_log%message(log_buf)
 
     call this%solver_factory(this%ksp_prs, this%dm_Xh%size(), &
-          solver_type, solver_maxiter, abs_tol, monitor)
+         solver_type, solver_maxiter, abs_tol, monitor)
     call this%precon_factory_(this%pc_prs, this%ksp_prs, &
-          this%c_Xh, this%dm_Xh, this%gs_Xh, this%bcs_prs, &
-          precon_type, precon_params)
+         this%c_Xh, this%dm_Xh, this%gs_Xh, this%bcs_prs, &
+         precon_type, precon_params)
     call neko_log%end_section()
 
     ! Initialize the advection factory
@@ -634,7 +617,6 @@ contains
 
   end subroutine fluid_pnpn_restart
 
-
   subroutine fluid_pnpn_free(this)
     class(fluid_pnpn_t), intent(inout) :: this
 
@@ -663,14 +645,9 @@ contains
        deallocate(this%bcs_vel_projector)
     end if
     call this%bcs_prs_projector%free()
-
-    ! Free the Green's function lists
-    call this%bcs_vel_green%free()
-    call this%bcs_prs_green%free()
     call this%proj_prs%free()
     call this%proj_vel%free()
-    !   call this%proj_prs_green%free()
-    !   call this%proj_vel_green%free()
+
     call this%p_res%free()
     call this%u_res%free()
     call this%v_res%free()
@@ -732,94 +709,6 @@ contains
 
   end subroutine fluid_pnpn_free
 
-  !> Assemble the explicit right-hand side (source + Neumann + advection +
-  !> EXT extrapolation + BDF history) and the extrapolated velocity (u_e) for
-  !> the standard Pn/Pn solve. This depends only on previous-time-step data
-  !> and the current mesh (x^n); it is independent of the implicit (LHS) solve.
-  subroutine fluid_pnpn_assemble_rhs(this, time)
-    class(fluid_pnpn_t), target, intent(inout) :: this
-    type(time_state_t), intent(in) :: time
-    integer :: n
-
-    if (this%freeze) return
-
-    n = this%dm_Xh%size()
-
-    associate(u => this%u, v => this%v, w => this%w, &
-         u_e => this%u_e, v_e => this%v_e, w_e => this%w_e, &
-         Xh => this%Xh, c_Xh => this%c_Xh, dm_Xh => this%dm_Xh, &
-         ulag => this%ulag, vlag => this%vlag, wlag => this%wlag, &
-         sumab => this%sumab, makeoifs => this%makeoifs, &
-         makeabf => this%makeabf, makebdf => this%makebdf, &
-         oifs => this%oifs, rho => this%rho, &
-         f_x => this%f_x, f_y => this%f_y, f_z => this%f_z, &
-         dt => time%dt, ext_bdf => this%ext_bdf, ale => this%ale)
-
-      ! Extrapolate the velocity.
-      call sumab%compute_fluid(u_e, v_e, w_e, u, v, w, &
-           ulag, vlag, wlag, ext_bdf%advection_coeffs%x, ext_bdf%nadv)
-
-      ! Compute the source terms (this initialises f_x/f_y/f_z).
-      call this%source_term%compute(time)
-
-      ! Add Neumann bc contributions to the RHS.
-      call this%bcs_vel%apply_vector(f_x%x, f_y%x, f_z%x, &
-           dm_Xh%size(), time, strong = .false.)
-
-      if (ale%active) then
-         if (oifs) then
-            call neko_error("ALE is not yet supported " // &
-                 "with OIFS time integration.")
-         end if
-         !> adds div.(u_i*wm) to RHS
-         call this%adv%compute_ale(u, v, w, &
-              ale%wm_x, ale%wm_y, ale%wm_z, &
-              f_x, f_y, f_z, &
-              Xh, c_Xh, dm_Xh%size())
-      end if
-
-      if (oifs) then
-         ! Add the advection operators to the right-hand-side.
-         call this%adv%compute(u, v, w, &
-              this%advx, this%advy, this%advz, &
-              Xh, c_Xh, dm_Xh%size(), real(dt, kind=rp))
-
-         call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1, &
-              this%abx2, this%aby2, this%abz2, &
-              f_x%x, f_y%x, f_z%x, &
-              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
-
-         call makeoifs%compute_fluid(this%advx%x, this%advy%x, this%advz%x, &
-              f_x%x, f_y%x, f_z%x, &
-              rho%x(1,1,1,1), real(dt, kind=rp), n)
-      else
-         ! Add the advection operators to the right-hand-side.
-         call this%adv%compute(u, v, w, &
-              f_x, f_y, f_z, &
-              Xh, c_Xh, dm_Xh%size())
-
-         call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1, &
-              this%abx2, this%aby2, this%abz2, &
-              f_x%x, f_y%x, f_z%x, &
-              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
-
-         ! Add the RHS contributions coming from the BDF scheme. B/Blag/Blaglag
-         ! are the mass-matrix history (geometry at x^n, x^{n-1}, x^{n-2}).
-         call makebdf%compute_fluid(ulag, vlag, wlag, f_x%x, f_y%x, f_z%x, &
-              u, v, w, c_Xh%B, c_Xh%Blag, c_Xh%Blaglag, rho%x(1,1,1,1), &
-              real(dt, kind=rp), &
-              ext_bdf%diffusion_coeffs%x, ext_bdf%ndiff, n)
-      end if
-
-      ! Commit u^n into the velocity lag history.
-      call ulag%update()
-      call vlag%update()
-      call wlag%update()
-
-    end associate
-
-  end subroutine fluid_pnpn_assemble_rhs
-
   !> Advance fluid simulation in time.
   !! @param t The time value.
   !! @param tstep The current interation.
@@ -831,110 +720,184 @@ contains
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
 
-    ! Call the extended routine with possibility to add optional arguments.
-    call this%step_ext(time, dt_controller, greens_function=.false.)
+    if (this%freeze) return
+
+    call profiler_start_region('Fluid', 1)
+
+    call this%assemble_rhs(time)
+
+    if (this%ale%active) then
+       ! Advance Mesh (Moves points, updates B history, updates wm_lags)
+       call this%ale%advance_mesh_explicit(this%c_Xh, time, this%ext_bdf%nadv)
+       call this%recompute_metrics()
+    end if
+
+    call this%ulag%update()
+    call this%vlag%update()
+    call this%wlag%update()
+
+    call this%solve(time, dt_controller, this%proj_prs, this%proj_vel)
+
+    ! Update mesh velocities for ALE
+    ! We update them here (end of step) for the next step.
+    ! Returns if .not. ale.
+    call this%ale%update_mesh_velocity(this%c_Xh, time)
+
+    call profiler_end_region('Fluid', 1)
   end subroutine fluid_pnpn_step
 
-  !> The actual step.
-  subroutine fluid_pnpn_step_ext(this, time, dt_controller, greens_function, &
-       skip_ale_msh_vel_update, proj_prs_green, proj_vel_green, &
-       skip_rhs_assembly, skip_ale_advance, skip_projection)
+  !> Assemble the explicit part of the right-hand side and extrapolate the
+  !! velocity.
+  !! @param time The time state.
+  subroutine fluid_pnpn_assemble_rhs(this, time)
     class(fluid_pnpn_t), target, intent(inout) :: this
     type(time_state_t), intent(in) :: time
-    type(time_step_controller_t), intent(in) :: dt_controller
-    logical, optional, intent(in) :: greens_function
-    logical, intent(in), optional :: skip_ale_msh_vel_update
-    !> FSI sub-iteration controls (all default to .false.):
-    !>  skip_rhs_assembly : f / u_e were assembled by the caller (assemble_rhs)
-    !>  skip_ale_advance : the caller repositioned the mesh; do NOT advance it
-    !>  (but metrics are still recomputed below)
-    !>   skip_projection : do not update the solution-projection bases
-    logical, intent(in), optional :: skip_rhs_assembly
-    logical, intent(in), optional :: skip_ale_advance
-    logical, intent(in), optional :: skip_projection
-    logical :: skip_ale_mesh_vel_update
-    logical :: is_greens, skip_rhs, skip_ale_adv, skip_proj
+    ! number of degrees of freedom
     integer :: n
-    type(ksp_monitor_t) :: ksp_results(4)
-    integer :: iter
-
-    type(file_t) :: dump_file
-    class(bc_t), pointer :: bc_i
-
-    type(projection_t), intent(inout), optional :: proj_prs_green
-    type(projection_vel_t), intent(inout), optional :: proj_vel_green
-    if (this%freeze) return
 
     n = this%dm_Xh%size()
 
-    ! Green's function mode will skip the standard force/advection/history term
-    is_greens = .false.
-    if (present(greens_function)) is_greens = greens_function
+    associate(u => this%u, v => this%v, w => this%w, &
+         u_e => this%u_e, v_e => this%v_e, w_e => this%w_e, &
+         Xh => this%Xh, &
+         c_Xh => this%c_Xh, dm_Xh => this%dm_Xh, &
+         ulag => this%ulag, vlag => this%vlag, wlag => this%wlag, &
+         sumab => this%sumab, makeoifs => this%makeoifs, &
+         makeabf => this%makeabf, makebdf => this%makebdf, &
+         oifs => this%oifs, &
+         rho => this%rho, &
+         f_x => this%f_x, f_y => this%f_y, f_z => this%f_z, &
+         dt => time%dt, &
+         ext_bdf => this%ext_bdf, &
+         ale => this%ale)
 
-    skip_ale_mesh_vel_update = .false.
-    if (present(skip_ale_msh_vel_update)) then
-       skip_ale_mesh_vel_update = skip_ale_msh_vel_update
-    end if
+      ! Extrapolate the velocity if it's not done in nut_field estimation
+      call sumab%compute_fluid(u_e, v_e, w_e, u, v, w, &
+           ulag, vlag, wlag, ext_bdf%advection_coeffs%x, ext_bdf%nadv)
 
-    skip_rhs = .false.
-    if (present(skip_rhs_assembly)) skip_rhs = skip_rhs_assembly
-    skip_ale_adv = .false.
-    if (present(skip_ale_advance)) skip_ale_adv = skip_ale_advance
-    skip_proj = .false.
-    if (present(skip_projection)) skip_proj = skip_projection
+      ! Compute the source terms
+      call this%source_term%compute(time)
 
-    call profiler_start_region('Fluid', 1)
+      ! Add Neumann bc contributions to the RHS
+      call this%bcs_vel%apply_vector(f_x%x, f_y%x, f_z%x, &
+           this%dm_Xh%size(), time, strong = .false.)
+
+      if (this%ale%active) then
+         if (oifs) then
+            call neko_error("ALE is not yet supported " // &
+                 "with OIFS time integration.")
+         end if
+         !> adds div.(u_i*wm) to RHS
+         call this%adv%compute_ale(u, v, w, &
+              ale%wm_x, ale%wm_y, ale%wm_z, &
+              f_x, f_y, f_z, &
+              Xh, c_Xh, dm_Xh%size())
+      end if
+
+
+      if (oifs) then
+         ! Add the advection operators to the right-hand-side.
+         call this%adv%compute(u, v, w, &
+              this%advx, this%advy, this%advz, &
+              Xh, this%c_Xh, dm_Xh%size(), real(dt, kind=rp))
+
+         ! At this point the RHS contains the sum of the advection operator and
+         ! additional source terms, evaluated using the velocity field from the
+         ! previous time-step. Now, this value is used in the explicit time
+         ! scheme to advance both terms in time.
+
+         call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1,&
+              this%abx2, this%aby2, this%abz2, &
+              f_x%x, f_y%x, f_z%x, &
+              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
+
+         ! Now, the source terms from the previous time step are added to the
+         ! RHS.
+         call makeoifs%compute_fluid(this%advx%x, this%advy%x, this%advz%x, &
+              f_x%x, f_y%x, f_z%x, &
+              rho%x(1,1,1,1), real(dt, kind=rp), n)
+      else
+         ! Add the advection operators to the right-hand-side.
+         call this%adv%compute(u, v, w, &
+              f_x, f_y, f_z, &
+              Xh, this%c_Xh, dm_Xh%size())
+
+         ! At this point the RHS contains the sum of the advection operator and
+         ! additional source terms, evaluated using the velocity field from the
+         ! previous time-step. Now, this value is used in the explicit time
+         ! scheme to advance both terms in time.
+
+         call makeabf%compute_fluid(this%abx1, this%aby1, this%abz1,&
+              this%abx2, this%aby2, this%abz2, &
+              f_x%x, f_y%x, f_z%x, &
+              rho%x(1,1,1,1), ext_bdf%advection_coeffs%x, n)
+
+         ! Add the RHS contributions coming from the BDF scheme.
+         ! Blag and Blaglag are history of B matrices, mainly used for ALE.
+         ! For a normal simulation (no moving mesh), Blag and Blaglag
+         ! are just the initial B matrix, filled at initialization.
+         call makebdf%compute_fluid(ulag, vlag, wlag, f_x%x, f_y%x, f_z%x, &
+              u, v, w, c_Xh%B, c_Xh%Blag, c_Xh%Blaglag, rho%x(1,1,1,1), &
+              real(dt, kind=rp), &
+              ext_bdf%diffusion_coeffs%x, ext_bdf%ndiff, n)
+
+      end if
+
+    end associate
+  end subroutine fluid_pnpn_assemble_rhs
+
+  !> Recompute geometry-dependent quantities after the mesh has moved.
+  subroutine fluid_pnpn_recompute_metrics(this)
+    class(fluid_pnpn_t), target, intent(inout) :: this
+
+    call profiler_start_region('ALE recompute metrics')
+    ! Update Metrics
+    call this%c_Xh%recompute_metrics()
+    ! Update the metrics used by the adv operator for delaiasing (coef_GL)
+    ! Maps the updated coef_GLL to coef_GL.
+    call this%adv%recompute_metrics(this%c_Xh, .true.)
+
+    call this%bc_prs_surface%recompute_normals()
+    call this%bc_sym_surface%recompute_normals()
+    call profiler_end_region('ALE recompute metrics')
+  end subroutine fluid_pnpn_recompute_metrics
+
+  !> Solve for the pressure and velocity, given an assembled right-hand side.
+  !! @param time The time state.
+  !! @param dt_controller timestep controller
+  !! @param proj_prs Projection space for the pressure solve.
+  !! @param proj_vel Projection space for the velocity solve.
+  !! @note A solve is done without projection when its projection space is
+  !! not passed.
+  subroutine fluid_pnpn_solve(this, time, dt_controller, proj_prs, proj_vel)
+    class(fluid_pnpn_t), target, intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    type(time_step_controller_t), intent(in) :: dt_controller
+    type(projection_t), intent(inout), optional :: proj_prs
+    type(projection_vel_t), intent(inout), optional :: proj_vel
+    ! number of degrees of freedom
+    integer :: n
+    ! Solver results monitors (pressure + 3 velocity)
+    type(ksp_monitor_t) :: ksp_results(4)
+    integer :: iter
+
+    n = this%dm_Xh%size()
+
     associate(u => this%u, v => this%v, w => this%w, p => this%p, &
          u_e => this%u_e, v_e => this%v_e, w_e => this%w_e, &
-         dp => this%dp, &
+         du => this%du, dv => this%dv, dw => this%dw, dp => this%dp, &
          u_res => this%u_res, v_res => this%v_res, w_res => this%w_res, &
          p_res => this%p_res, Ax_vel => this%Ax_vel, Ax_prs => this%Ax_prs, &
          Xh => this%Xh, &
          c_Xh => this%c_Xh, dm_Xh => this%dm_Xh, gs_Xh => this%gs_Xh, &
-         ulag => this%ulag, vlag => this%vlag, wlag => this%wlag, &
          msh => this%msh, prs_res => this%prs_res, &
-         source_term => this%source_term, vel_res => this%vel_res, &
-         sumab => this%sumab, makeoifs => this%makeoifs, &
-         makeabf => this%makeabf, makebdf => this%makebdf, &
-         oifs => this%oifs, &
+         vel_res => this%vel_res, &
          rho => this%rho, mu_tot => this%mu_tot, &
          f_x => this%f_x, f_y => this%f_y, f_z => this%f_z, &
-         t => time%t, tstep => time%tstep, dt => time%dt, &
-         ext_bdf => this%ext_bdf, event => glb_cmd_event, &
-         ale => this%ale)
+         tstep => time%tstep, dt => time%dt, &
+         ext_bdf => this%ext_bdf, event => glb_cmd_event)
 
-      if (is_greens) then
-         ! Zero out explicit forces/history for Green's Function
-         call field_cfill(f_x, 0.0_rp)
-         call field_cfill(f_y, 0.0_rp)
-         call field_cfill(f_z, 0.0_rp)
-         call field_cfill(u_e, 0.0_rp)
-         call field_cfill(v_e, 0.0_rp)
-         call field_cfill(w_e, 0.0_rp)
-      else if (.not. skip_rhs) then
-         !< Standard N-S RHS.
-         call this%assemble_rhs(time)
-      end if
-
-      ! ALE Mesh Update
-      if (this%ale%active .and. (.not. is_greens)) then
-         ! Advance Mesh (Moves points, updates B history, updates wm_lags).
-         if (.not. skip_ale_adv) then
-            call this%ale%advance_mesh_explicit(c_Xh, time, ext_bdf%nadv)
-         end if
-
-         call profiler_start_region('ALE recompute metrics')
-         ! Update Metrics
-         call c_Xh%recompute_metrics()
-         ! Update the metrics used by the adv operator for delaiasing (coef_GL)
-         ! Maps the updated coef_GLL to coef_GL.
-         call this%adv%recompute_metrics(c_Xh, .true.)
-
-         call this%bc_prs_surface%recompute_normals()
-         call this%bc_sym_surface%recompute_normals()
-         call profiler_end_region('ALE recompute metrics')
-      end if
-
+      ! Update material properties if necessary
       call this%update_material_properties(time)
 
       ! Update the SVV coefficient if necessary
@@ -944,18 +907,8 @@ contains
 
       do iter = 1, 1 + this%schwarz_iterations
 
-         ! BCs application
-         if (is_greens) then
-            ! Green's Mode
-            !  - Inlet/Stationary Wall = 0.0 (Zero Dirichlet)
-            !  - Moving Wall = Mesh Velocity (No Slip with is_moving=true)
-            call this%bc_apply_green_vel(time)
-            call this%bc_apply_green_prs(time)
-         else
-            ! Standard Mode
-            call this%bc_apply_vel(time, strong = .true.)
-            call this%bc_apply_prs(time)
-         end if
+         call this%bc_apply_vel(time, strong = .true.)
+         call this%bc_apply_prs(time)
 
          ! Compute pressure residual.
          call profiler_start_region('Pressure_residual', 18)
@@ -967,6 +920,7 @@ contains
               this%bc_prs_surface, this%bc_sym_surface,&
               Ax_prs, ext_bdf%diffusion_coeffs%x(1), real(dt, kind=rp), &
               mu_tot, rho, event)
+
 
          ! De-mean the pressure residual when no strong pressure boundaries present
          if (.not. this%prs_dirichlet .and. NEKO_BCKND_DEVICE .eq. 1) then
@@ -984,14 +938,101 @@ contains
 
          call profiler_end_region('Pressure_residual', 18)
 
-         ! Solve Stokes System
-         call this%solve_stokes_step(time, dt_controller, ksp_results, iter, &
-              greens_function = is_greens, proj_prs_green = proj_prs_green, &
-              proj_vel_green = proj_vel_green, skip_projection = skip_proj)
+         ! Do projections only on the actual solutions of the tstep
+         ! not intermediate solutions from the subiterations.
+         if (iter .eq. 1 .and. present(proj_prs)) then
+            call proj_prs%pre_solving(p_res%x, tstep, c_Xh, n, &
+                 dt_controller, Ax = Ax_prs, gs_h = gs_Xh, &
+                 bclst = this%bcs_prs_projector, string = 'Pressure')
+         end if
+
+         call this%pc_prs%update()
+
+         call profiler_start_region('Pressure_solve', 3)
+
+         ! Solve for the pressure increment.
+         ksp_results(1) = &
+              this%ksp_prs%solve(Ax_prs, dp, p_res%x, n, c_Xh, &
+              this%bcs_prs_projector, gs_Xh)
+         ksp_results(1)%name = 'Pressure'
+
+
+         call profiler_end_region('Pressure_solve', 3)
+
+         if (iter .eq. 1 .and. present(proj_prs)) then
+            call proj_prs%post_solving(dp%x, Ax_prs, c_Xh, &
+                 this%bcs_prs_projector, gs_Xh, n, tstep, dt_controller)
+         end if
+
+         ! Update the pressure with the increment. Demean if necessary.
+         call field_add2(p, dp, n)
+         if (.not. this%prs_dirichlet .and. NEKO_BCKND_DEVICE .eq. 1) then
+            call device_ortho(p%x_d, this%glb_n_points, n)
+         else if (.not. this%prs_dirichlet) then
+            call ortho(p%x, this%glb_n_points, n)
+         end if
+
+         ! Compute velocity residual.
+         call profiler_start_region('Velocity_residual', 19)
+         call vel_res%compute(Ax_vel, u, v, w, &
+              u_res, v_res, w_res, &
+              p, &
+              f_x, f_y, f_z, &
+              c_Xh, msh, Xh, &
+              mu_tot, rho, ext_bdf%diffusion_coeffs%x(1), &
+              real(dt, kind=rp), dm_Xh%size())
+
+         call rotate_cyc(u_res, v_res, w_res, 1, c_Xh)
+         call gs_Xh%op(u_res%x, v_res%x, w_res%x, dm_Xh%size(), &
+              GS_OP_ADD, event)
+         call device_event_sync(event)
+         call rotate_cyc(u_res, v_res, w_res, 0, c_Xh)
+
+         ! Set residual to zero at strong velocity boundaries.
+         call this%bcs_vel_projector%apply(u_res%x, v_res%x, w_res%x, &
+              dm_Xh%size())
+
+
+         call profiler_end_region('Velocity_residual', 19)
+
+         if (iter .eq. 1 .and. present(proj_vel)) then
+            call proj_vel%pre_solving(u_res%x, v_res%x, w_res%x, &
+                 tstep, c_Xh, n, dt_controller, 'Velocity')
+         end if
+
+         call this%pc_vel%update()
+
+         call profiler_start_region("Velocity_solve", 4)
+         ksp_results(2:4) = this%ksp_vel%solve_coupled(Ax_vel, du, dv, dw, &
+              u_res%x, v_res%x, w_res%x, n, c_Xh, &
+              this%bcs_vel_projector, gs_Xh, &
+              this%ksp_vel%max_iter)
+         call profiler_end_region("Velocity_solve", 4)
+         if (this%full_stress_formulation) then
+            ksp_results(2)%name = 'Momentum'
+         else
+            ksp_results(2)%name = 'X-Velocity'
+            ksp_results(3)%name = 'Y-Velocity'
+            ksp_results(4)%name = 'Z-Velocity'
+         end if
+
+         if (iter .eq. 1 .and. present(proj_vel)) then
+            call proj_vel%post_solving(du%x, dv%x, dw%x, Ax_vel, c_Xh, &
+                 this%bcs_vel_projector, gs_Xh, n, tstep, &
+                 dt_controller)
+         end if
+
+         if (NEKO_BCKND_DEVICE .eq. 1) then
+            call device_opadd2cm(u%x_d, v%x_d, w%x_d, &
+                 du%x_d, dv%x_d, dw%x_d, 1.0_rp, n, msh%gdim)
+         else
+            call opadd2cm(u%x, v%x, w%x, du%x, dv%x, dw%x, 1.0_rp, n, msh%gdim)
+         end if
 
          call fluid_step_info(time, ksp_results, &
               this%full_stress_formulation, this%strict_convergence, &
-              this%allow_stabilization)
+              this%allow_stabilization, iter)
+
       end do
 
       if (this%forced_flow_rate) then
@@ -1004,21 +1045,10 @@ contains
               this%ksp_vel%max_iter)
       end if
 
-      ! Update mesh velocities for ALE
-      ! We update them here (end of step) for the next step.
-      ! Returns if .not. ale.
-      if (this%ale%active .and. (.not. is_greens) .and. &
-      (.not. skip_ale_mesh_vel_update)) then
-         call this%ale%update_mesh_velocity(c_Xh, time)
-      end if
     end associate
+  end subroutine fluid_pnpn_solve
 
-    nullify(bc_i)
-
-    call profiler_end_region('Fluid', 1)
-  end subroutine fluid_pnpn_step_ext
-
-!> Sets up the boundary condition for the scheme.
+  !> Sets up the boundary condition for the scheme.
   !! @param user The user interface.
   subroutine fluid_pnpn_setup_bcs(this, user, params)
     class(fluid_pnpn_t), target, intent(inout) :: this
@@ -1038,19 +1068,11 @@ contains
 
     ! For ALE, we set a flag while reading the BCs
     character(len=:), allocatable :: bc_type_str
-
-    ! FSI Flag
-    logical :: fsi_active
-
     this%ale%has_moving_boundary = .false.
     any_moving_wall = .false.
     ale_active_local = .false.
     call json_get_or_default(params, 'case.fluid.ale.enabled', &
          ale_active_local, .false.)
-
-    ! Check FSI active
-    call json_get_or_default(params, 'case.fluid.fsi.enabled', &
-         fsi_active, .false.)
 
     ! Special PnPn boundary conditions for pressure
     call this%bc_prs_surface%init_from_components(this%c_Xh)
@@ -1066,7 +1088,6 @@ contains
        ! Velocity bcs
        !
        call this%bcs_vel%init(n_bcs)
-       if (fsi_active) call this%bcs_vel_green%init(n_bcs)
 
        allocate(marked_zones(size(this%msh%labeled_zones)))
        marked_zones = .false.
@@ -1185,9 +1206,6 @@ contains
 
                 call this%bcs_vel%append(bc_i)
              end select
-
-             if (fsi_active) call fluid_pnpn_green_vel_bc(this, bc_i)
-
           end if
        end do
 
@@ -1211,7 +1229,6 @@ contains
        ! Pressure bcs
        !
        call this%bcs_prs%init(n_bcs)
-       if (fsi_active) call this%bcs_prs_green%init(n_bcs)
 
        do i = 1, n_bcs
           ! Create a new json containing just the subdict for this bc
@@ -1229,8 +1246,6 @@ contains
                 call this%bcs_prs_projector%mark(bc_i)
              end if
 
-             if (fsi_active) call fluid_pnpn_green_prs_bc(this, bc_i)
-
           end if
 
        end do
@@ -1246,10 +1261,6 @@ contains
        ! to a zero size to avoid issues with apply() in step()
        call this%bcs_vel%init()
        call this%bcs_prs%init()
-       if (fsi_active) then
-          call this%bcs_vel_green%init()
-          call this%bcs_prs_green%init()
-       end if
 
     end if
 
@@ -1274,124 +1285,6 @@ contains
     nullify(bc_i, bc_object)
 
   end subroutine fluid_pnpn_setup_bcs
-
-
-  !> Subroutine to setup Green's function Velocity BCs
-  subroutine fluid_pnpn_green_vel_bc(this, bc_i)
-    use zero_dirichlet, only : zero_dirichlet_t
-    use no_slip, only : no_slip_t
-    use inflow, only : inflow_t
-    use field_dirichlet_vector, only : field_dirichlet_vector_t
-
-    class(fluid_pnpn_t), target, intent(inout) :: this
-    class(bc_t), intent(inout) :: bc_i
-    class(bc_t), pointer :: bc_green
-
-    bc_green => null()
-
-    select type (orig => bc_i)
-
-       ! Moving Wall (FSI Body)
-       ! MUST remain a 'no_slip_t' so it tracks mesh velocity.
-    type is (no_slip_t)
-       if (orig%is_moving) then
-          allocate(no_slip_t :: bc_green)
-          ! We must verify if no_slip needs init via JSON or manual components
-          select type(n => bc_green)
-          type is (no_slip_t)
-             call n%zero_dirichlet_t%init_from_components(this%c_Xh)
-             n%is_moving = .true.
-
-             if (associated(orig%wx)) n%wx => orig%wx
-             if (associated(orig%wy)) n%wy => orig%wy
-             if (associated(orig%wz)) n%wz => orig%wz
-          end select
-       else
-          ! Stationary Wall -> Zero Dirichlet
-          allocate(zero_dirichlet_t :: bc_green)
-       end if
-
-       ! Inlets / User Dirichlet -> Zero Dirichlet (0.0)
-    type is (inflow_t)
-       allocate(zero_dirichlet_t :: bc_green)
-    type is (field_dirichlet_vector_t)
-       allocate(zero_dirichlet_t :: bc_green)
-    type is (wall_model_bc_t)
-       allocate(zero_dirichlet_t :: bc_green)
-
-       ! Constraints (Symmetry, etc.) -> Keep Same Pointer
-       !
-       ! Only the axis-aligned constraint bcs can be cloned here. The mixed
-       ! bcs (symmetry_t, non_normal_t, shear_stress_t and its descendants)
-       ! are resolved globally by the coupled_vector_bc_projector_t and carry
-       ! no usable constraint of their own: an unregistered clone has an empty
-       ! resolved_msk and would silently apply nothing.
-    type is (symmetry_aligned_t)
-       allocate(symmetry_aligned_t :: bc_green)
-       select type(s => bc_green)
-       type is (symmetry_aligned_t)
-          call s%init_from_components(this%c_Xh)
-       end select
-
-    type is (symmetry_t)
-       call neko_error("FSI Green's functions do not support the coupled " // &
-            "symmetry boundary condition. Disable the full stress " // &
-            "formulation to get the axis-aligned variant.")
-
-    type is (non_normal_t)
-       call neko_error("FSI Green's functions do not support the coupled " // &
-            "normal_outflow boundary condition. Disable the full stress " // &
-            "formulation to get the axis-aligned variant.")
-
-    type is (shear_stress_t)
-       call neko_error("FSI Green's functions do not support the " // &
-            "shear_stress boundary condition, which is now a mixed bc " // &
-            "resolved by the coupled velocity projector.")
-
-       ! Outflow -> Natural (Null)
-    class default
-       ! bc_green => null()
-    end select
-
-    ! If we created a valid Green's BC, append it
-    if (associated(bc_green)) then
-
-       ! Initialize if it's a new object
-       select type (z => bc_green)
-       type is (zero_dirichlet_t)
-          call z%init_from_components(this%c_Xh)
-       end select
-
-       call bc_green%mark_facets(bc_i%marked_facet)
-       call bc_green%finalize()
-
-       call this%bcs_vel_green%append(bc_green)
-    end if
-  end subroutine fluid_pnpn_green_vel_bc
-
-
-  !> Helper subroutine to setup Green's function Pressure BCs
-  subroutine fluid_pnpn_green_prs_bc(this, bc_i)
-    use zero_dirichlet, only : zero_dirichlet_t
-
-    class(fluid_pnpn_t), target, intent(inout) :: this
-    class(bc_t), intent(inout) :: bc_i
-    class(bc_t), pointer :: bc_p_green
-
-    bc_p_green => null()
-
-    if (bc_i%bc_type .eq. BC_DIRICHLET) then
-       allocate(zero_dirichlet_t :: bc_p_green)
-       select type(z => bc_p_green)
-       type is (zero_dirichlet_t)
-          call z%init_from_components(this%c_Xh)
-          call z%mark_facets(bc_i%marked_facet)
-          call z%finalize()
-       end select
-       call this%bcs_prs_green%append(bc_p_green)
-    end if
-
-  end subroutine fluid_pnpn_green_prs_bc
 
   !> Write a field with boundary condition specifications
   subroutine fluid_pnpn_write_boundary_conditions(this)
@@ -1437,6 +1330,8 @@ contains
     call neko_log%message(log_buf)
 
     call neko_scratch_registry%request_field(bdry_field, temp_index, .true.)
+
+
 
     call bdry_mask%init_from_components(this%c_Xh, 6.0_rp)
     call bdry_mask%mark_zone(this%msh%periodic)
@@ -1537,144 +1432,5 @@ contains
     nullify(bdry_field, bci)
 
   end subroutine fluid_pnpn_write_boundary_conditions
-
-  subroutine fluid_pnpn_solve_stokes_step(this, time, dt_controller, &
-     ksp_results, iter, greens_function, proj_prs_green, proj_vel_green, &
-     skip_projection)
-    class(fluid_pnpn_t), target, intent(inout) :: this
-    type(time_state_t), intent(in) :: time
-    type(time_step_controller_t), intent(in) :: dt_controller
-    type(ksp_monitor_t), intent(out) :: ksp_results(4)
-    integer, intent(in) :: iter
-    logical, intent(in), optional :: greens_function
-    !> Skip updating the solution-projection bases 
-    logical, intent(in), optional :: skip_projection
-    integer :: n
-    logical :: is_greens, skip_proj
-    ! Pointer variables for split projection selection
-    class(projection_t), pointer :: active_proj_p
-    class(projection_vel_t), pointer :: active_proj_v
-    type(projection_t), intent(inout), optional, target :: proj_prs_green
-    type(projection_vel_t), intent(inout), optional, target :: proj_vel_green
-    ! Default: Not Green's function mode (standard mode)
-    is_greens = .false.
-    if (present(greens_function)) is_greens = greens_function
-    skip_proj = .false.
-    if (present(skip_projection)) skip_proj = skip_projection
-
-    ! Select the correct projection space
-    if (is_greens) then
-       active_proj_p => proj_prs_green
-       active_proj_v => proj_vel_green
-    else
-       active_proj_p => this%proj_prs
-       active_proj_v => this%proj_vel
-    end if
-
-    n = this%dm_Xh%size()
-
-    associate(u => this%u, v => this%v, w => this%w, p => this%p, &
-          dp => this%dp, du => this%du, dv => this%dv, dw => this%dw, &
-          u_res => this%u_res, v_res => this%v_res, w_res => this%w_res, &
-          p_res => this%p_res, Ax_vel => this%Ax_vel, Ax_prs => this%Ax_prs, &
-          c_Xh => this%c_Xh, gs_Xh => this%gs_Xh, msh => this%msh)
-
-      if (is_greens) call neko_log%message(" ")
-      if (is_greens) call neko_log%message("--------Green's Step----------")
-
-      ! Do projections only on the actual solutions of the tstep
-      ! not intermediate solutions from the subiterations.
-      if ((iter .eq. 1) .and. (.not. skip_proj)) then
-         call active_proj_p%pre_solving(p_res%x, time%tstep, c_Xh, n, &
-              dt_controller, Ax = Ax_prs, gs_h = gs_Xh, &
-              bclst = this%bcs_prs_projector, string = 'Pressure')
-      end if
-
-      call this%pc_prs%update()
-
-      call profiler_start_region('Pressure_solve', 3)
-
-      ! Solve for the pressure increment.
-      ksp_results(1) = &
-              this%ksp_prs%solve(Ax_prs, dp, p_res%x, n, c_Xh, &
-              this%bcs_prs_projector, gs_Xh)
-      ksp_results(1)%name = 'Pressure'
-
-      call profiler_end_region('Pressure_solve', 3)
-
-      if ((iter .eq. 1) .and. (.not. skip_proj)) then
-         call active_proj_p%post_solving(dp%x, Ax_prs, c_Xh, &
-              this%bcs_prs_projector, gs_Xh, n, time%tstep, dt_controller)
-      end if
-
-      ! Update the pressure with the increment. Demean if necessary.
-      call field_add2(p, dp, n)
-      if (.not. this%prs_dirichlet .and. NEKO_BCKND_DEVICE .eq. 1) then
-         call device_ortho(p%x_d, this%glb_n_points, n)
-      else if (.not. this%prs_dirichlet) then
-         call ortho(p%x, this%glb_n_points, n)
-      end if
-
-      ! Compute velocity residual.
-      call profiler_start_region('Velocity_residual', 19)
-
-      ! In Green's mode, f_x, f_y, f_z are already zeroed.
-      ! Advection and BDF history terms are zeroed.
-      call this%vel_res%compute(Ax_vel, u, v, w, &
-           u_res, v_res, w_res, &
-           p, &
-           this%f_x, this%f_y, this%f_z, &
-           c_Xh, msh, this%Xh, &
-           this%mu_tot, this%rho, this%ext_bdf%diffusion_coeffs%x(1), &
-           real(time%dt, kind=rp), n)
-
-      call rotate_cyc(u_res, v_res, w_res, 1, c_Xh)
-      call gs_Xh%op(u_res%x, v_res%x, w_res%x, n, GS_OP_ADD, &
-           glb_cmd_event)
-      call device_event_sync(glb_cmd_event)
-      call rotate_cyc(u_res, v_res, w_res, 0, c_Xh)
-
-      ! Set residual to zero at strong velocity boundaries.
-      call this%bcs_vel_projector%apply(u_res%x, v_res%x, w_res%x, n)
-
-      call profiler_end_region('Velocity_residual', 19)
-
-      if ((iter .eq. 1) .and. (.not. skip_proj)) then
-         call active_proj_v%pre_solving(u_res%x, v_res%x, w_res%x, &
-              time%tstep, c_Xh, n, dt_controller, 'Velocity')
-      end if
-
-      call this%pc_vel%update()
-
-      call profiler_start_region("Velocity_solve", 4)
-      ksp_results(2:4) = this%ksp_vel%solve_coupled(Ax_vel, du, dv, dw, &
-           u_res%x, v_res%x, w_res%x, n, c_Xh, &
-           this%bcs_vel_projector, gs_Xh, &
-           this%ksp_vel%max_iter)
-      call profiler_end_region("Velocity_solve", 4)
-
-      if (this%full_stress_formulation) then
-         ksp_results(2)%name = 'Momentum'
-      else
-         ksp_results(2)%name = 'X-Velocity'
-         ksp_results(3)%name = 'Y-Velocity'
-         ksp_results(4)%name = 'Z-Velocity'
-      end if
-
-      if ((iter .eq. 1) .and. (.not. skip_proj)) then
-         call active_proj_v%post_solving(du%x, dv%x, dw%x, Ax_vel, c_Xh, &
-              this%bcs_vel_projector, gs_Xh, n, time%tstep, &
-              dt_controller)
-      end if
-
-      if (NEKO_BCKND_DEVICE .eq. 1) then
-         call device_opadd2cm(u%x_d, v%x_d, w%x_d, &
-              du%x_d, dv%x_d, dw%x_d, 1.0_rp, n, msh%gdim)
-      else
-         call opadd2cm(u%x, v%x, w%x, du%x, dv%x, dw%x, 1.0_rp, n, msh%gdim)
-      end if
-
-    end associate
-  end subroutine fluid_pnpn_solve_stokes_step
 
 end module fluid_pnpn

@@ -48,9 +48,21 @@ module fluid_pnpn_fsi_greens
   use time_step_controller, only : time_step_controller_t
   use projection, only : projection_t
   use projection_vel, only : projection_vel_t
-  use bc, only : bc_t
+  use bc, only : bc_t, BC_DIRICHLET
+  use bc_list, only : bc_list_t
+  use zero_dirichlet, only : zero_dirichlet_t
   use no_slip, only : no_slip_t
   use inflow, only : inflow_t
+  use field_dirichlet_vector, only : field_dirichlet_vector_t
+  use wall_model_bc, only : wall_model_bc_t
+  use symmetry_aligned, only : symmetry_aligned_t
+  use symmetry, only : symmetry_t
+  use non_normal, only : non_normal_t
+  use shear_stress, only : shear_stress_t
+  use gs_ops, only : GS_OP_MIN, GS_OP_MAX
+  use operators, only : rotate_cyc
+  use device, only : device_event_sync, glb_cmd_event
+  use profiler, only : profiler_start_region, profiler_end_region
   use json_module, only : json_file
   use utils, only : neko_error
   use logger, only : neko_log, LOG_SIZE
@@ -104,6 +116,11 @@ module fluid_pnpn_fsi_greens
      real(kind=rp), allocatable :: X_sol(:)
      type(projection_t), allocatable :: proj_prs_green(:)
      type(projection_vel_t), allocatable :: proj_vel_green(:)
+     !> Boundary conditions of the Green's function problems.
+     type(bc_list_t) :: bcs_vel_green
+     type(bc_list_t) :: bcs_prs_green
+     !> True while a Green's function problem is being solved.
+     logical :: greens_mode = .false.
      ! Batch Arrays for ALE Override
      integer, allocatable :: batch_ids(:)
      real(kind=rp), allocatable :: batch_trans(:,:)
@@ -130,6 +147,8 @@ module fluid_pnpn_fsi_greens
      procedure, pass(this) :: free => fluid_fsi_free
      !> Restart from a previous solution.
      procedure, pass(this) :: restart => fluid_fsi_restart
+     procedure, pass(this) :: bc_apply_vel => fluid_fsi_bc_apply_vel
+     procedure, pass(this) :: bc_apply_prs => fluid_fsi_bc_apply_prs
      procedure, pass(this) :: calc_fsi_terms => &
            assemble_fsi_structural_inertial_terms
      procedure, pass(this) :: log_fsi_results => fluid_fsi_log_results
@@ -151,6 +170,12 @@ contains
 
     ! Initialize the base PnPn solver
     call this%fluid_pnpn_t%init(msh, lx, params, user, chkp)
+
+    if (this%freeze) then
+       call neko_error("FSI does not support case.fluid.freeze.")
+    end if
+
+    call fluid_fsi_setup_green_bcs(this)
 
     ! User hook for FSI body parameters (never null after user%init).
     this%user_fsi_body_params => user%fsi_structural_parameters
@@ -301,12 +326,11 @@ contains
     ! I need to remember if there was any reason that 
     ! I put it there at first place.
     ! Calling update_mesh_velocity here should be totally harmless.
-    call this%step_ext(time, dt_controller, greens_function = .false., &
-         skip_ale_msh_vel_update = .false.)
+    call this%fluid_pnpn_t%step(time, dt_controller)
 
     ! Add FSI structural terms at current time step.
     ! Rotation matrix etc should be updated at this point.
-    ! I moved this after the above step_ext, since the rotation matrix should for 
+    ! I moved this after the above step, since the rotation matrix should for
     ! the current time step. 
     ! Need to verify more.
     call this%calc_fsi_terms(time, beta, nadv)
@@ -377,11 +401,7 @@ contains
                   mode = 1)
 
              start_time_g = MPI_WTIME()
-             call this%step_ext(time, dt_controller, greens_function = .true., &
-                  skip_ale_msh_vel_update = .true., &
-                  proj_prs_green = this%proj_prs_green(col_g), &
-                  proj_vel_green = this%proj_vel_green(col_g))
-
+             call fluid_fsi_greens_solve(this, time, dt_controller, col_g)
              end_time_g = MPI_WTIME()
              step_time_g = end_time_g - start_time_g
              total_elapsed_g = total_elapsed_g + step_time_g
@@ -583,8 +603,245 @@ contains
 
   end subroutine fluid_fsi_step
 
+  !> Solve the Green's function problem of one active DOF.
+  subroutine fluid_fsi_greens_solve(this, time, dt_controller, col_g)
+    class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    type(time_step_controller_t), intent(in) :: dt_controller
+    integer, intent(in) :: col_g
+
+    call profiler_start_region('Fluid', 1)
+
+    ! No explicit forcing or history in the Green's function problem.
+    call field_cfill(this%f_x, 0.0_rp)
+    call field_cfill(this%f_y, 0.0_rp)
+    call field_cfill(this%f_z, 0.0_rp)
+    call field_cfill(this%u_e, 0.0_rp)
+    call field_cfill(this%v_e, 0.0_rp)
+    call field_cfill(this%w_e, 0.0_rp)
+
+    call neko_log%message(" ")
+    call neko_log%message("--------Green's Step----------")
+
+    this%greens_mode = .true.
+    call this%solve(time, dt_controller, this%proj_prs_green(col_g), &
+         this%proj_vel_green(col_g))
+    this%greens_mode = .false.
+
+    call profiler_end_region('Fluid', 1)
+  end subroutine fluid_fsi_greens_solve
+
+  !> Apply the velocity boundary conditions; those of the Green's function
+  !! problem while one is being solved.
+  subroutine fluid_fsi_bc_apply_vel(this, time, strong)
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    logical, intent(in) :: strong
+    class(bc_t), pointer :: b
+    integer :: i
+
+    if (.not. this%greens_mode) then
+       call this%fluid_pnpn_t%bc_apply_vel(time, strong)
+       return
+    end if
+
+    b => null()
+
+    call this%bcs_vel_green%apply_vector(this%u%x, this%v%x, this%w%x, &
+         this%dm_Xh%size(), time, strong=.true.)
+
+    call rotate_cyc(this%u, this%v, this%w, 1, this%c_Xh)
+    call this%gs_Xh%op(this%u, GS_OP_MIN, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call this%gs_Xh%op(this%v, GS_OP_MIN, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call this%gs_Xh%op(this%w, GS_OP_MIN, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call rotate_cyc(this%u, this%v, this%w, 0, this%c_Xh)
+
+    call this%bcs_vel_green%apply_vector(this%u%x, this%v%x, this%w%x, &
+         this%dm_Xh%size(), time, strong=.true.)
+
+    call rotate_cyc(this%u%x, this%v%x, this%w%x, 1, this%c_Xh)
+    call this%gs_Xh%op(this%u, GS_OP_MAX, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call this%gs_Xh%op(this%v, GS_OP_MAX, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call this%gs_Xh%op(this%w, GS_OP_MAX, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+    call rotate_cyc(this%u%x, this%v%x, this%w%x, 0, this%c_Xh)
+
+    do i = 1, this%bcs_vel_green%size()
+       b => this%bcs_vel_green%get(i)
+       b%updated = .false.
+    end do
+    nullify(b)
+  end subroutine fluid_fsi_bc_apply_vel
+
+  !> Apply the pressure boundary conditions; those of the Green's function
+  !! problem while one is being solved.
+  subroutine fluid_fsi_bc_apply_prs(this, time)
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    class(bc_t), pointer :: b
+    integer :: i
+
+    if (.not. this%greens_mode) then
+       call this%fluid_pnpn_t%bc_apply_prs(time)
+       return
+    end if
+
+    b => null()
+
+    call this%bcs_prs_green%apply(this%p, time)
+
+    call this%gs_Xh%op(this%p, GS_OP_MIN, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+
+    call this%bcs_prs_green%apply(this%p, time)
+
+    call this%gs_Xh%op(this%p, GS_OP_MAX, glb_cmd_event)
+    call device_event_sync(glb_cmd_event)
+
+    do i = 1, this%bcs_prs_green%size()
+       b => this%bcs_prs_green%get(i)
+       b%updated = .false.
+    end do
+    nullify(b)
+  end subroutine fluid_fsi_bc_apply_prs
+
+  !> Build the boundary conditions of the Green's function problems from
+  !! the fluid ones.
+  subroutine fluid_fsi_setup_green_bcs(this)
+    class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
+    class(bc_t), pointer :: bc_i
+    integer :: i
+
+    call this%bcs_vel_green%init()
+    do i = 1, this%bcs_vel%size()
+       bc_i => this%bcs_vel%get(i)
+       call fluid_fsi_green_vel_bc(this, bc_i)
+    end do
+
+    call this%bcs_prs_green%init()
+    do i = 1, this%bcs_prs%size()
+       bc_i => this%bcs_prs%get(i)
+       call fluid_fsi_green_prs_bc(this, bc_i)
+    end do
+  end subroutine fluid_fsi_setup_green_bcs
+
+  !> Subroutine to setup Green's function Velocity BCs
+  subroutine fluid_fsi_green_vel_bc(this, bc_i)
+    class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
+    class(bc_t), intent(inout) :: bc_i
+    class(bc_t), pointer :: bc_green
+
+    bc_green => null()
+
+    select type (orig => bc_i)
+
+       ! Moving Wall (FSI Body)
+       ! MUST remain a 'no_slip_t' so it tracks mesh velocity.
+    type is (no_slip_t)
+       if (orig%is_moving) then
+          allocate(no_slip_t :: bc_green)
+          ! We must verify if no_slip needs init via JSON or manual components
+          select type(n => bc_green)
+          type is (no_slip_t)
+             call n%zero_dirichlet_t%init_from_components(this%c_Xh)
+             n%is_moving = .true.
+
+             if (associated(orig%wx)) n%wx => orig%wx
+             if (associated(orig%wy)) n%wy => orig%wy
+             if (associated(orig%wz)) n%wz => orig%wz
+          end select
+       else
+          ! Stationary Wall -> Zero Dirichlet
+          allocate(zero_dirichlet_t :: bc_green)
+       end if
+
+       ! Inlets / User Dirichlet -> Zero Dirichlet (0.0)
+    type is (inflow_t)
+       allocate(zero_dirichlet_t :: bc_green)
+    type is (field_dirichlet_vector_t)
+       allocate(zero_dirichlet_t :: bc_green)
+    type is (wall_model_bc_t)
+       allocate(zero_dirichlet_t :: bc_green)
+
+       ! Constraints (Symmetry, etc.) -> Keep Same Pointer
+       !
+       ! Only the axis-aligned constraint bcs can be cloned here. The mixed
+       ! bcs (symmetry_t, non_normal_t, shear_stress_t and its descendants)
+       ! are resolved globally by the coupled_vector_bc_projector_t and carry
+       ! no usable constraint of their own: an unregistered clone has an empty
+       ! resolved_msk and would silently apply nothing.
+    type is (symmetry_aligned_t)
+       allocate(symmetry_aligned_t :: bc_green)
+       select type(s => bc_green)
+       type is (symmetry_aligned_t)
+          call s%init_from_components(this%c_Xh)
+       end select
+
+    type is (symmetry_t)
+       call neko_error("FSI Green's functions do not support the coupled " // &
+            "symmetry boundary condition. Disable the full stress " // &
+            "formulation to get the axis-aligned variant.")
+
+    type is (non_normal_t)
+       call neko_error("FSI Green's functions do not support the coupled " // &
+            "normal_outflow boundary condition. Disable the full stress " // &
+            "formulation to get the axis-aligned variant.")
+
+    type is (shear_stress_t)
+       call neko_error("FSI Green's functions do not support the " // &
+            "shear_stress boundary condition, which is now a mixed bc " // &
+            "resolved by the coupled velocity projector.")
+
+       ! Outflow -> Natural (Null)
+    class default
+       ! bc_green => null()
+    end select
+
+    ! If we created a valid Green's BC, append it
+    if (associated(bc_green)) then
+
+       ! Initialize if it's a new object
+       select type (z => bc_green)
+       type is (zero_dirichlet_t)
+          call z%init_from_components(this%c_Xh)
+       end select
+
+       call bc_green%mark_facets(bc_i%marked_facet)
+       call bc_green%finalize()
+
+       call this%bcs_vel_green%append(bc_green)
+    end if
+  end subroutine fluid_fsi_green_vel_bc
+
+  !> Helper subroutine to setup Green's function Pressure BCs
+  subroutine fluid_fsi_green_prs_bc(this, bc_i)
+    class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
+    class(bc_t), intent(inout) :: bc_i
+    class(bc_t), pointer :: bc_p_green
+
+    bc_p_green => null()
+
+    if (bc_i%bc_type .eq. BC_DIRICHLET) then
+       allocate(zero_dirichlet_t :: bc_p_green)
+       select type(z => bc_p_green)
+       type is (zero_dirichlet_t)
+          call z%init_from_components(this%c_Xh)
+          call z%mark_facets(bc_i%marked_facet)
+          call z%finalize()
+       end select
+       call this%bcs_prs_green%append(bc_p_green)
+    end if
+
+  end subroutine fluid_fsi_green_prs_bc
+
   subroutine fluid_fsi_free(this)
     class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
+    class(bc_t), pointer :: bc
     integer :: i, k
 
     if (allocated(this%fsi_bodies)) then
@@ -628,6 +885,18 @@ contains
     call this%v_s%free()
     call this%w_s%free()
     call this%p_s%free()
+
+    do i = 1, this%bcs_vel_green%size()
+       bc => this%bcs_vel_green%get(i)
+       call bc%free()
+    end do
+    call this%bcs_vel_green%free()
+
+    do i = 1, this%bcs_prs_green%size()
+       bc => this%bcs_prs_green%get(i)
+       call bc%free()
+    end do
+    call this%bcs_prs_green%free()
 
     ! Free the base fluid_pnpn_t
     call this%fluid_pnpn_t%free()
