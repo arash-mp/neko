@@ -1139,6 +1139,7 @@ contains
 
     call this%global_interp%free()
     call this%space_interp%free()
+    call dof%free()
 
   end subroutine chkp_file_read
 
