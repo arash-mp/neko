@@ -36,7 +36,7 @@ module fluid_pnpn_fsi_subiteration
        add_fsi_non_linear_matrices, add_fsi_user_structural_terms
   use fsi_body_params, only : params_inertia_about_pivot
   use fsi_manager, only : fsi_manager_init, linsolve_dense, &
-       fsi_prep_checkpoint, fsi_restart_restore
+       fsi_register_checkpoint, fsi_prep_checkpoint, fsi_restart_restore
   use fluid_pnpn, only : fluid_pnpn_t
   use field, only : field_t
   use field_math, only : field_copy
@@ -55,6 +55,7 @@ module fluid_pnpn_fsi_subiteration
   use user_intf, only : user_t, user_fsi_body_params_intf, &
        user_fsi_structural_terms_intf, dummy_fsi_structural_terms
   use checkpoint, only : chkp_t
+  use checkpoint_payload, only : checkpoint_payload_t
   use mpi_f08, only : MPI_Wtime
   use math, only : rzero, copy
   use device_math, only : device_copy
@@ -197,6 +198,7 @@ contains
     type(json_file), target, intent(inout) :: params
     type(user_t), target, intent(in) :: user
     type(chkp_t), target, intent(inout) :: chkp
+    type(checkpoint_payload_t), pointer :: payload
     type(time_state_t) :: t_init
     integer :: i
     character(len=32) :: accel_str
@@ -267,13 +269,15 @@ contains
     ! Register the acceleration stores for checkpointing only for the Newmark
     ! path, so BDF checkpoints keep their exact byte layout.
     if (this%structure_newmark) then
-       call this%chkp%add_fsi(this%global_disp_rel, this%global_body_vel, &
-            this%global_body_vel_lag, this%global_moving_frame_presc_vel, &
-            body_acc = this%global_body_acc, &
-            frame_acc = this%global_frame_acc)
+       call fsi_register_checkpoint(this%chkp, this%global_disp_rel, &
+            this%global_body_vel, this%global_body_vel_lag, &
+            this%global_moving_frame_presc_vel, &
+            global_body_acc = this%global_body_acc, &
+            global_frame_acc = this%global_frame_acc)
     else
-       call this%chkp%add_fsi(this%global_disp_rel, this%global_body_vel, &
-            this%global_body_vel_lag, this%global_moving_frame_presc_vel)
+       call fsi_register_checkpoint(this%chkp, this%global_disp_rel, &
+            this%global_body_vel, this%global_body_vel_lag, &
+            this%global_moving_frame_presc_vel)
     end if
 
     ! Sub-iteration parameters.
@@ -465,9 +469,18 @@ contains
        call this%init_histories()
 
        ! Register the position histories for checkpointing.
-       call this%chkp%add_fsi_subiter(this%n_lag, &
-            this%mesh_x_lag, this%mesh_y_lag, this%mesh_z_lag, &
-            this%pivot_hist, this%ghost_hist, this%disp_hist)
+       payload => this%chkp%add_payload("fsi_subiter")
+       do i = 1, this%n_lag
+          call payload%add_field(this%mesh_x_lag(i))
+          call payload%add_field(this%mesh_y_lag(i))
+          call payload%add_field(this%mesh_z_lag(i))
+       end do
+       call payload%add_array("pivot_hist", this%pivot_hist, &
+            replicated = .true.)
+       call payload%add_array("ghost_hist", this%ghost_hist, &
+            replicated = .true.)
+       call payload%add_array("disp_hist", this%disp_hist, &
+            replicated = .true.)
 
        ! Select the implicit mesh-kinematics scheme that matches the structure
        ! integrator: BDF structure -> BDF ALE, Newmark structure -> CN ALE.
@@ -1563,7 +1576,10 @@ contains
     class(fluid_pnpn_fsi_subiter_t), target, intent(inout) :: this
     type(chkp_t), intent(inout) :: chkp
     type(time_state_t) :: t_restart
+    real(kind=dp), pointer :: tlag(:), dtlag(:)
     integer :: i
+
+    call chkp%get_time_history(tlag, dtlag)
 
     ! Fluid_pnpn scheme restart (fluid, ALE, adv, etc.)
     call this%fluid_pnpn_t%restart(chkp)
@@ -1577,7 +1593,7 @@ contains
 
        t_restart%t = chkp%t
        t_restart%tstep = 0
-       t_restart%dt = chkp%dtlag(1)
+       t_restart%dt = dtlag(1)
 
        do i = 1, this%nbodies_fsi
           this%batch_ids(i) = this%fsi_bodies(i)%ale_id
@@ -1605,15 +1621,13 @@ contains
           ! previous behaviour.
        end if
 
-       if (chkp%fsi_subiter_restored) then
-          if (NEKO_BCKND_DEVICE .eq. 1) then
-             do i = 1, this%n_lag
-                call this%mesh_x_lag(i)%copy_from(HOST_TO_DEVICE, sync = .false.)
-                call this%mesh_y_lag(i)%copy_from(HOST_TO_DEVICE, sync = .false.)
-                call this%mesh_z_lag(i)%copy_from(HOST_TO_DEVICE, sync = .false.)
-             end do
-             call device_sync()
-          end if
+       if (NEKO_BCKND_DEVICE .eq. 1) then
+          do i = 1, this%n_lag
+             call this%mesh_x_lag(i)%copy_from(HOST_TO_DEVICE, sync = .false.)
+             call this%mesh_y_lag(i)%copy_from(HOST_TO_DEVICE, sync = .false.)
+             call this%mesh_z_lag(i)%copy_from(HOST_TO_DEVICE, sync = .false.)
+          end do
+          call device_sync()
        end if
     end if
   end subroutine fluid_subiter_restart

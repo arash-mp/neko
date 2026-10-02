@@ -34,7 +34,7 @@ module fluid_pnpn_fsi_greens
   use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms, &
        add_fsi_non_linear_matrices, add_fsi_user_structural_terms
   use fsi_manager, only: fsi_manager_init, linsolve_dense, &
-       fsi_prep_checkpoint, fsi_restart_restore
+       fsi_register_checkpoint, fsi_prep_checkpoint, fsi_restart_restore
   use fluid_pnpn, only : fluid_pnpn_t
   use force_torque, only : force_torque_t
   use field, only : field_t
@@ -178,8 +178,8 @@ contains
          this%global_moving_frame_presc_vel, this%skip_greens_solve, &
          this%non_linear_correction_term)
 
-    call this%chkp%add_fsi(this%global_disp_rel, this%global_body_vel, &
-         this%global_body_vel_lag, &
+    call fsi_register_checkpoint(this%chkp, this%global_disp_rel, &
+         this%global_body_vel, this%global_body_vel_lag, &
          this%global_moving_frame_presc_vel)
 
     if (this%nbodies_fsi > 0) then
@@ -783,11 +783,10 @@ contains
     class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
     type(chkp_t), intent(inout) :: chkp
     type(time_state_t) :: t_restart
-    real(kind=rp) :: dtlag(10), tlag(10)
+    real(kind=dp), pointer :: tlag(:), dtlag(:)
     integer :: i, n
 
-    dtlag = chkp%dtlag
-    tlag = chkp%tlag
+    call chkp%get_time_history(tlag, dtlag)
 
     n = this%u%dof%size()
 
@@ -803,7 +802,7 @@ contains
 
        t_restart%t = chkp%t
        t_restart%tstep = 0
-       t_restart%dt = chkp%dtlag(1)
+       t_restart%dt = dtlag(1)
 
        do i = 1, this%nbodies_fsi
           this%batch_ids(i) = this%fsi_bodies(i)%ale_id

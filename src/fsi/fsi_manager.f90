@@ -15,6 +15,7 @@ module fsi_manager
   use mesh, only : mesh_t
   use user_intf, only : user_t
   use checkpoint, only : chkp_t
+  use checkpoint_payload, only : checkpoint_payload_t
   use ale_manager, only : ale_manager_t
   use coefs, only : coef_t
   use dofmap, only : dofmap_t
@@ -25,6 +26,7 @@ module fsi_manager
 
   public :: fsi_manager_init
   public :: linsolve_dense
+  public :: fsi_register_checkpoint
   public :: fsi_prep_checkpoint
   public :: fsi_restart_restore
 contains
@@ -569,6 +571,39 @@ contains
     end do
   end subroutine linsolve_dense
   
+  !> Register the FSI rigid-body state as the "fsi" checkpoint payload.
+  !! Every rank holds an identical copy of these arrays.
+  subroutine fsi_register_checkpoint(chkp, global_disp_rel, &
+       global_body_vel, global_body_vel_lag, &
+       global_moving_frame_presc_vel, global_body_acc, global_frame_acc)
+    type(chkp_t), intent(inout) :: chkp
+    real(kind=rp), target, intent(inout) :: global_disp_rel(:)
+    real(kind=rp), target, intent(inout) :: global_body_vel(:)
+    real(kind=rp), target, intent(inout) :: global_body_vel_lag(:,:)
+    real(kind=rp), target, intent(inout) :: global_moving_frame_presc_vel(:,:)
+    !> Newmark previous-acceleration
+    real(kind=rp), target, intent(inout), optional :: global_body_acc(:)
+    !> Newmark prescribed-frame previous-acceleration
+    real(kind=rp), target, intent(inout), optional :: global_frame_acc(:)
+    type(checkpoint_payload_t), pointer :: payload
+
+    payload => chkp%add_payload("fsi")
+    call payload%add_array("disp_rel", global_disp_rel, replicated = .true.)
+    call payload%add_array("body_vel", global_body_vel, replicated = .true.)
+    call payload%add_array("body_vel_lag", global_body_vel_lag, &
+         replicated = .true.)
+    call payload%add_array("moving_frame_presc_vel", &
+         global_moving_frame_presc_vel, replicated = .true.)
+    if (present(global_body_acc)) then
+       call payload%add_array("body_acc", global_body_acc, &
+            replicated = .true.)
+    end if
+    if (present(global_frame_acc)) then
+       call payload%add_array("frame_acc", global_frame_acc, &
+            replicated = .true.)
+    end if
+  end subroutine fsi_register_checkpoint
+
   !> Flattens FSI body arrays into global 1D/2D arrays for checkpointing
   subroutine fsi_prep_checkpoint(nbodies_fsi, bodies, global_disp_rel, &
        global_body_vel, global_body_vel_lag, &
