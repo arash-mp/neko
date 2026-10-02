@@ -774,7 +774,7 @@ contains
                 exit
              end if
           end do
-          if (.not. converged) then
+          if (.not. nr_converged) then
              write(msg, '(A,I0,A,I0,A,ES13.6)') &
                   "FSI structural loop did not converge at step ", time%tstep, &
                   " after ", max_nr, " passes. Max residual: ", nr_res
