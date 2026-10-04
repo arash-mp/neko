@@ -50,6 +50,8 @@ module fsi_dynamics
   !> single FSI body properties
   type, public :: fsi_body_t
      character(len=256) :: name
+     !> File the results of the body are written to.
+     character(len=256) :: output_filename
      integer :: zone_id
      integer :: ale_id
 

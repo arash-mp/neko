@@ -347,6 +347,9 @@ contains
     else
        write(body%name, '(A,I0)') 'fsi_body_', i
     end if
+    call json_get_or_default(body_sub, 'output_filename', temp_str, &
+         'FSI_results_' // trim(body%name))
+    body%output_filename = temp_str
 
     call json_get(body_sub, 'zone_id', body%zone_id)
 

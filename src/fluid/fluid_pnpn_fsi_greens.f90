@@ -605,8 +605,8 @@ contains
   end subroutine fluid_fsi_update_bodies
 
   !> Set up the CSV output. Besides the common columns, each body gets its
-  !! correction coefficients, bd / dt and, when the Green's functions are
-  !! solved for, the loads on its active DOFs from each of them.
+  !! correction coefficients and, when the Green's functions are solved for,
+  !! bd / dt and the loads on its active DOFs from each of them.
   subroutine fluid_fsi_init_results(this, params)
     class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
     type(json_file), intent(inout) :: params
@@ -621,9 +621,9 @@ contains
           n(i) = n(i) + 1
           names(n(i), i) = 'corr_' // trim(FSI_DOF_NAMES(k))
        end do
+       if (this%skip_greens_solve) cycle
        n(i) = n(i) + 1
        names(n(i), i) = 'bd_dt'
-       if (this%skip_greens_solve) cycle
        do m = 1, 6
           if (this%fsi_dof_map(i, m) .le. 0) cycle
           do k = 1, 6
@@ -665,10 +665,10 @@ contains
           n = n + 1
           extra(n, i) = this%X_sol(this%fsi_dof_map(i, k))
        end do
+       if (this%skip_greens_solve) cycle
        n = n + 1
        extra(n, i) = this%ext_bdf%diffusion_coeffs%x(1) / &
             real(time%dt, kind=rp)
-       if (this%skip_greens_solve) cycle
        do m = 1, 6
           if (this%fsi_dof_map(i, m) .le. 0) cycle
           do k = 1, 6
