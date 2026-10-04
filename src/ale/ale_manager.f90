@@ -1460,7 +1460,8 @@ contains
     !> Previous-step pivot / angular velocity for the CN scheme.
     real(kind=rp), intent(in), optional :: pvel_prev(3), omega_tot_prev(3)
     integer :: g, h
-    real(kind=rp) :: arm(3), tvel(3), cw(3), tvel_prev(3), cw_prev(3)
+    real(kind=rp) :: arm(3), pivot(3), tvel(3), cw(3), tvel_prev(3), cw_prev(3)
+    real(kind=rp) :: weight, a(3), b(3), axb(3)
     logical :: use_cn
 
     use_cn = present(pvel_prev) .and. present(omega_tot_prev)
@@ -1473,29 +1474,46 @@ contains
        call this%scheme%integrate_point(this%ale_pivot(body_idx)%pos, pvel, &
             time, nadv, beta = beta, hist = pivot_hist)
     end if
+    pivot = this%ale_pivot(body_idx)%pos
 
+    ! Weight of the new velocity in the position update of the scheme
+    if (use_cn) then
+       weight = 0.5_rp * real(time%dt, kind=rp)
+    else
+       weight = real(time%dt, kind=rp) / beta(0)
+    end if
+    a = weight * omega_tot
+
+    ! A tracker moves with pvel + omega x (pos - pivot), with pos and pivot at
+    ! the new time, so pos is on both sides. The scheme integrates the part
+    ! that does not depend on pos, which leaves (I - [a x]) pos = b.
     do g = 1, 2
        h = this%ghost_handles(g, body_idx)
 
-       arm = ghost_hist(:, 1, g) - pivot_hist(:, 1)
+       cw(1) = omega_tot(2) * pivot(3) - omega_tot(3) * pivot(2)
+       cw(2) = omega_tot(3) * pivot(1) - omega_tot(1) * pivot(3)
+       cw(3) = omega_tot(1) * pivot(2) - omega_tot(2) * pivot(1)
 
-       cw(1) = omega_tot(2) * arm(3) - omega_tot(3) * arm(2)
-       cw(2) = omega_tot(3) * arm(1) - omega_tot(1) * arm(3)
-       cw(3) = omega_tot(1) * arm(2) - omega_tot(2) * arm(1)
-
-       tvel = pvel + cw
+       tvel = pvel - cw
 
        if (use_cn) then
+          arm = ghost_hist(:, 1, g) - pivot_hist(:, 1)
           cw_prev(1) = omega_tot_prev(2) * arm(3) - omega_tot_prev(3) * arm(2)
           cw_prev(2) = omega_tot_prev(3) * arm(1) - omega_tot_prev(1) * arm(3)
           cw_prev(3) = omega_tot_prev(1) * arm(2) - omega_tot_prev(2) * arm(1)
           tvel_prev = pvel_prev + cw_prev
-          call this%scheme%integrate_point(this%trackers(h)%pos, tvel, &
-               time, nadv, hist = ghost_hist(:, :, g), vel_prev = tvel_prev)
+          call this%scheme%integrate_point(b, tvel, time, nadv, &
+               hist = ghost_hist(:, :, g), vel_prev = tvel_prev)
        else
-          call this%scheme%integrate_point(this%trackers(h)%pos, tvel, &
-               time, nadv, beta = beta, hist = ghost_hist(:, :, g))
+          call this%scheme%integrate_point(b, tvel, time, nadv, beta = beta, &
+               hist = ghost_hist(:, :, g))
        end if
+
+       axb(1) = a(2) * b(3) - a(3) * b(2)
+       axb(2) = a(3) * b(1) - a(1) * b(3)
+       axb(3) = a(1) * b(2) - a(2) * b(1)
+       this%trackers(h)%pos = (b + axb + a * dot_product(a, b)) / &
+            (1.0_rp + dot_product(a, a))
     end do
 
     call this%compute_rotation_matrix(body_idx, time)
