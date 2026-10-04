@@ -59,6 +59,7 @@ module fluid_pnpn_fsi_greens
   use device, only : device_event_sync, glb_cmd_event
   use profiler, only : profiler_start_region, profiler_end_region
   use json_module, only : json_file
+  use json_utils, only : json_get_or_default
   use utils, only : neko_error
   use logger, only : neko_log
   use mesh, only : mesh_t
@@ -135,6 +136,8 @@ module fluid_pnpn_fsi_greens
      !> Accumulated wall time of the standard and of the Green's solves.
      real(kind=dp) :: total_elapsed_s = 0.0_dp
      real(kind=dp) :: total_elapsed_g = 0.0_dp
+     !> Maximum number of pressure iterations in a Green's function solve.
+     integer :: greens_prs_max_iter
    contains
      procedure, pass(this) :: init => fluid_fsi_init
      procedure, pass(this) :: step => fluid_fsi_step
@@ -197,6 +200,15 @@ contains
          this%global_body_vel, this%global_body_vel_lag, &
          this%global_moving_frame_presc_vel, this%skip_greens_solve, &
          this%non_linear_correction_term)
+
+    ! The main pressure solver's limit unless set
+    call json_get_or_default(params, &
+         'case.fluid.fsi.pressure_solver.max_iterations', &
+         this%greens_prs_max_iter, this%ksp_prs%max_iter)
+    if (this%greens_prs_max_iter .lt. 1) then
+       call neko_error("case.fluid.fsi.pressure_solver.max_iterations " // &
+            "must be at least 1")
+    end if
 
     call fsi_register_checkpoint(this%chkp, this%global_disp_rel, &
          this%global_body_vel, this%global_body_vel_lag, &
@@ -551,6 +563,7 @@ contains
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
     integer, intent(in) :: col_g
+    integer :: prs_max_iter
 
     call profiler_start_region('Fluid', 1)
 
@@ -565,10 +578,13 @@ contains
     call neko_log%message(" ")
     call neko_log%message("--------Green's Step----------")
 
+    prs_max_iter = this%ksp_prs%max_iter
+    this%ksp_prs%max_iter = this%greens_prs_max_iter
     this%greens_mode = .true.
     call this%solve(time, dt_controller, this%proj_prs_green(col_g), &
          this%proj_vel_green(col_g))
     this%greens_mode = .false.
+    this%ksp_prs%max_iter = prs_max_iter
 
     call profiler_end_region('Fluid', 1)
   end subroutine fluid_fsi_greens_solve
