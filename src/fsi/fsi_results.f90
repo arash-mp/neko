@@ -92,7 +92,7 @@ contains
     character(len=:), allocatable :: control, dir, fname, header
     character(len=1), parameter :: xyz(3) = ['x', 'y', 'z']
     real(kind=dp) :: value, start_time, end_time
-    integer :: i, k, ncol, n
+    integer :: i, k, ncol, n, value_int
 
     call this%free()
 
@@ -100,8 +100,18 @@ contains
          this%log_results, .true.)
     call json_get_or_default(params, 'case.fluid.fsi.output_control', &
          control, 'tsteps')
-    call json_get_or_default(params, 'case.fluid.fsi.output_value', value, &
-         1.0_dp)
+    ! As for the other outputs: an integer for steps or samples, a real for
+    ! simulation time
+    if (control .eq. 'tsteps' .or. control .eq. 'nsamples') then
+       call json_get_or_lookup_or_default(params, &
+            'case.fluid.fsi.output_value', value_int, 1)
+       value = real(value_int, kind=dp)
+    else if (control .eq. 'simulationtime') then
+       call json_get_or_lookup_or_default(params, &
+            'case.fluid.fsi.output_value', value, 1.0_dp)
+    else
+       value = 0.0_dp
+    end if
     call json_get_or_lookup_or_default(params, 'case.time.start_time', &
          start_time, 0.0_dp)
     call json_get_or_lookup(params, 'case.time.end_time', end_time)
