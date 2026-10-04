@@ -73,6 +73,12 @@ module fluid_pnpn_fsi_subiteration
   integer, parameter :: ACCEL_AITKEN = 1 !< per-body dynamic Aitken
   integer, parameter :: ACCEL_IQN = 2 !< IQN-ILS (@ToDo)
 
+  ! Convergence criteria of the sub-iteration
+  integer, parameter :: CONV_VELOCITY = 0
+  integer, parameter :: CONV_FORCE = 1
+  integer, parameter :: CONV_BOTH = 2
+  integer, parameter :: CONV_EITHER = 3
+
   ! Floor for the per-DOF relative error: a DOF whose own velocity/force is
   ! below REL_FLOOR times the peak of its type (translation/rotation, force/
   ! torque) is normalised by that floor instead of its own (near-zero) scale,
@@ -150,7 +156,7 @@ module fluid_pnpn_fsi_subiteration
      real(kind=rp), allocatable :: accel_r_prev(:,:)
      real(kind=rp) :: aitken_max
      real(kind=rp) :: aitken_min
-     character(len=16) :: conv_criterion !< velocity|force|both|either
+     integer :: conv_criterion = CONV_VELOCITY !< velocity|force|both|either
      logical :: conv_relative
      real(kind=rp) :: conv_tol
 
@@ -414,7 +420,19 @@ contains
 
     call json_get_or_default(params, &
          'case.fluid.fsi.subiteration.criterion', tmp_str, 'velocity')
-    this%conv_criterion = tmp_str
+    select case (trim(tmp_str))
+    case ('velocity')
+       this%conv_criterion = CONV_VELOCITY
+    case ('force')
+       this%conv_criterion = CONV_FORCE
+    case ('both')
+       this%conv_criterion = CONV_BOTH
+    case ('either')
+       this%conv_criterion = CONV_EITHER
+    case default
+       call neko_error('Unknown criterion: ' // trim(tmp_str) // &
+            ' (use velocity|force|both|either)')
+    end select
     call json_get_or_default(params, &
          'case.fluid.fsi.subiteration.relative', this%conv_relative, .true.)
     call json_get_or_default(params, &
@@ -447,6 +465,7 @@ contains
     class(fluid_pnpn_fsi_subiter_t), intent(in) :: this
     character(len=128) :: log_buf
     character(len=16) :: scheme_name, ale_name, accel_name, pred_name, a0_name
+    character(len=16) :: crit_name
 
     if (this%structure_newmark) then
        scheme_name = 'newmark'
@@ -477,6 +496,18 @@ contains
        pred_name = 'ext'
     case default
        pred_name = 'unknown'
+    end select
+    select case (this%conv_criterion)
+    case (CONV_VELOCITY)
+       crit_name = 'velocity'
+    case (CONV_FORCE)
+       crit_name = 'force'
+    case (CONV_BOTH)
+       crit_name = 'both'
+    case (CONV_EITHER)
+       crit_name = 'either'
+    case default
+       crit_name = 'unknown'
     end select
 
     call neko_log%section('FSI sub-iteration setup')
@@ -519,7 +550,7 @@ contains
     end if
 
     write(log_buf, '(A,A)') '   criterion                   : ', &
-         trim(this%conv_criterion)
+         trim(crit_name)
     call neko_log%message(log_buf)
     write(log_buf, '(A,L1)') '   relative                    : ', &
          this%conv_relative
@@ -669,10 +700,9 @@ contains
        call subiter_apply_ext_predictor(this, time)
     end if
 
-    ! assemble the explicit RHS once on x^n
-    ! adv%compute_ale uses the mesh velocity currently stored in the ALE manager
-    ! (= last step's corrected velocity)
-    ! DOUBLE CHECK TO BE SURE WM IS CORRECT HERE.
+    ! Assemble the explicit RHS once on x^n. The ALE advection uses the mesh
+    ! velocity stored in the ALE manager, which is still the one from the end
+    ! of the previous step: the predictor only changes the body velocity.
     call this%assemble_rhs(time)
     call this%ulag%update()
     call this%vlag%update()
@@ -735,8 +765,7 @@ contains
 
        ! Force residual, computed here while B_global still
        ! holds the interface imbalance.
-       call subiter_dof_metric(this, .true., &
-            fmetric, wf_body, wf_dof)
+       call subiter_force_metric(this, fmetric, wf_body, wf_dof)
 
        ! Solve the 6-DOF structural system  M * dv = B
        if (this%total_active_dofs > 0) then
@@ -751,8 +780,7 @@ contains
 
        ! Velocity increment; the un-relaxed structural
        ! correction X_sol, normalised per DOF by its own velocity scale.
-       call subiter_dof_metric(this, .false., &
-            vmetric, wv_body, wv_dof)
+       call subiter_velocity_metric(this, vmetric, wv_body, wv_dof)
 
        call subiter_relax_velocities(this, kit)
 
@@ -930,11 +958,11 @@ contains
     character(len=8) :: dv_lbl, fr_lbl
     character(len=128) :: msg
 
-    select case (trim(this%conv_criterion))
-    case ('velocity')
+    select case (this%conv_criterion)
+    case (CONV_VELOCITY)
        show_v = .true.
        show_f = .false.
-    case ('force')
+    case (CONV_FORCE)
        show_v = .false.
        show_f = .true.
     case default ! both / either
@@ -1038,43 +1066,87 @@ contains
     end do
   end subroutine subiter_apply_ext_predictor
 
-  !> Per-body-per-DOF convergence metric.
-  !!   is_force = .false. : numerator = velocity increment X_sol(row),
-  !!                        own scale = |body_vel(dof)|
-  !!   is_force = .true.  : numerator = force residual  B_global(row),
-  !!                        own scale = |total_force/torque(dof)|
-  !! Each DOF is normalised (when conv_relative) by its own scale, floored at
-  !! REL_FLOOR times the peak scale among active DOFs of the same *type*
-  !! (translation k<=3, rotation k>=4).
-  !! The returned metric is the
-  !! worst DOF, with its (body, dof) index.
-  subroutine subiter_dof_metric(this, is_force, metric, wbody, wdof)
+  !> Worst-DOF force metric: the interface imbalance B_global against the
+  !! fluid force or torque on that DOF.
+  subroutine subiter_force_metric(this, metric, wbody, wdof)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
-    logical, intent(in) :: is_force
     real(kind=rp), intent(out) :: metric
     integer, intent(out) :: wbody, wdof
+    real(kind=rp) :: numer(6, this%nbodies_fsi), own(6, this%nbodies_fsi)
     integer :: i, k, row_g
-    real(kind=rp) :: st, sr, ref, own, numer, denom, r
+
+    numer = 0.0_rp
+    own = 0.0_rp
+    do i = 1, this%nbodies_fsi
+       do k = 1, 6
+          row_g = this%fsi_dof_map(i, k)
+          if (row_g .le. 0) cycle
+          numer(k, i) = abs(this%B_global(row_g))
+          if (k .le. 3) then
+             own(k, i) = abs(this%fsi_bodies(i)%force_monitor%total_force(k))
+          else
+             own(k, i) = &
+                  abs(this%fsi_bodies(i)%force_monitor%total_torque(k-3))
+          end if
+       end do
+    end do
+
+    call worst_dof_metric(this%fsi_dof_map, this%conv_relative, numer, own, &
+         this%rel_dof_f, metric, wbody, wdof)
+  end subroutine subiter_force_metric
+
+  !> Worst-DOF velocity metric: the un-relaxed structural correction X_sol
+  !! against the body velocity of that DOF.
+  subroutine subiter_velocity_metric(this, metric, wbody, wdof)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    real(kind=rp), intent(out) :: metric
+    integer, intent(out) :: wbody, wdof
+    real(kind=rp) :: numer(6, this%nbodies_fsi), own(6, this%nbodies_fsi)
+    integer :: i, k, row_g
+
+    numer = 0.0_rp
+    own = 0.0_rp
+    do i = 1, this%nbodies_fsi
+       do k = 1, 6
+          row_g = this%fsi_dof_map(i, k)
+          if (row_g .le. 0) cycle
+          numer(k, i) = abs(this%X_sol(row_g))
+          own(k, i) = abs(this%fsi_bodies(i)%body_vel(k))
+       end do
+    end do
+
+    call worst_dof_metric(this%fsi_dof_map, this%conv_relative, numer, own, &
+         this%rel_dof_v, metric, wbody, wdof)
+  end subroutine subiter_velocity_metric
+
+  !> Worst DOF of a set of per-DOF errors, with its (body, dof) index.
+  !! When `relative`, each error is divided by its own scale, floored at
+  !! REL_FLOOR times the peak scale among the active DOFs of the same type
+  !! (translation k<=3, rotation k>=4).
+  !! @param numer Error of each DOF, (6, nbodies).
+  !! @param own Scale of each DOF, (6, nbodies).
+  !! @param rel_dof The resulting error of each DOF, -1 for inactive DOFs.
+  subroutine worst_dof_metric(dof_map, relative, numer, own, rel_dof, metric, &
+       wbody, wdof)
+    integer, intent(in) :: dof_map(:,:)
+    logical, intent(in) :: relative
+    real(kind=rp), intent(in) :: numer(:,:), own(:,:)
+    real(kind=rp), intent(out) :: rel_dof(:,:)
+    real(kind=rp), intent(out) :: metric
+    integer, intent(out) :: wbody, wdof
+    integer :: i, k
+    real(kind=rp) :: st, sr, ref, denom, r
     real(kind=rp), parameter :: TINY = 1.0e-30_rp
 
     st = 0.0_rp
     sr = 0.0_rp
-    do i = 1, this%nbodies_fsi
+    do i = 1, size(dof_map, 1)
        do k = 1, 6
-          if (this%fsi_dof_map(i, k) <= 0) cycle
-          if (is_force) then
-             if (k <= 3) then
-                own = abs(this%fsi_bodies(i)%force_monitor%total_force(k))
-             else
-                own = abs(this%fsi_bodies(i)%force_monitor%total_torque(k-3))
-             end if
+          if (dof_map(i, k) .le. 0) cycle
+          if (k .le. 3) then
+             st = max(st, own(k, i))
           else
-             own = abs(this%fsi_bodies(i)%body_vel(k))
-          end if
-          if (k <= 3) then
-             st = max(st, own)
-          else
-             sr = max(sr, own)
+             sr = max(sr, own(k, i))
           end if
        end do
     end do
@@ -1082,59 +1154,39 @@ contains
     metric = 0.0_rp
     wbody = 0
     wdof = 0
-    do i = 1, this%nbodies_fsi
+    do i = 1, size(dof_map, 1)
        do k = 1, 6
-          row_g = this%fsi_dof_map(i, k)
-          if (row_g .le. 0) then
-             if (is_force) then
-                this%rel_dof_f(k, i) = -1.0_rp
-             else
-                this%rel_dof_v(k, i) = -1.0_rp
-             end if
+          if (dof_map(i, k) .le. 0) then
+             rel_dof(k, i) = -1.0_rp
              cycle
           end if
 
-          if (is_force) then
-             numer = abs(this%B_global(row_g))
-             if (k .le. 3) then
-                own = abs(this%fsi_bodies(i)%force_monitor%total_force(k))
-             else
-                own = abs(this%fsi_bodies(i)%force_monitor%total_torque(k-3))
-             end if
-          else
-             numer = abs(this%X_sol(row_g))
-             own = abs(this%fsi_bodies(i)%body_vel(k))
-          end if
-
-          if (this%conv_relative) then
+          if (relative) then
              if (k .le. 3) then
                 ref = st
              else
                 ref = sr
              end if
-             denom = max(own, REL_FLOOR * ref)
+             denom = max(own(k, i), REL_FLOOR * ref)
              if (denom .lt. TINY) denom = TINY
-             r = numer / denom
+             r = numer(k, i) / denom
           else
-             r = numer
+             r = numer(k, i)
           end if
 
-          if (is_force) then
-             this%rel_dof_f(k, i) = r
-          else
-             this%rel_dof_v(k, i) = r
-          end if
-          if (r > metric) then
+          rel_dof(k, i) = r
+          if (r .gt. metric) then
              metric = r
              wbody = i
              wdof = k
           end if
        end do
     end do
-  end subroutine subiter_dof_metric
+  end subroutine worst_dof_metric
 
   !> vmetric / fmetric are the worst-DOF relative (or absolute) errors already
-  !! formed by subiter_dof_metric; this routine only applies the criterion.
+  !! formed by the two metric routines; this routine only applies the
+  !! criterion.
   function subiter_is_converged(this, vmetric, fmetric) result(ok)
     class(fluid_pnpn_fsi_subiter_t), intent(in) :: this
     real(kind=rp), intent(in) :: vmetric, fmetric
@@ -1143,14 +1195,12 @@ contains
     v_ok = (vmetric < this%conv_tol)
     f_ok = (fmetric < this%conv_tol)
 
-    select case (trim(this%conv_criterion))
-    case ('velocity')
-       ok = v_ok
-    case ('force')
+    select case (this%conv_criterion)
+    case (CONV_FORCE)
        ok = f_ok
-    case ('both')
+    case (CONV_BOTH)
        ok = v_ok .and. f_ok
-    case ('either')
+    case (CONV_EITHER)
        ok = v_ok .or. f_ok
     case default
        ok = v_ok
