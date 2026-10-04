@@ -1739,6 +1739,12 @@ contains
     if (allocated(this%ghost_hist)) deallocate(this%ghost_hist)
     if (allocated(this%disp_hist)) deallocate(this%disp_hist)
 
+    if (allocated(this%global_disp_rel)) then
+       deallocate(this%global_disp_rel, this%global_body_vel, &
+            this%global_body_vel_lag, this%global_moving_frame_presc_vel, &
+            this%global_body_acc, this%global_frame_acc)
+    end if
+
     call this%u_ref%free()
     call this%v_ref%free()
     call this%w_ref%free()

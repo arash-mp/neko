@@ -290,33 +290,36 @@ contains
     allocate(X_sol(total_active_dofs))
     X_sol = 0.0_rp
 
-    allocate(u_g(total_active_dofs))
-    allocate(v_g(total_active_dofs))
-    allocate(w_g(total_active_dofs))
-    allocate(p_g(total_active_dofs))
-    allocate(proj_prs_green(total_active_dofs))
-    allocate(proj_vel_green(total_active_dofs))
+    ! The Green's function storage is only needed when they are solved for
+    if (.not. skip_greens_solve) then
+       allocate(u_g(total_active_dofs))
+       allocate(v_g(total_active_dofs))
+       allocate(w_g(total_active_dofs))
+       allocate(p_g(total_active_dofs))
+       allocate(proj_prs_green(total_active_dofs))
+       allocate(proj_vel_green(total_active_dofs))
 
-    do k = 1, total_active_dofs
-       write(field_name, '(A,I0)') 'u_g_', k
-       call u_g(k)%init(dm_Xh, trim(field_name))
-       write(field_name, '(A,I0)') 'v_g_', k
-       call v_g(k)%init(dm_Xh, trim(field_name))
-       write(field_name, '(A,I0)') 'w_g_', k
-       call w_g(k)%init(dm_Xh, trim(field_name))
-       write(field_name, '(A,I0)') 'p_g_', k
-       call p_g(k)%init(dm_Xh, trim(field_name))
+       do k = 1, total_active_dofs
+          write(field_name, '(A,I0)') 'u_g_', k
+          call u_g(k)%init(dm_Xh, trim(field_name))
+          write(field_name, '(A,I0)') 'v_g_', k
+          call v_g(k)%init(dm_Xh, trim(field_name))
+          write(field_name, '(A,I0)') 'w_g_', k
+          call w_g(k)%init(dm_Xh, trim(field_name))
+          write(field_name, '(A,I0)') 'p_g_', k
+          call p_g(k)%init(dm_Xh, trim(field_name))
 
-       call proj_prs_green(k)%init(dm_Xh%size(), fsi_pr_projection_dim, &
-            fsi_pr_projection_activ_step, fsi_pr_projection_reortho)
+          call proj_prs_green(k)%init(dm_Xh%size(), fsi_pr_projection_dim, &
+               fsi_pr_projection_activ_step, fsi_pr_projection_reortho)
 
-       call proj_vel_green(k)%init(dm_Xh%size(), fsi_vel_projection_dim, &
-            fsi_vel_projection_activ_step)
-       call field_rzero(u_g(k))
-       call field_rzero(v_g(k))
-       call field_rzero(w_g(k))
-       call field_rzero(p_g(k))
-    end do
+          call proj_vel_green(k)%init(dm_Xh%size(), fsi_vel_projection_dim, &
+               fsi_vel_projection_activ_step)
+          call field_rzero(u_g(k))
+          call field_rzero(v_g(k))
+          call field_rzero(w_g(k))
+          call field_rzero(p_g(k))
+       end do
+    end if
 
     call neko_log%end_section()
 

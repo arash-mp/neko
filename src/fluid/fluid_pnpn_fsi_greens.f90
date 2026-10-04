@@ -866,15 +866,26 @@ contains
 
     do i = 1, this%bcs_vel_green%size()
        bc => this%bcs_vel_green%get(i)
-       call bc%free()
+       if (associated(bc)) then
+          call bc%free()
+          deallocate(bc)
+       end if
     end do
     call this%bcs_vel_green%free()
 
     do i = 1, this%bcs_prs_green%size()
        bc => this%bcs_prs_green%get(i)
-       call bc%free()
+       if (associated(bc)) then
+          call bc%free()
+          deallocate(bc)
+       end if
     end do
     call this%bcs_prs_green%free()
+
+    if (allocated(this%global_disp_rel)) then
+       deallocate(this%global_disp_rel, this%global_body_vel, &
+            this%global_body_vel_lag, this%global_moving_frame_presc_vel)
+    end if
 
     ! Free the base fluid_pnpn_t
     call this%fluid_pnpn_t%free()
