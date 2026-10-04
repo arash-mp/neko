@@ -376,7 +376,6 @@ contains
   subroutine subiter_read_settings(this, params)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     type(json_file), intent(inout) :: params
-    character(len=32) :: accel_str
     character(:), allocatable :: tmp_str
 
     call json_get_or_default(params, &
@@ -384,24 +383,20 @@ contains
     call json_get_or_default(params, &
          'case.fluid.fsi.subiteration.min_iterations', this%min_subiter, 1)
 
-    if (params%valid_path( &
-         'case.fluid.fsi.subiteration.coupling_acceleration.method')) then
-       call json_get_or_default(params, &
-            'case.fluid.fsi.subiteration.coupling_acceleration.method', &
-            tmp_str, 'aitken')
-       accel_str = tmp_str
-       call json_get_or_default(params, &
-            'case.fluid.fsi.subiteration.coupling_acceleration.' // &
-            'relaxation_value', this%relax, 0.5_rp)
-       call json_get_or_default(params, &
-            'case.fluid.fsi.subiteration.coupling_acceleration.aitken_min', &
-            this%aitken_min, 0.05_rp)
-       call json_get_or_default(params, &
-            'case.fluid.fsi.subiteration.coupling_acceleration.aitken_max', &
-            this%aitken_max, 1.0_rp)
-    end if
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.coupling_acceleration.method', &
+         tmp_str, 'aitken')
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.coupling_acceleration.' // &
+         'relaxation_value', this%relax, 0.5_rp)
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.coupling_acceleration.aitken_min', &
+         this%aitken_min, 0.05_rp)
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.coupling_acceleration.aitken_max', &
+         this%aitken_max, 1.0_rp)
 
-    select case (trim(accel_str))
+    select case (trim(tmp_str))
     case ('constant')
        this%accel_method = ACCEL_CONSTANT
     case ('aitken')
@@ -410,7 +405,7 @@ contains
        this%accel_method = ACCEL_IQN
     case default
        call neko_error('Unknown coupling_acceleration method: ' // &
-            trim(accel_str) // ' (use constant|aitken|iqn)')
+            trim(tmp_str) // ' (use constant|aitken|iqn)')
     end select
     if (this%accel_method == ACCEL_IQN) then
        call neko_error('coupling_acceleration method "iqn" is not yet ' // &

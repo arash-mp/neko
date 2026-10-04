@@ -136,7 +136,8 @@ contains
          .false.)
     call json_get_or_default(params, 'case.fluid.fsi.results_long_print', &
          res_long_print, .false.)
-    call json_get_or_default(params, 'force_scale', force_scale, 1.0_rp)
+    call json_get_or_default(params, 'case.fluid.fsi.force_scale', &
+         force_scale, 1.0_rp)
     call json_get_or_default(params, 'case.fluid.fsi.skip_greens_solve', &
          skip_greens_solve, .false.)
     call json_get_or_default(params, &
