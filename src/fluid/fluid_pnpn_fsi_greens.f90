@@ -37,7 +37,7 @@ module fluid_pnpn_fsi_greens
        fsi_register_checkpoint, fsi_prep_checkpoint, fsi_restart_restore
   use fluid_pnpn, only : fluid_pnpn_t
   use field, only : field_t
-  use field_math, only : field_copy, field_add2s2, field_cfill
+  use field_math, only : field_copy, field_add2s2, field_cfill, field_cmult
   use num_types, only : rp, dp
   use time_state, only : time_state_t
   use time_step_controller, only : time_step_controller_t
@@ -138,6 +138,10 @@ module fluid_pnpn_fsi_greens
      real(kind=dp) :: total_elapsed_g = 0.0_dp
      !> Maximum number of pressure iterations in a Green's function solve.
      integer :: greens_prs_max_iter
+     !> Rescale the stored Green's pressures when bd / dt changes.
+     logical :: rescale_greens_prs
+     !> bd / dt of the previous Green's function solves.
+     real(kind=rp) :: greens_bd_dt = 0.0_rp
    contains
      procedure, pass(this) :: init => fluid_fsi_init
      procedure, pass(this) :: step => fluid_fsi_step
@@ -209,6 +213,9 @@ contains
        call neko_error("case.fluid.fsi.pressure_solver.max_iterations " // &
             "must be at least 1")
     end if
+    call json_get_or_default(params, &
+         'case.fluid.fsi.pressure_solver.rescale_initial_guess', &
+         this%rescale_greens_prs, .true.)
 
     call fsi_register_checkpoint(this%chkp, this%global_disp_rel, &
          this%global_body_vel, this%global_body_vel_lag, &
@@ -420,7 +427,18 @@ contains
     type(time_step_controller_t), intent(in) :: dt_controller
     integer :: i, j, k, k_row, row_g, col_g
     real(kind=dp) :: start_time_g, end_time_g, step_time_g
+    real(kind=rp) :: bd_dt, prs_scale
     character(len=1000) :: msg
+
+    ! With no forcing and no history, the Green's pressure is proportional
+    ! to bd / dt. Rescaling the stored one keeps it a good initial guess
+    ! when the time step or the BDF coefficient changes.
+    bd_dt = this%ext_bdf%diffusion_coeffs%x(1) / real(time%dt, kind=rp)
+    prs_scale = 1.0_rp
+    if (this%rescale_greens_prs .and. this%greens_bd_dt .gt. 0.0_rp) then
+       prs_scale = bd_dt / this%greens_bd_dt
+    end if
+    this%greens_bd_dt = bd_dt
 
     do j = 1, this%nbodies_fsi
        do k = 1, 6
@@ -433,6 +451,7 @@ contains
           call field_copy(this%v, this%v_g(col_g))
           call field_copy(this%w, this%w_g(col_g))
           call field_copy(this%p, this%p_g(col_g))
+          if (prs_scale .ne. 1.0_rp) call field_cmult(this%p, prs_scale)
 
           ! Setup Perturbation
           this%batch_ids(1) = this%fsi_bodies(j)%ale_id
