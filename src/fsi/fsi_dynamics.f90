@@ -45,6 +45,7 @@ module fsi_dynamics
   public :: assemble_structural_inertial_terms
   public :: add_fsi_non_linear_matrices
   public :: add_fsi_user_structural_terms
+  public :: fsi_body_acceleration
 
   !> single FSI body properties
   type, public :: fsi_body_t
@@ -482,6 +483,16 @@ contains
             M_global, B_global)
     end do
   end subroutine add_fsi_user_structural_terms
+
+  !> Relative acceleration of a body at its current velocity, with the time
+  !! derivative of the last structural assembly.
+  pure function fsi_body_acceleration(body) result(acc)
+    type(fsi_body_t), intent(in) :: body
+    real(kind=rp) :: acc(6)
+
+    acc = body%accel_at_guess + &
+         body%gamma_guess * (body%body_vel - body%body_vel_guess)
+  end function fsi_body_acceleration
 
   !> Add the local system of one body to the global one. Entries of
   !! inactive DOFs are dropped.

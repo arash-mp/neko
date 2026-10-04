@@ -112,6 +112,9 @@ module force_torque
      ! Total force and torque from the last call to compute
      real(kind=rp) :: total_force(3) = 0.0_rp
      real(kind=rp) :: total_torque(3) = 0.0_rp
+     ! Their viscous part
+     real(kind=rp) :: viscous_force(3) = 0.0_rp
+     real(kind=rp) :: viscous_torque(3) = 0.0_rp
 
    contains
      !> Constructor from json, wrapping the actual constructor.
@@ -643,6 +646,8 @@ contains
 
     this%total_force = dgtq(1:3) + dgtq(4:6)
     this%total_torque = dgtq(7:9) + dgtq(10:12)
+    this%viscous_force = dgtq(4:6)
+    this%viscous_torque = dgtq(10:12)
 
     call neko_scratch_registry%relinquish_field(temp_indices)
 

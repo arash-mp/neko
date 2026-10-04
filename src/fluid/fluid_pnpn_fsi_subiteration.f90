@@ -37,6 +37,7 @@ module fluid_pnpn_fsi_subiteration
   use fsi_manager, only : fsi_manager_init, linsolve_dense, &
        fsi_solve_structure, fsi_register_checkpoint, fsi_prep_checkpoint, &
        fsi_restart_restore
+  use fsi_results, only : fsi_results_t
   use fluid_pnpn, only : fluid_pnpn_t
   use field, only : field_t
   use field_math, only : field_copy
@@ -186,6 +187,8 @@ module fluid_pnpn_fsi_subiteration
           user_fsi_structural_terms => null()
      !> True when the user registered structural terms.
      logical :: has_user_structural_terms = .false.
+     !> CSV output of the motion and the loads of the bodies.
+     type(fsi_results_t) :: results
    contains
      procedure, pass(this) :: init => fluid_subiter_init
      procedure, pass(this) :: step => fluid_subiter_step
@@ -288,6 +291,8 @@ contains
        allocate(this%batch_ang(3, this%nbodies_fsi))
        allocate(this%temp_prescribed_vels(6, this%nbodies_fsi))
        this%temp_prescribed_vels = 0.0_rp
+
+       call subiter_init_results(this, params)
 
        ! Per-body relaxation factor and previous-increment store.
        allocate(this%accel_omega(this%nbodies_fsi))
@@ -661,7 +666,7 @@ contains
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
     real(kind=rp) :: beta(0:3)
-    integer :: nadv, i, kit
+    integer :: nadv, i, kit, nsub
     real(kind=dp) :: t_sub0, t_sub
     ! Worst-DOF metrics and their (body, dof) index
     real(kind=rp) :: vmetric, fmetric
@@ -725,8 +730,10 @@ contains
     call neko_log%message("---- FSI strong coupling (sub-iteration) ----")
 
     converged = .false.
+    nsub = 0
     do kit = 1, this%max_subiter
        t_sub0 = MPI_Wtime()
+       nsub = kit
 
        ! Implicit solve from the n-state.
        ! First sub-iteration (kit == 1): full restore to u^n so the
@@ -831,7 +838,8 @@ contains
          global_body_acc = this%global_body_acc, &
          global_frame_acc = this%global_frame_acc)
 
-    call this%log_fsi_results(time)
+    if (this%results%log_results) call this%log_fsi_results(time)
+    call subiter_write_results(this, time, nsub, vmetric, fmetric)
     call this%ale%log_pivot(time)
     call this%ale%log_rot_angles(time)
 
@@ -885,6 +893,57 @@ contains
        end do
     end do
   end subroutine subiter_add_fluid_forces
+
+  !> Set up the CSV output. Besides the common columns, each body gets the
+  !! number of sub-iterations and the final residual of the step.
+  subroutine subiter_init_results(this, params)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    type(json_file), intent(inout) :: params
+    character(len=13) :: names(2, this%nbodies_fsi)
+    integer :: n(this%nbodies_fsi)
+
+    names(1, :) = 'subiterations'
+    names(2, :) = 'residual'
+    n = 2
+    call this%results%init(params, this%fsi_bodies, this%fsi_dof_map, names, n)
+  end subroutine subiter_init_results
+
+  !> Write the CSV rows of this step. The two scheme-specific columns are the
+  !! number of sub-iterations and the residual the tolerance was compared
+  !! with.
+  subroutine subiter_write_results(this, time, nsub, vmetric, fmetric)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    integer, intent(in) :: nsub
+    real(kind=rp), intent(in) :: vmetric, fmetric
+    real(kind=rp) :: force(6, this%nbodies_fsi), visc(6, this%nbodies_fsi)
+    real(kind=rp) :: extra(2, this%nbodies_fsi)
+    integer :: i
+
+    do i = 1, this%nbodies_fsi
+       associate (fm => this%fsi_bodies(i)%force_monitor)
+         force(1:3, i) = fm%total_force
+         force(4:6, i) = fm%total_torque
+         visc(1:3, i) = fm%viscous_force
+         visc(4:6, i) = fm%viscous_torque
+       end associate
+    end do
+
+    extra(1, :) = real(nsub, kind=rp)
+    select case (this%conv_criterion)
+    case (CONV_FORCE)
+       extra(2, :) = fmetric
+    case (CONV_BOTH)
+       extra(2, :) = max(vmetric, fmetric)
+    case (CONV_EITHER)
+       extra(2, :) = min(vmetric, fmetric)
+    case default
+       extra(2, :) = vmetric
+    end select
+
+    call this%results%write(time, this%fsi_bodies, this%fsi_dof_map, &
+         this%ale, force, visc, extra)
+  end subroutine subiter_write_results
 
   !> Update the relaxation factor of each body and apply the relaxed
   !! velocity increment.
@@ -1693,6 +1752,7 @@ contains
        t_restart%t = chkp%t
        t_restart%tstep = 0
        t_restart%dt = dtlag(1)
+       call this%results%restart(t_restart)
 
        do i = 1, this%nbodies_fsi
           this%batch_ids(i) = this%fsi_bodies(i)%ale_id
@@ -1776,6 +1836,8 @@ contains
     if (allocated(this%batch_ang)) deallocate(this%batch_ang)
     if (allocated(this%temp_prescribed_vels)) &
          deallocate(this%temp_prescribed_vels)
+
+    call this%results%free()
 
     if (allocated(this%mesh_x_lag)) then
        do j = 1, size(this%mesh_x_lag)

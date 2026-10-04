@@ -334,6 +334,7 @@ neko_fortran_SOURCES = \
 	fsi/fsi_body_params.f90\
 	fsi/fsi_manager.f90\
 	fsi/fsi_dynamics.f90\
+	fsi/fsi_results.f90\
 	common/time_step_controller.f90\
 	simulation.f90\
 	math/ax_helm_fctry.f90\

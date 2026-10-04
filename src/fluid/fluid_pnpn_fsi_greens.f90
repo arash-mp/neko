@@ -35,6 +35,7 @@ module fluid_pnpn_fsi_greens
   use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms
   use fsi_manager, only : fsi_manager_init, fsi_solve_structure, &
        fsi_register_checkpoint, fsi_prep_checkpoint, fsi_restart_restore
+  use fsi_results, only : fsi_results_t, FSI_DOF_NAMES
   use fluid_pnpn, only : fluid_pnpn_t
   use field, only : field_t
   use field_math, only : field_copy, field_add2s2, field_cfill, field_cmult
@@ -142,6 +143,13 @@ module fluid_pnpn_fsi_greens
      logical :: rescale_greens_prs
      !> bd / dt of the previous Green's function solves.
      real(kind=rp) :: greens_bd_dt = 0.0_rp
+     !> CSV output of the motion and the loads of the bodies.
+     type(fsi_results_t) :: results
+     !> Force and torque on each body from the standard solution, (6, nbodies),
+     !> and from each Green's function, (6, nbodies, ndofs).
+     real(kind=rp), allocatable :: force_s(:,:), force_g(:,:,:)
+     !> Their viscous part.
+     real(kind=rp), allocatable :: visc_s(:,:), visc_g(:,:,:)
    contains
      procedure, pass(this) :: init => fluid_fsi_init
      procedure, pass(this) :: step => fluid_fsi_step
@@ -230,6 +238,16 @@ contains
        this%temp_prescribed_vels = 0.0_rp
 
     end if
+
+    allocate(this%force_s(6, this%nbodies_fsi))
+    allocate(this%visc_s(6, this%nbodies_fsi))
+    allocate(this%force_g(6, this%nbodies_fsi, this%total_active_dofs))
+    allocate(this%visc_g(6, this%nbodies_fsi, this%total_active_dofs))
+    this%force_s = 0.0_rp
+    this%visc_s = 0.0_rp
+    this%force_g = 0.0_rp
+    this%visc_g = 0.0_rp
+    call fluid_fsi_init_results(this, params)
 
     ! For FSI, we calculate the inital mesh velocity here.
     ! In case of restart, we skip this.
@@ -346,6 +364,9 @@ contains
        call this%fsi_bodies(i)%force_monitor%compute_(time)
        F_fluid(1:3) = this%fsi_bodies(i)%force_monitor%total_force
        F_fluid(4:6) = this%fsi_bodies(i)%force_monitor%total_torque
+       this%force_s(:, i) = F_fluid
+       this%visc_s(1:3, i) = this%fsi_bodies(i)%force_monitor%viscous_force
+       this%visc_s(4:6, i) = this%fsi_bodies(i)%force_monitor%viscous_torque
 
        ! Fill B_global with fluid forces (F_s)
        do k = 1, 6
@@ -413,7 +434,8 @@ contains
          this%global_body_vel_lag, &
          this%global_moving_frame_presc_vel)
 
-    call this%log_fsi_results(time)
+    if (this%results%log_results) call this%log_fsi_results(time)
+    call fluid_fsi_write_results(this, time)
     call this%ale%log_pivot(time)
     call this%ale%log_rot_angles(time)
 
@@ -495,6 +517,12 @@ contains
           ! Here, we add the cross-coupling forces on all bodies, on all DOFs.
           do i = 1, this%nbodies_fsi
              call this%fsi_bodies(i)%force_monitor%compute_(time)
+             associate (fm => this%fsi_bodies(i)%force_monitor)
+               this%force_g(1:3, i, col_g) = fm%total_force
+               this%force_g(4:6, i, col_g) = fm%total_torque
+               this%visc_g(1:3, i, col_g) = fm%viscous_force
+               this%visc_g(4:6, i, col_g) = fm%viscous_torque
+             end associate
              do k_row = 1, 6
                 row_g = this%fsi_dof_map(i, k_row)
                 if (row_g > 0) then
@@ -575,6 +603,85 @@ contains
        this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
     end do
   end subroutine fluid_fsi_update_bodies
+
+  !> Set up the CSV output. Besides the common columns, each body gets its
+  !! correction coefficients, bd / dt and, when the Green's functions are
+  !! solved for, the loads on its active DOFs from each of them.
+  subroutine fluid_fsi_init_results(this, params)
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
+    type(json_file), intent(inout) :: params
+    character(len=16) :: names(43, this%nbodies_fsi)
+    integer :: n(this%nbodies_fsi)
+    integer :: i, k, m
+
+    do i = 1, this%nbodies_fsi
+       n(i) = 0
+       do k = 1, 6
+          if (this%fsi_dof_map(i, k) .le. 0) cycle
+          n(i) = n(i) + 1
+          names(n(i), i) = 'corr_' // trim(FSI_DOF_NAMES(k))
+       end do
+       n(i) = n(i) + 1
+       names(n(i), i) = 'bd_dt'
+       if (this%skip_greens_solve) cycle
+       do m = 1, 6
+          if (this%fsi_dof_map(i, m) .le. 0) cycle
+          do k = 1, 6
+             if (this%fsi_dof_map(i, k) .le. 0) cycle
+             n(i) = n(i) + 1
+             names(n(i), i) = 'green_' // trim(FSI_DOF_NAMES(k)) // &
+                  '_from_' // trim(FSI_DOF_NAMES(m))
+          end do
+       end do
+    end do
+
+    call this%results%init(params, this%fsi_bodies, this%fsi_dof_map, names, n)
+  end subroutine fluid_fsi_init_results
+
+  !> Write the CSV rows of this step.
+  subroutine fluid_fsi_write_results(this, time)
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    real(kind=rp) :: force(6, this%nbodies_fsi), visc(6, this%nbodies_fsi)
+    real(kind=rp) :: extra(43, this%nbodies_fsi)
+    integer :: i, k, m, n, col_g
+
+    ! The final field is the standard one plus X_sol times the Green's
+    ! functions, and so are the loads on the bodies.
+    force = this%force_s
+    visc = this%visc_s
+    if (.not. this%skip_greens_solve) then
+       do col_g = 1, this%total_active_dofs
+          force = force + this%X_sol(col_g) * this%force_g(:, :, col_g)
+          visc = visc + this%X_sol(col_g) * this%visc_g(:, :, col_g)
+       end do
+    end if
+
+    extra = 0.0_rp
+    do i = 1, this%nbodies_fsi
+       n = 0
+       do k = 1, 6
+          if (this%fsi_dof_map(i, k) .le. 0) cycle
+          n = n + 1
+          extra(n, i) = this%X_sol(this%fsi_dof_map(i, k))
+       end do
+       n = n + 1
+       extra(n, i) = this%ext_bdf%diffusion_coeffs%x(1) / &
+            real(time%dt, kind=rp)
+       if (this%skip_greens_solve) cycle
+       do m = 1, 6
+          if (this%fsi_dof_map(i, m) .le. 0) cycle
+          do k = 1, 6
+             if (this%fsi_dof_map(i, k) .le. 0) cycle
+             n = n + 1
+             extra(n, i) = this%force_g(k, i, this%fsi_dof_map(i, m))
+          end do
+       end do
+    end do
+
+    call this%results%write(time, this%fsi_bodies, this%fsi_dof_map, &
+         this%ale, force, visc, extra)
+  end subroutine fluid_fsi_write_results
 
   !> Solve the Green's function problem of one active DOF.
   subroutine fluid_fsi_greens_solve(this, time, dt_controller, col_g)
@@ -859,6 +966,11 @@ contains
     if (allocated(this%temp_prescribed_vels)) &
          deallocate(this%temp_prescribed_vels)
 
+    call this%results%free()
+    if (allocated(this%force_s)) then
+       deallocate(this%force_s, this%visc_s, this%force_g, this%visc_g)
+    end if
+
     call this%u_s%free()
     call this%v_s%free()
     call this%w_s%free()
@@ -1064,6 +1176,7 @@ contains
        t_restart%t = chkp%t
        t_restart%tstep = 0
        t_restart%dt = dtlag(1)
+       call this%results%restart(t_restart)
 
        do i = 1, this%nbodies_fsi
           this%batch_ids(i) = this%fsi_bodies(i)%ale_id
