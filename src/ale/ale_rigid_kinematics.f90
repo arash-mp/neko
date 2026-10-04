@@ -31,7 +31,7 @@
 ! POSSIBILITY OF SUCH DAMAGE.
 !
 
-!> Defines data structures for configuring, calculating,
+!> Defines data structures and algorithms for configuring, calculating,
 !> and time-integrating the rigid-body motion (translation and rotation)
 !> of objects in an ALE simulation.
 !> CPU-only module.

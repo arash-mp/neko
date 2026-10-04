@@ -1,12 +1,44 @@
+! Copyright (c) 2026, The Neko Authors
+! All rights reserved.
+!
+! Redistribution and use in source and binary forms, with or without
+! modification, are permitted provided that the following conditions
+! are met:
+!
+!   * Redistributions of source code must retain the above copyright
+!     notice, this list of conditions and the following disclaimer.
+!
+!   * Redistributions in binary form must reproduce the above
+!     copyright notice, this list of conditions and the following
+!     disclaimer in the documentation and/or other materials provided
+!     with the distribution.
+!
+!   * Neither the name of the authors nor the names of its
+!     contributors may be used to endorse or promote products derived
+!     from this software without specific prior written permission.
+!
+! THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+! "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+! LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+! FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+! COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+! INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+! BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+! LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+! CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+! LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+! POSSIBILITY OF SUCH DAMAGE.
+!
+!> Rigid-body structural dynamics of the FSI bodies.
 module fsi_dynamics
   use fsi_body_params, only : fsi_body_params_t, params_inertia_about_pivot, &
        validate_body_params
-  use user_intf, only : user_fsi_body_params_intf, &
+  use user_intf, only : user_fsi_structural_parameters_intf, &
        user_fsi_structural_terms_intf, dummy_fsi_structural_terms
   use force_torque, only : force_torque_t
   use num_types, only : rp
   use time_state, only : time_state_t
-  use logger, only : neko_log
   implicit none
   private
 
@@ -72,26 +104,25 @@ contains
     real(kind=rp), intent(in) :: rot_matrices(:,:,:)
     real(kind=rp), intent(in) :: gravity_vec(3)
     !> User hook for runtime modification of body parameters.
-    procedure(user_fsi_body_params_intf), pointer, intent(in) :: &
+    procedure(user_fsi_structural_parameters_intf), pointer, intent(in) :: &
          user_body_params
-    real(kind=rp) :: dt, gamma, beta(0:3)
+    real(kind=rp), intent(in) :: gamma, beta(0:3)
     integer, intent(in) :: nadv
     !> Per-body history acceleration a_hist for the
     !> Newmark integrator, such that a^{n+1} = gamma*v_guess + a_hist with
     !> gamma = 2/dt.
     real(kind=rp), intent(in), optional :: accel_hist(:, :)
 
-    integer :: i, j, k, row_g, col_g
-    real(kind=rp) :: m, m_disp
+    integer :: i, j, k
+    real(kind=rp) :: dt, m, m_disp
     real(kind=rp) :: R_mat(3,3), R_T(3,3), I_body(3,3), I_P(3,3)
-    real(kind=rp) :: c(3), r_rel(3), r_cb(3)
+    real(kind=rp) :: c(3), r_cb(3)
     real(kind=rp) :: v_s(3), w_s(3)
     real(kind=rp) :: a_f(3), alpha_f(3), w_f(3)
     real(kind=rp) :: a_rel_s(3), alpha_rel_s(3), V_hist(6), a_full(6)
 
     real(kind=rp) :: M_local(6,6), B_local(6)
     real(kind=rp) :: C_skew(3,3), Wf_skew(3,3), Ws_skew(3,3), I3(3,3)
-!    character(len=2048) :: msg
 
     dt = time%dt
     M_global = 0.0_rp
@@ -99,14 +130,16 @@ contains
 
     ! 3x3 Identity Matrix
     I3 = 0.0_rp
-    I3(1,1) = 1.0_rp; I3(2,2) = 1.0_rp; I3(3,3) = 1.0_rp
+    I3(1,1) = 1.0_rp
+    I3(2,2) = 1.0_rp
+    I3(3,3) = 1.0_rp
 
     do i = 1, nbodies_fsi
 
        ! We use final corrected FSI (relative to the frame)
-       ! as the gussed velocity for current time step.
+       ! as the guessed velocity for current time step.
        ! Contribution of frame movement is already included in
-       ! in mesh velocity arrays.
+       ! mesh velocity arrays.
        bodies(i)%body_vel_guess = bodies(i)%body_vel
 
        ! Rotation matrix
@@ -123,7 +156,7 @@ contains
        m_disp = bodies(i)%prm%mass_disp
        I_body = params_inertia_about_pivot(bodies(i)%prm)
 
-       !> Frame States
+       ! Frame states
        ! Translational acceleration
        a_f = bodies(i)%moving_frame_presc_acc(1:3)
        ! Angular acceleration
@@ -131,9 +164,7 @@ contains
        ! Angular velocity
        w_f = bodies(i)%moving_frame_presc_vel(4:6, 0)
 
-       ! FSI (relative to the frame) displacements
-       r_rel = bodies(i)%disp_rel(1:3)
-       ! translational velocity
+       ! FSI (relative to the frame) translational velocity
        v_s = bodies(i)%body_vel_guess(1:3)
        ! Angular velocity
        w_s = bodies(i)%body_vel_guess(4:6)
@@ -145,14 +176,6 @@ contains
 
        ! Rotate Inertia Tensor and Center of Mass (com) Offset to Global Frame
        I_P = matmul(R_mat, matmul(I_body, R_T))
-
-!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG I_P(1,:): ", I_P(1,1), I_P(1,2), I_P(1,3)
-!       call neko_log%message(trim(msg))
-!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG I_P(2,:): ", I_P(2,1), I_P(2,2), I_P(2,3)
-!       call neko_log%message(trim(msg))
-!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG I_P(3,:): ", I_P(3,1), I_P(3,2), I_P(3,3)
-!       call neko_log%message(trim(msg))
-
 
        ! skew-symmetric matrices for cross-products
        C_skew = skew_tensor(c)
@@ -184,11 +207,6 @@ contains
        a_rel_s = a_full(1:3) !< Linear acceleration
        alpha_rel_s = a_full(4:6) !< Angular acceleration
 
-!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG a_rel_s: ", a_rel_s(1), a_rel_s(2), a_rel_s(3)
-!       call neko_log%message(trim(msg))
-!       write(msg, '(A, 3(ES23.15, 1X))') "DEBUG alpha_rel_s: ", alpha_rel_s(1), alpha_rel_s(2), alpha_rel_s(3)
-!       call neko_log%message(trim(msg))
-
        ! Initialize local matrices for this body
        M_local = 0.0_rp
        B_local = 0.0_rp
@@ -200,7 +218,7 @@ contains
        B_local(1:3) = B_local(1:3) + (m * gravity_vec)
        B_local(4:6) = B_local(4:6) + cross(c, m * gravity_vec)
 
-       ! Bouyancy
+       ! Buoyancy
        B_local(1:3) = B_local(1:3) - (m_disp * gravity_vec)
        B_local(4:6) = B_local(4:6) + cross(r_cb, -m_disp * gravity_vec)
 
@@ -220,7 +238,6 @@ contains
 
        ! Known external force applied at "pivot location"
        B_local = B_local + bodies(i)%prm%F_prescribed_pivot
-
 
        ! ----------------------------------------------------------------------
        ! Rigid Body Inertial Forces
@@ -290,9 +307,6 @@ contains
        B_local(4:6) = B_local(4:6) - matmul(I_P, alpha_rel_s)
        M_local(4:6, 4:6) = M_local(4:6, 4:6) + gamma * I_P
 
-!       write(msg, '(A, 3(ES23.15, 1X))') "I_p * alpha_ref: ", matmul(I_P, alpha_rel_s)
-!       call neko_log%message(trim(msg))
-
        ! ----------------------------------------------------------------------
        ! REMOVED (lab-frame omega): Torque Term 3 = I_P * (w_f x w_rel).
        ! Same reason as Force Term 8: alpha_tot = alpha_f + alpha_rel exactly
@@ -332,25 +346,13 @@ contains
        ! no r_rel offset from a separate frame origin. See derivation note.
        ! ----------------------------------------------------------------------
 
-       ! Map local matrices to global ones
-       do j = 1, 6
-          row_g = fsi_dof_map(i, j)
-          if (row_g > 0) then
-             B_global(row_g) = B_global(row_g) + B_local(j)
-             do k = 1, 6
-                col_g = fsi_dof_map(i, k)
-                if (col_g > 0) then
-                   M_global(row_g, col_g) = M_global(row_g, col_g) + &
-                        M_local(j, k)
-                end if
-             end do
-          end if
-       end do
+       call add_local_to_global(fsi_dof_map(i, :), M_local, B_local, &
+            M_global, B_global)
 
     end do
 
   end subroutine assemble_structural_inertial_terms
-  
+
   !> Computes and maps the Non-Linear terms for FSI
   subroutine add_fsi_non_linear_matrices(nbodies_fsi, bodies, fsi_dof_map, &
        M_global, X_sol, rot_matrices)
@@ -390,7 +392,7 @@ contains
        M_local = 0.0_rp
        ! Term 12 Force Non-linear: -m * [dW_skew] * [C_skew]
        M_local(1:3, 4:6) = -bodies(i)%prm%mass * matmul(dW_skew, C_skew)
-       
+
        ! Term 4 Torque Non-linear: + [dW_skew] * I_P
        M_local(4:6, 4:6) = matmul(dW_skew, I_P)
 
@@ -398,10 +400,12 @@ contains
        do j = 1, 6
           row_g = fsi_dof_map(i, j)
           if (row_g .gt. 0) then
-             do k = 4, 6 ! Only columns 4-6 are modified by non-linear rotation terms
+             ! Only columns 4-6 are modified by non-linear rotation terms
+             do k = 4, 6
                 col_g = fsi_dof_map(i, k)
                 if (col_g .gt. 0) then
-                   M_global(row_g, col_g) = M_global(row_g, col_g) + M_local(j, k)
+                   M_global(row_g, col_g) = M_global(row_g, col_g) + &
+                        M_local(j, k)
                 end if
              end do
           end if
@@ -437,12 +441,12 @@ contains
     procedure(user_fsi_structural_terms_intf), pointer, intent(in) :: &
          user_terms
 
-    integer :: i, j, k, row_g, col_g
+    integer :: i, k, row_g
     real(kind=rp) :: delta(6), v_k(6), a_k(6)
     real(kind=rp) :: force_pivot(6), dforce_dvel(6,6), dforce_dacc(6,6)
     real(kind=rp) :: jac(6,6), M_local(6,6), B_local(6)
 
-     ! Return when no hook is registered.
+    ! Return when no hook is registered.
     if (associated(user_terms, dummy_fsi_structural_terms)) return
 
     do i = 1, nbodies_fsi
@@ -471,24 +475,36 @@ contains
        M_local = -jac
        B_local = force_pivot - matmul(jac, delta)
 
-       ! Map to the global system. Entries for inactive DOFs are dropped,
-       ! exactly as the built-in assembly drops them: a constrained DOF
-       ! legitimately carries a reaction that the support absorbs.
-       do j = 1, 6
-          row_g = fsi_dof_map(i, j)
-          if (row_g .gt. 0) then
-             B_global(row_g) = B_global(row_g) + B_local(j)
-             do k = 1, 6
-                col_g = fsi_dof_map(i, k)
-                if (col_g .gt. 0) then
-                   M_global(row_g, col_g) = M_global(row_g, col_g) + &
-                        M_local(j, k)
-                end if
-             end do
-          end if
-       end do
+       ! Entries for inactive DOFs are dropped, exactly as the built-in
+       ! assembly drops them: a constrained DOF legitimately carries a
+       ! reaction that the support absorbs.
+       call add_local_to_global(fsi_dof_map(i, :), M_local, B_local, &
+            M_global, B_global)
     end do
   end subroutine add_fsi_user_structural_terms
+
+  !> Add the local system of one body to the global one. Entries of
+  !! inactive DOFs are dropped.
+  subroutine add_local_to_global(dof_map, M_local, B_local, M_global, B_global)
+    integer, intent(in) :: dof_map(6)
+    real(kind=rp), intent(in) :: M_local(6,6), B_local(6)
+    real(kind=rp), intent(inout) :: M_global(:,:), B_global(:)
+    integer :: j, k, row_g, col_g
+
+    do j = 1, 6
+       row_g = dof_map(j)
+       if (row_g .gt. 0) then
+          B_global(row_g) = B_global(row_g) + B_local(j)
+          do k = 1, 6
+             col_g = dof_map(k)
+             if (col_g .gt. 0) then
+                M_global(row_g, col_g) = M_global(row_g, col_g) + &
+                     M_local(j, k)
+             end if
+          end do
+       end if
+    end do
+  end subroutine add_local_to_global
 
   !> Computes the standard 3D cross product of two vectors
   pure function cross(a, b) result(c)

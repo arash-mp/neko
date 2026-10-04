@@ -34,11 +34,12 @@
 submodule (fluid_scheme_base) fluid_base_fctry
   use fluid_pnpn, only : fluid_pnpn_t
   use fluid_pnpn_fsi_greens, only : fluid_pnpn_fsi_greens_t
-  use fluid_pnpn_fsi_subiteration, only : fluid_pnpn_fsi_subiter_t 
+  use fluid_pnpn_fsi_subiteration, only : fluid_pnpn_fsi_subiter_t
   use fluid_scheme_compressible_ns, only : fluid_scheme_compressible_ns_t
   use utils, only : neko_type_error
 
-  character(len=20) :: FLUID_KNOWN_TYPES(4) = [character(len=20) :: &
+  ! List of all possible types created by the factory routine
+  character(len=25) :: FLUID_KNOWN_TYPES(4) = [character(len=25) :: &
        "pnpn", "compressible", "pnpn_fsi_greens", "pnpn_fsi_subiteration"]
 
 contains
@@ -56,13 +57,10 @@ contains
     select case (trim(type_name))
     case ('pnpn')
        allocate(fluid_pnpn_t::object)
-    
     case ('pnpn_fsi_greens')
        allocate(fluid_pnpn_fsi_greens_t::object)
-       
     case ('pnpn_fsi_subiteration')
        allocate(fluid_pnpn_fsi_subiter_t::object)
-
     case ('compressible')
        allocate(fluid_scheme_compressible_ns_t::object)
     case default

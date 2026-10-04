@@ -30,13 +30,13 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-! Strongly-coupled (implicit) FSI scheme using sub-iteration.
+!> Strongly-coupled (implicit) FSI scheme using sub-iteration.
 module fluid_pnpn_fsi_subiteration
-  use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms, &
-       add_fsi_non_linear_matrices, add_fsi_user_structural_terms
+  use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms
   use fsi_body_params, only : params_inertia_about_pivot
   use fsi_manager, only : fsi_manager_init, linsolve_dense, &
-       fsi_register_checkpoint, fsi_prep_checkpoint, fsi_restart_restore
+       fsi_solve_structure, fsi_register_checkpoint, fsi_prep_checkpoint, &
+       fsi_restart_restore
   use fluid_pnpn, only : fluid_pnpn_t
   use field, only : field_t
   use field_math, only : field_copy
@@ -57,22 +57,21 @@ module fluid_pnpn_fsi_subiteration
   use shear_stress, only : shear_stress_t
   use logger, only : neko_log, LOG_SIZE
   use mesh, only : mesh_t
-  use user_intf, only : user_t, user_fsi_body_params_intf, &
+  use user_intf, only : user_t, user_fsi_structural_parameters_intf, &
        user_fsi_structural_terms_intf, dummy_fsi_structural_terms
   use checkpoint, only : chkp_t
   use checkpoint_payload, only : checkpoint_payload_t
   use mpi_f08, only : MPI_Wtime
-  use math, only : rzero, copy
+  use math, only : copy
   use device_math, only : device_copy
-  use dofmap, only : dofmap_t
-  use ale_manager
+  use ale_manager, only : ALE_VEL_SUPERPOSE, ALE_VEL_QUERY
   implicit none
   private
 
   ! Coupling-acceleration ("relaxation") methods
-  integer, parameter :: ACCEL_CONSTANT = 0   !< fixed under-relaxation
-  integer, parameter :: ACCEL_AITKEN = 1   !< per-body dynamic Aitken
-  integer, parameter :: ACCEL_IQN = 2   !< IQN-ILS (@ToDo)
+  integer, parameter :: ACCEL_CONSTANT = 0 !< fixed under-relaxation
+  integer, parameter :: ACCEL_AITKEN = 1 !< per-body dynamic Aitken
+  integer, parameter :: ACCEL_IQN = 2 !< IQN-ILS (@ToDo)
 
   ! Floor for the per-DOF relative error: a DOF whose own velocity/force is
   ! below REL_FLOOR times the peak of its type (translation/rotation, force/
@@ -84,8 +83,9 @@ module fluid_pnpn_fsi_subiteration
   ! Predictor for the sub-iteration: none = v_s := v^n (zeroth order)
   !, ext = EXT-k extrapolation of the body velocity history.
   integer, parameter :: PRED_NONE = 0
-  integer, parameter :: PRED_EXT  = 1
+  integer, parameter :: PRED_EXT = 1
 
+  !> PnPn fluid scheme strongly coupled to rigid bodies by sub-iteration.
   type, public, extends(fluid_pnpn_t) :: fluid_pnpn_fsi_subiter_t
      logical :: if_fsi = .false.
      logical :: res_long_print = .false.
@@ -123,7 +123,8 @@ module fluid_pnpn_fsi_subiteration
      ! Checkpointing (managed by fsi_manager)
      real(kind=rp), allocatable :: global_disp_rel(:)
      real(kind=rp), allocatable :: global_body_vel(:)
-     !> Newmark previous-acceleration checkpoint store (sub-iteration + Newmark).
+     !> Newmark previous-acceleration checkpoint store (sub-iteration +
+     !> Newmark).
      real(kind=rp), allocatable :: global_body_acc(:)
      !> Newmark prescribed-frame previous acceleration (a_f^n), packed for the
      !> checkpoint. Not reconstructable from the saved lags, so it is stored.
@@ -131,7 +132,8 @@ module fluid_pnpn_fsi_subiteration
      real(kind=rp), allocatable :: global_body_vel_lag(:,:)
      real(kind=rp), allocatable :: global_moving_frame_presc_vel(:,:)
 
-     ! Unused Green's-function storage (only present to satisfy fsi_manager_init).
+     ! Unused Green's-function storage (only present to satisfy
+     ! fsi_manager_init).
      logical :: skip_greens_solve = .true.
      type(field_t), allocatable :: u_g(:), v_g(:), w_g(:), p_g(:)
      type(projection_t), allocatable :: proj_prs_green(:)
@@ -142,16 +144,18 @@ module fluid_pnpn_fsi_subiteration
      real(kind=rp) :: relax
 
      integer :: accel_method = ACCEL_AITKEN !< constant | aitken | iqn
-     real(kind=rp), allocatable :: accel_omega(:)   !< per-body omega (nbodies)
-     real(kind=rp), allocatable :: accel_r_prev(:,:)!< prev increment (6,nbodies)
+     !> Per-body omega (nbodies)
+     real(kind=rp), allocatable :: accel_omega(:)
+     !> Previous increment (6, nbodies)
+     real(kind=rp), allocatable :: accel_r_prev(:,:)
      real(kind=rp) :: aitken_max
      real(kind=rp) :: aitken_min
      character(len=16) :: conv_criterion !< velocity|force|both|either
      logical :: conv_relative
      real(kind=rp) :: conv_tol
 
-     integer :: predictor_guess = PRED_NONE  !< none | ext
-     integer :: predictor_order = 0  !< 0 = advection ramp; >0 = fixed
+     integer :: predictor_guess = PRED_NONE !< none | ext
+     integer :: predictor_order = 0 !< 0 = advection ramp; >0 = fixed
 
      ! fluid reference snapshot
      type(field_t) :: u_ref, v_ref, w_ref, p_ref
@@ -164,13 +168,12 @@ module fluid_pnpn_fsi_subiteration
      type(field_t), allocatable :: mesh_x_lag(:), mesh_y_lag(:), mesh_z_lag(:)
 
      ! Rigid-body position histories
-     real(kind=rp), allocatable :: pivot_hist(:,:,:)   ! (3, n_lag, nbodies)
+     real(kind=rp), allocatable :: pivot_hist(:,:,:) ! (3, n_lag, nbodies)
      real(kind=rp), allocatable :: ghost_hist(:,:,:,:) ! (3, n_lag, 2, nbodies)
-     real(kind=rp), allocatable :: disp_hist(:,:,:)    ! (6, n_lag, nbodies)
-
+     real(kind=rp), allocatable :: disp_hist(:,:,:) ! (6, n_lag, nbodies)
 
      !> Runtime modification of FSI body parameters.
-     procedure(user_fsi_body_params_intf), nopass, pointer :: &
+     procedure(user_fsi_structural_parameters_intf), nopass, pointer :: &
           user_fsi_body_params => null()
      !> Extra structural equation terms. Always associated.
      procedure(user_fsi_structural_terms_intf), nopass, pointer :: &
@@ -187,15 +190,18 @@ module fluid_pnpn_fsi_subiteration
           subiter_query_frame_prescribed_motion
      procedure, pass(this) :: log_fsi_results => subiter_log_results
      procedure, pass(this) :: snapshot_fluid => subiter_snapshot_fluid
-     procedure, pass(this) :: restore_fluid  => subiter_restore_fluid
+     procedure, pass(this) :: restore_fluid => subiter_restore_fluid
      procedure, pass(this) :: init_histories => subiter_init_histories
-     procedure, pass(this) :: update_kinematics_bdfk => subiter_update_kinematics
+     procedure, pass(this) :: update_kinematics_bdfk => &
+          subiter_update_kinematics
      procedure, pass(this) :: commit_histories => subiter_commit_histories
-     procedure, pass(this) :: add_spring_jacobian => subiter_add_spring_jacobian
+     procedure, pass(this) :: add_spring_jacobian => &
+          subiter_add_spring_jacobian
   end type fluid_pnpn_fsi_subiter_t
 
 contains
 
+  !> Initialise the fluid scheme, the FSI bodies and the sub-iteration.
   subroutine fluid_subiter_init(this, msh, lx, params, user, chkp)
     class(fluid_pnpn_fsi_subiter_t), target, intent(inout) :: this
     type(mesh_t), target, intent(inout) :: msh
@@ -206,13 +212,7 @@ contains
     type(checkpoint_payload_t), pointer :: payload
     type(time_state_t) :: t_init
     integer :: i
-    character(len=32) :: accel_str
-    logical :: old_aitken
-    character(:), allocatable :: tmp_str
-    ! Buffers for the sub-iteration setup summary (logged at the end of init).
-    character(len=128) :: log_buf
-    character(len=16) :: scheme_name, ale_name, accel_name, pred_name, a0_name
-  
+
     ! Initialize the base fluid_pnpn scheme (allocates the mesh and ALE scheme)
     call this%fluid_pnpn_t%init(msh, lx, params, user, chkp)
 
@@ -230,39 +230,10 @@ contains
     this%has_user_structural_terms = .not. associated( &
          this%user_fsi_structural_terms, dummy_fsi_structural_terms)
 
-    ! Structure time integrator: 'bdf' (default) or 'newmark'. Selecting
-    ! 'newmark' automatically switches the ALE mesh update to CN, so the user
-    ! cannot pick an inconsistent structure/mesh pair. Read here (before the
-    ! FSI manager / checkpoint registration) so the acceleration checkpoint
-    ! store is registered only for the Newmark path.
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.structure_scheme', tmp_str, 'bdf')
-    select case (trim(tmp_str))
-    case ('bdf')
-       this%structure_newmark = .false.
-    case ('newmark')
-       this%structure_newmark = .true.
-    case default
-       call neko_error('Unknown structure_scheme: ' // trim(tmp_str) // &
-            ' (use bdf|newmark)')
-    end select
-
-    ! Newmark initial acceleration a^0: 'zero' (default) or 'balance'.
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.newmark_initial_acceleration', &
-         tmp_str, 'zero')
-    select case (trim(tmp_str))
-    case ('zero')
-       this%newmark_a0_balance = .false.
-    case ('balance')
-       this%newmark_a0_balance = .true.
-    case default
-       call neko_error('Unknown newmark_initial_acceleration: ' // &
-            trim(tmp_str) // ' (use zero|balance)')
-    end select
+    call subiter_read_structure_scheme(this, params)
 
     ! Initialize the FSI manager
-    call fsi_manager_init(params, msh, this%ale, this%c_Xh, this%dm_Xh, &
+    call fsi_manager_init(params, this%ale, this%c_Xh, this%dm_Xh, &
          this%if_fsi, this%nbodies_fsi, this%fsi_bodies, this%fsi_dof_map, &
          this%total_active_dofs, &
          this%M_global, this%B_global, this%X_sol, &
@@ -274,7 +245,6 @@ contains
          this%non_linear_correction_term, &
          global_body_acc = this%global_body_acc, &
          global_frame_acc = this%global_frame_acc)
-         
     this%skip_greens_solve = .true.
 
     ! Register the acceleration stores for checkpointing only for the Newmark
@@ -291,160 +261,8 @@ contains
             this%global_moving_frame_presc_vel)
     end if
 
-    ! Sub-iteration parameters.
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.max_iterations', this%max_subiter, 20)
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.min_iterations', this%min_subiter, 1)
-
-    if (params%valid_path( &
-         'case.fluid.fsi.subiteration.coupling_acceleration.method')) then
-       call json_get_or_default(params, &
-            'case.fluid.fsi.subiteration.coupling_acceleration.method', &
-            tmp_str, 'aitken')
-       accel_str = tmp_str
-       call json_get_or_default(params, &
-            'case.fluid.fsi.subiteration.coupling_acceleration.relaxation_value',&
-            this%relax, 0.5_rp)
-       call json_get_or_default(params, &
-            'case.fluid.fsi.subiteration.coupling_acceleration.aitken_min', &
-            this%aitken_min, 0.05_rp)
-       call json_get_or_default(params, &
-            'case.fluid.fsi.subiteration.coupling_acceleration.aitken_max', &
-            this%aitken_max, 1.0_rp)
-    end if
-
-    select case (trim(accel_str))
-    case ('constant')
-       this%accel_method = ACCEL_CONSTANT
-    case ('aitken')
-       this%accel_method = ACCEL_AITKEN
-    case ('iqn')
-       this%accel_method = ACCEL_IQN
-    case default
-       call neko_error('Unknown coupling_acceleration method: ' // &
-            trim(accel_str) // ' (use constant|aitken|iqn)')
-    end select
-    if (this%accel_method == ACCEL_IQN) then
-       call neko_error('coupling_acceleration method "iqn" is not yet ' // &
-            'implemented; use "constant" or "aitken".')
-    end if
-
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.criterion', tmp_str, 'velocity')
-    this%conv_criterion = tmp_str
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.relative', this%conv_relative, .true.)
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.tolerance', this%conv_tol, 1.0e-6_rp)
-
-    ! predictor_guess = none | ext ; predictor_order = 0 (advection ramp) or 1-3.
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.predictor_guess', tmp_str, 'none')
-    select case (trim(tmp_str))
-    case ('none')
-       this%predictor_guess = PRED_NONE
-    case ('ext')
-       this%predictor_guess = PRED_EXT
-    case default
-       call neko_error('Unknown predictor_guess: ' // trim(tmp_str) // &
-            ' (use none|ext)')
-    end select
-    call json_get_or_default(params, &
-         'case.fluid.fsi.subiteration.predictor_order', this%predictor_order, 0)
-    if (this%predictor_order < 0 .or. this%predictor_order > 3) then
-       call neko_error('predictor_order must be 0 (advection ramp) or 1-3.')
-    end if
-
-    ! -----------------------------------------------------------------------
-    ! Resolved sub-iteration setup summary. Logged once so the run can be
-    ! reproduced from the log file (each line maps to a JSON key under
-    ! case.fluid.fsi.subiteration).
-    ! -----------------------------------------------------------------------
-    if (this%structure_newmark) then
-       scheme_name = 'newmark'
-       ale_name = 'cn'
-    else
-       scheme_name = 'bdf'
-       ale_name = 'bdf'
-    end if
-    if (this%newmark_a0_balance) then
-       a0_name = 'balance'
-    else
-       a0_name = 'zero'
-    end if
-    select case (this%accel_method)
-    case (ACCEL_CONSTANT)
-       accel_name = 'constant'
-    case (ACCEL_AITKEN)
-       accel_name = 'aitken'
-    case (ACCEL_IQN)
-       accel_name = 'iqn'
-    case default
-       accel_name = 'unknown'
-    end select
-    select case (this%predictor_guess)
-    case (PRED_NONE)
-       pred_name = 'none'
-    case (PRED_EXT)
-       pred_name = 'ext'
-    case default
-       pred_name = 'unknown'
-    end select
-
-    call neko_log%section('FSI sub-iteration setup')
-
-    write(log_buf, '(A,A)') '   structure_scheme            : ', trim(scheme_name)
-    call neko_log%message(log_buf)
-    write(log_buf, '(A,A)') '   ale_scheme (auto-selected)  : ', trim(ale_name)
-    call neko_log%message(log_buf)
-    if (this%structure_newmark) then
-       write(log_buf, '(A,A)') '   newmark_initial_acceleration: ', trim(a0_name)
-       call neko_log%message(log_buf)
-    end if
-
-    write(log_buf, '(A,I0)') '   max_iterations              : ', this%max_subiter
-    call neko_log%message(log_buf)
-    write(log_buf, '(A,I0)') '   min_iterations              : ', this%min_subiter
-    call neko_log%message(log_buf)
-
-    write(log_buf, '(A,A)') '   coupling_acceleration.method: ', trim(accel_name)
-    call neko_log%message(log_buf)
-    if (this%accel_method == ACCEL_AITKEN) then
-       write(log_buf, '(A,ES12.5)') &
-            '     relaxation_value          : ', this%relax
-       call neko_log%message(log_buf)
-       write(log_buf, '(A,ES12.5)') &
-            '     aitken_min                : ', this%aitken_min
-       call neko_log%message(log_buf)
-       write(log_buf, '(A,ES12.5)') &
-            '     aitken_max                : ', this%aitken_max
-       call neko_log%message(log_buf)
-    else if (this%accel_method == ACCEL_CONSTANT) then
-       write(log_buf, '(A,ES12.5)') &
-            '     relaxation_value          : ', this%relax
-       call neko_log%message(log_buf)
-    end if
-
-    write(log_buf, '(A,A)') '   criterion                   : ', &
-         trim(this%conv_criterion)
-    call neko_log%message(log_buf)
-    write(log_buf, '(A,L1)') '   relative                    : ', &
-         this%conv_relative
-    call neko_log%message(log_buf)
-    write(log_buf, '(A,ES12.5)') '   tolerance                   : ', &
-         this%conv_tol
-    call neko_log%message(log_buf)
-
-    write(log_buf, '(A,A)') '   predictor_guess             : ', trim(pred_name)
-    call neko_log%message(log_buf)
-    if (this%predictor_guess .eq. PRED_EXT) then
-       write(log_buf, '(A,I0)') '   predictor_order             : ', &
-            this%predictor_order
-       call neko_log%message(log_buf)
-    end if
-
-    call neko_log%end_section()
+    call subiter_read_settings(this, params)
+    call subiter_log_settings(this)
 
     ! Reference / scratch fluid fields.
     call this%u_ref%init(this%dm_Xh, 'u_ref')
@@ -508,24 +326,223 @@ contains
           t_init%t = 0.0_rp
           t_init%tstep = 0
           t_init%dt = 0.0_rp
-          do i = 1, this%nbodies_fsi
-             this%batch_ids(i) = this%fsi_bodies(i)%ale_id
-             this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
-             this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
-          end do
-          call this%ale%update_mesh_velocity(this%c_Xh, t_init, &
-               override_ids = this%batch_ids, &
-               override_trans = this%batch_trans, &
-               override_ang = this%batch_ang, &
-               out_prescribed_vels = this%temp_prescribed_vels, mode = 0)
-          do i = 1, this%nbodies_fsi
-             this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
-                  this%temp_prescribed_vels(:, i)
-          end do
+          call subiter_update_mesh_velocity(this, t_init, .true.)
        end if
     end if
 
   end subroutine fluid_subiter_init
+
+  !> Read the structure time integrator. Done before the FSI manager is
+  !! initialised, so that the acceleration stores are registered for
+  !! checkpointing only on the Newmark path.
+  subroutine subiter_read_structure_scheme(this, params)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    type(json_file), intent(inout) :: params
+    character(:), allocatable :: tmp_str
+
+    ! Structure time integrator: 'bdf' (default) or 'newmark'. Selecting
+    ! 'newmark' automatically switches the ALE mesh update to CN, so the user
+    ! cannot pick an inconsistent structure/mesh pair. Read here (before the
+    ! FSI manager / checkpoint registration) so the acceleration checkpoint
+    ! store is registered only for the Newmark path.
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.structure_scheme', tmp_str, 'bdf')
+    select case (trim(tmp_str))
+    case ('bdf')
+       this%structure_newmark = .false.
+    case ('newmark')
+       this%structure_newmark = .true.
+    case default
+       call neko_error('Unknown structure_scheme: ' // trim(tmp_str) // &
+            ' (use bdf|newmark)')
+    end select
+
+    ! Newmark initial acceleration a^0: 'zero' (default) or 'balance'.
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.newmark_initial_acceleration', &
+         tmp_str, 'zero')
+    select case (trim(tmp_str))
+    case ('zero')
+       this%newmark_a0_balance = .false.
+    case ('balance')
+       this%newmark_a0_balance = .true.
+    case default
+       call neko_error('Unknown newmark_initial_acceleration: ' // &
+            trim(tmp_str) // ' (use zero|balance)')
+    end select
+  end subroutine subiter_read_structure_scheme
+
+  !> Read the sub-iteration parameters.
+  subroutine subiter_read_settings(this, params)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    type(json_file), intent(inout) :: params
+    character(len=32) :: accel_str
+    character(:), allocatable :: tmp_str
+
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.max_iterations', this%max_subiter, 20)
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.min_iterations', this%min_subiter, 1)
+
+    if (params%valid_path( &
+         'case.fluid.fsi.subiteration.coupling_acceleration.method')) then
+       call json_get_or_default(params, &
+            'case.fluid.fsi.subiteration.coupling_acceleration.method', &
+            tmp_str, 'aitken')
+       accel_str = tmp_str
+       call json_get_or_default(params, &
+            'case.fluid.fsi.subiteration.coupling_acceleration.' // &
+            'relaxation_value', this%relax, 0.5_rp)
+       call json_get_or_default(params, &
+            'case.fluid.fsi.subiteration.coupling_acceleration.aitken_min', &
+            this%aitken_min, 0.05_rp)
+       call json_get_or_default(params, &
+            'case.fluid.fsi.subiteration.coupling_acceleration.aitken_max', &
+            this%aitken_max, 1.0_rp)
+    end if
+
+    select case (trim(accel_str))
+    case ('constant')
+       this%accel_method = ACCEL_CONSTANT
+    case ('aitken')
+       this%accel_method = ACCEL_AITKEN
+    case ('iqn')
+       this%accel_method = ACCEL_IQN
+    case default
+       call neko_error('Unknown coupling_acceleration method: ' // &
+            trim(accel_str) // ' (use constant|aitken|iqn)')
+    end select
+    if (this%accel_method == ACCEL_IQN) then
+       call neko_error('coupling_acceleration method "iqn" is not yet ' // &
+            'implemented; use "constant" or "aitken".')
+    end if
+
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.criterion', tmp_str, 'velocity')
+    this%conv_criterion = tmp_str
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.relative', this%conv_relative, .true.)
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.tolerance', this%conv_tol, 1.0e-6_rp)
+
+    ! predictor_guess = none | ext ; predictor_order = 0 (advection ramp)
+    ! or 1-3.
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.predictor_guess', tmp_str, 'none')
+    select case (trim(tmp_str))
+    case ('none')
+       this%predictor_guess = PRED_NONE
+    case ('ext')
+       this%predictor_guess = PRED_EXT
+    case default
+       call neko_error('Unknown predictor_guess: ' // trim(tmp_str) // &
+            ' (use none|ext)')
+    end select
+    call json_get_or_default(params, &
+         'case.fluid.fsi.subiteration.predictor_order', this%predictor_order, 0)
+    if (this%predictor_order < 0 .or. this%predictor_order > 3) then
+       call neko_error('predictor_order must be 0 (advection ramp) or 1-3.')
+    end if
+  end subroutine subiter_read_settings
+
+  !> Log the resolved sub-iteration setup, so that the run can be reproduced
+  !! from the log file. Each line maps to a JSON key under
+  !! case.fluid.fsi.subiteration.
+  subroutine subiter_log_settings(this)
+    class(fluid_pnpn_fsi_subiter_t), intent(in) :: this
+    character(len=128) :: log_buf
+    character(len=16) :: scheme_name, ale_name, accel_name, pred_name, a0_name
+
+    if (this%structure_newmark) then
+       scheme_name = 'newmark'
+       ale_name = 'cn'
+    else
+       scheme_name = 'bdf'
+       ale_name = 'bdf'
+    end if
+    if (this%newmark_a0_balance) then
+       a0_name = 'balance'
+    else
+       a0_name = 'zero'
+    end if
+    select case (this%accel_method)
+    case (ACCEL_CONSTANT)
+       accel_name = 'constant'
+    case (ACCEL_AITKEN)
+       accel_name = 'aitken'
+    case (ACCEL_IQN)
+       accel_name = 'iqn'
+    case default
+       accel_name = 'unknown'
+    end select
+    select case (this%predictor_guess)
+    case (PRED_NONE)
+       pred_name = 'none'
+    case (PRED_EXT)
+       pred_name = 'ext'
+    case default
+       pred_name = 'unknown'
+    end select
+
+    call neko_log%section('FSI sub-iteration setup')
+
+    write(log_buf, '(A,A)') &
+         '   structure_scheme            : ', trim(scheme_name)
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,A)') '   ale_scheme (auto-selected)  : ', trim(ale_name)
+    call neko_log%message(log_buf)
+    if (this%structure_newmark) then
+       write(log_buf, '(A,A)') &
+            '   newmark_initial_acceleration: ', trim(a0_name)
+       call neko_log%message(log_buf)
+    end if
+
+    write(log_buf, '(A,I0)') &
+         '   max_iterations              : ', this%max_subiter
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,I0)') &
+         '   min_iterations              : ', this%min_subiter
+    call neko_log%message(log_buf)
+
+    write(log_buf, '(A,A)') &
+         '   coupling_acceleration.method: ', trim(accel_name)
+    call neko_log%message(log_buf)
+    if (this%accel_method == ACCEL_AITKEN) then
+       write(log_buf, '(A,ES12.5)') &
+            '     relaxation_value          : ', this%relax
+       call neko_log%message(log_buf)
+       write(log_buf, '(A,ES12.5)') &
+            '     aitken_min                : ', this%aitken_min
+       call neko_log%message(log_buf)
+       write(log_buf, '(A,ES12.5)') &
+            '     aitken_max                : ', this%aitken_max
+       call neko_log%message(log_buf)
+    else if (this%accel_method == ACCEL_CONSTANT) then
+       write(log_buf, '(A,ES12.5)') &
+            '     relaxation_value          : ', this%relax
+       call neko_log%message(log_buf)
+    end if
+
+    write(log_buf, '(A,A)') '   criterion                   : ', &
+         trim(this%conv_criterion)
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,L1)') '   relative                    : ', &
+         this%conv_relative
+    call neko_log%message(log_buf)
+    write(log_buf, '(A,ES12.5)') '   tolerance                   : ', &
+         this%conv_tol
+    call neko_log%message(log_buf)
+
+    write(log_buf, '(A,A)') '   predictor_guess             : ', trim(pred_name)
+    call neko_log%message(log_buf)
+    if (this%predictor_guess .eq. PRED_EXT) then
+       write(log_buf, '(A,I0)') '   predictor_order             : ', &
+            this%predictor_order
+       call neko_log%message(log_buf)
+    end if
+
+    call neko_log%end_section()
+  end subroutine subiter_log_settings
 
   !> Stop on the coupled boundary conditions.
   subroutine subiter_check_bcs(this)
@@ -570,9 +587,12 @@ contains
        allocate(this%mesh_z_lag(this%n_lag))
        do j = 1, this%n_lag
           write(idx, '(I0)') j
-          call this%mesh_x_lag(j)%init(this%dm_Xh, 'fsi_mesh_x_lag'//trim(idx))
-          call this%mesh_y_lag(j)%init(this%dm_Xh, 'fsi_mesh_y_lag'//trim(idx))
-          call this%mesh_z_lag(j)%init(this%dm_Xh, 'fsi_mesh_z_lag'//trim(idx))
+          call this%mesh_x_lag(j)%init(this%dm_Xh, &
+               'fsi_mesh_x_lag' // trim(idx))
+          call this%mesh_y_lag(j)%init(this%dm_Xh, &
+               'fsi_mesh_y_lag' // trim(idx))
+          call this%mesh_z_lag(j)%init(this%dm_Xh, &
+               'fsi_mesh_z_lag' // trim(idx))
        end do
        allocate(this%pivot_hist(3, this%n_lag, this%nbodies_fsi))
        allocate(this%ghost_hist(3, this%n_lag, 2, this%nbodies_fsi))
@@ -584,9 +604,12 @@ contains
        call copy(this%mesh_y_lag(j)%x, this%c_Xh%dof%y%x, this%n_mesh)
        call copy(this%mesh_z_lag(j)%x, this%c_Xh%dof%z%x, this%n_mesh)
        if (NEKO_BCKND_DEVICE .eq. 1) then
-          call device_copy(this%mesh_x_lag(j)%x_d, this%c_Xh%dof%x%x_d, this%n_mesh)
-          call device_copy(this%mesh_y_lag(j)%x_d, this%c_Xh%dof%y%x_d, this%n_mesh)
-          call device_copy(this%mesh_z_lag(j)%x_d, this%c_Xh%dof%z%x_d, this%n_mesh)
+          call device_copy(this%mesh_x_lag(j)%x_d, this%c_Xh%dof%x%x_d, &
+               this%n_mesh)
+          call device_copy(this%mesh_y_lag(j)%x_d, this%c_Xh%dof%y%x_d, &
+               this%n_mesh)
+          call device_copy(this%mesh_z_lag(j)%x_d, this%c_Xh%dof%z%x_d, &
+               this%n_mesh)
        end if
     end do
 
@@ -594,7 +617,7 @@ contains
        a = this%fsi_bodies(i)%ale_id
        do j = 1, this%n_lag
           this%pivot_hist(:, j, i) = this%ale%ale_pivot(a)%pos
-          this%disp_hist(:, j, i)  = this%fsi_bodies(i)%disp_rel
+          this%disp_hist(:, j, i) = this%fsi_bodies(i)%disp_rel
           do g = 1, 2
              h = this%ale%ghost_handles(g, a)
              this%ghost_hist(:, j, g, i) = this%ale%trackers(h)%pos
@@ -605,41 +628,21 @@ contains
 
   end subroutine subiter_init_histories
 
-  ! Time step  (the strongly-coupled sub-iteration)
+  !> Advance the fluid and the FSI bodies one time step with the
+  !! strongly-coupled sub-iteration.
   subroutine fluid_subiter_step(this, time, dt_controller)
     class(fluid_pnpn_fsi_subiter_t), target, intent(inout) :: this
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
-
-    real(kind=rp) :: beta(0:3), dt
-    integer :: nadv, n, i, k, row_g, kit
-    real(kind=rp) :: F_fluid(6)
+    real(kind=rp) :: beta(0:3)
+    integer :: nadv, i, kit
     real(kind=dp) :: t_sub0, t_sub
-
-    ! Worst-DOF metrics and their (body, dof) index; per-DOF log helpers.
+    ! Worst-DOF metrics and their (body, dof) index
     real(kind=rp) :: vmetric, fmetric
     integer :: wv_body, wv_dof, wf_body, wf_dof
-    logical :: show_v, show_f
-    character(len=2) :: dof_lbl(6) = &
-         ['Tx', 'Ty', 'Tz', 'Rx', 'Ry', 'Rz']
-    character(len=LOG_SIZE) :: sub
-    character(len=12) :: vtag, ftag
-    character(len=24) :: tmp
-    character(len=8) :: dv_lbl, fr_lbl  !< breakdown labels (rel/abs mode)
-
-    real(kind=rp) :: omega
-    logical :: converged
+    logical :: converged, iter_verbose
     character(len=128) :: msg
-    real(kind=rp) :: r_body(6), dr_body(6)
-    real(kind=rp) :: num, den
 
-    real(kind=rp), allocatable :: M_linear(:,:), B_linear(:), X_prev(:)
-    real(kind=rp) :: nr_res
-    integer :: nr_iter, max_nr
-    logical :: iter_verbose, nr_converged
-
-    dt = time%dt
-    n = this%dm_Xh%size()
     nadv = this%ext_bdf%nadv
 
     ! beta(0) = diffusion_coeffs(1)  (= LHS coeff on v^{n+1})
@@ -686,33 +689,13 @@ contains
     ! Reset the per-body relaxation state for this step
     this%accel_omega = this%relax
     this%accel_r_prev = 0.0_rp
-    omega = this%relax
 
-    ! Convergence metric
-    select case (trim(this%conv_criterion))
-    case ('velocity')
-       show_v = .true.  
-       show_f = .false.
-    case ('force')
-       show_v = .false.
-       show_f = .true.
-    case default ! both / either
-       show_v = .true.
-       show_f = .true.
-    end select
     vmetric = 0.0_rp
     fmetric = 0.0_rp
     wv_body = 0
     wv_dof = 0
     wf_body = 0
     wf_dof = 0
-    if (this%conv_relative) then
-       dv_lbl = 'dv_rel'
-       fr_lbl = 'Fr_rel'
-    else
-       dv_lbl = 'dv_abs'
-       fr_lbl = 'Fr_abs'
-    end if
 
     call neko_log%message("---- FSI strong coupling (sub-iteration) ----")
 
@@ -731,16 +714,7 @@ contains
        ! Implicit kinematics
        call this%update_kinematics_bdfk(time, beta, nadv)
 
-       do i = 1, this%nbodies_fsi
-          this%batch_ids(i) = this%fsi_bodies(i)%ale_id
-          this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
-          this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
-       end do
-       call this%ale%update_mesh_velocity(this%c_Xh, time, &
-            override_ids = this%batch_ids, &
-            override_trans = this%batch_trans, &
-            override_ang = this%batch_ang, &
-            out_prescribed_vels = this%temp_prescribed_vels, mode = 0)
+       call subiter_update_mesh_velocity(this, time, .false.)
 
        ! Implicit mesh position update.
        call this%ale%advance_mesh_implicit(this%c_Xh, time, beta, nadv, &
@@ -762,16 +736,7 @@ contains
        call this%calc_fsi_terms(time, beta, nadv)
        call this%add_spring_jacobian(time, beta)
 
-       do i = 1, this%nbodies_fsi
-          call this%fsi_bodies(i)%force_monitor%compute_(time)
-          F_fluid(1:3) = this%fsi_bodies(i)%force_monitor%total_force
-          F_fluid(4:6) = this%fsi_bodies(i)%force_monitor%total_torque
-          do k = 1, 6
-             row_g = this%fsi_dof_map(i, k)
-             if (row_g > 0) this%B_global(row_g) = this%B_global(row_g) + &
-                  F_fluid(k)
-          end do
-       end do
+       call subiter_add_fluid_forces(this, time)
 
        ! Force residual, computed here while B_global still
        ! holds the interface imbalance.
@@ -780,54 +745,13 @@ contains
 
        ! Solve the 6-DOF structural system  M * dv = B
        if (this%total_active_dofs > 0) then
-          allocate(M_linear(this%total_active_dofs, this%total_active_dofs))
-          allocate(B_linear(this%total_active_dofs))
-          allocate(X_prev(this%total_active_dofs))
-          ! Linear base of both M and B. The loop always runs to
-          ! convergence; when nothing depends on X_sol, pass 2 reproduces
-          ! pass 1 and exits with zero residual.
-          M_linear = this%M_global
-          B_linear = this%B_global
-          max_nr = 20
           iter_verbose = this%non_linear_correction_term .or. &
                this%has_user_structural_terms
-          if (iter_verbose) then
-             call neko_log%message("  --- Fixed-point Iteration ---")
-          end if
-          nr_converged = .false.
-          do nr_iter = 1, max_nr
-             this%M_global = M_linear
-             this%B_global = B_linear
-             if (this%non_linear_correction_term) then
-                call add_fsi_non_linear_matrices(this%nbodies_fsi, &
-                     this%fsi_bodies, this%fsi_dof_map, this%M_global, &
-                     this%X_sol, this%ale%body_rot_matrices)
-             end if
-             call add_fsi_user_structural_terms(this%nbodies_fsi, &
-                  this%fsi_bodies, this%fsi_dof_map, this%M_global, &
-                  this%B_global, this%X_sol, this%ale%body_rot_matrices, &
-                  time, this%gravity_vec, this%user_fsi_structural_terms)
-             X_prev = this%X_sol
-             call linsolve_dense(this%total_active_dofs, this%M_global, &
-                  this%B_global, this%X_sol)
-             nr_res = maxval(abs(this%X_sol - X_prev))
-             if (iter_verbose) then
-                write(msg, '(A, I2, A, ES13.6)') "    Iter: ", &
-                     nr_iter, " | Max Residual: ", nr_res
-                call neko_log%message(trim(msg))
-             end if
-             if (nr_res .lt. 1.0e-14_rp) then
-                nr_converged = .true.
-                exit
-             end if
-          end do
-          if (.not. nr_converged) then
-             write(msg, '(A,I0,A,I0,A,ES13.6)') &
-                  "FSI structural loop did not converge at step ", time%tstep, &
-                  " after ", max_nr, " passes. Max residual: ", nr_res
-             call neko_log%warning(trim(msg))
-          end if
-          deallocate(M_linear, B_linear, X_prev)
+          call fsi_solve_structure(this%nbodies_fsi, this%fsi_bodies, &
+               this%fsi_dof_map, this%total_active_dofs, this%M_global, &
+               this%B_global, this%X_sol, this%ale%body_rot_matrices, time, &
+               this%gravity_vec, this%non_linear_correction_term, &
+               this%user_fsi_structural_terms, iter_verbose)
        end if
 
        ! Velocity increment; the un-relaxed structural
@@ -835,107 +759,11 @@ contains
        call subiter_dof_metric(this, .false., &
             vmetric, wv_body, wv_dof)
 
-       ! Per-body relaxation factor.
-       ! Each body gets its own factor, computed
-       ! from that body's own increment vector.
-       do i = 1, this%nbodies_fsi
-          if (this%accel_method == ACCEL_AITKEN) then
-             ! this body's increment vector (inactive DOFs stay 0).
-             r_body = 0.0_rp
-             do k = 1, 6
-                row_g = this%fsi_dof_map(i, k)
-                if (row_g > 0) r_body(k) = this%X_sol(row_g)
-             end do
-             if (kit == 1) then
-                this%accel_omega(i) = this%relax
-             else
-                dr_body = r_body - this%accel_r_prev(:, i)
-                den = dot_product(dr_body, dr_body)
-                if (den > 1.0e-30_rp) then
-                   num = dot_product(this%accel_r_prev(:, i), dr_body)
-                   this%accel_omega(i) = -this%accel_omega(i) * num / den
-                end if
-                this%accel_omega(i) = max(this%aitken_min, &
-                     min(this%aitken_max, this%accel_omega(i)))
-             end if
-             this%accel_r_prev(:, i) = r_body
-          else
-             ! ACCEL_CONSTANT
-             this%accel_omega(i) = this%relax
-          end if
-       end do
-
-       do i = 1, this%nbodies_fsi
-          do k = 1, 6
-             row_g = this%fsi_dof_map(i, k)
-             if (row_g > 0) then
-                this%fsi_bodies(i)%body_vel(k) = &
-                     this%fsi_bodies(i)%body_vel(k) + &
-                     this%accel_omega(i) * this%X_sol(row_g)
-             end if
-          end do
-       end do
-
-       ! representative factor for the log (least-relaxed body).
-       omega = maxval(this%accel_omega)
-
-       ! Worst velocity/force metric with the body: DOF that
-       ! owns it, plus the representative relaxation factor.
-       if (wv_body > 0) then
-          write(vtag, '(A,I0,A,A)') 'b', wv_body, ' ', dof_lbl(wv_dof)
-       else
-          vtag = 'none'
-       end if
-       if (wf_body > 0) then
-          write(ftag, '(A,I0,A,A)') 'b', wf_body, ' ', dof_lbl(wf_dof)
-       else
-          ftag = 'none'
-       end if
+       call subiter_relax_velocities(this, kit)
 
        t_sub = MPI_Wtime() - t_sub0
-
-       write(msg, '(A,I4,A,ES11.4,A,A,A,ES11.4,A,A,A,F6.3,A,ES15.7,A)') &
-            "  subiter ", kit, &
-            " | delta_v=", vmetric, " @" , trim(vtag), &
-            " | F_res=", fmetric, " @", trim(ftag), &
-            " | omega=", omega, &
-            " | substep_time=", t_sub, " s"
-       call neko_log%message(trim(msg))
-
-       ! Per-body-per-DOF breakdown (only the criterion's metric(s), only
-       ! active DOFs). Evidence that every DOF is individually converged.
-       do i = 1, this%nbodies_fsi
-          if (show_v) then
-             sub = ''
-             do k = 1, 6
-                if (this%rel_dof_v(k, i) >= 0.0_rp) then
-                   write(tmp, '(1X,A,A,ES10.3)') dof_lbl(k), '=', &
-                        this%rel_dof_v(k, i)
-                   sub = trim(sub) // trim(tmp)
-                end if
-             end do
-             if (len_trim(sub) > 0) then
-                write(msg, '(A,I0,3A)') "    body ", i, " ", &
-                     trim(dv_lbl), " :" // trim(sub)
-                call neko_log%message(trim(msg))
-             end if
-          end if
-          if (show_f) then
-             sub = ''
-             do k = 1, 6
-                if (this%rel_dof_f(k, i) >= 0.0_rp) then
-                   write(tmp, '(1X,A,A,ES10.3)') dof_lbl(k), '=', &
-                        this%rel_dof_f(k, i)
-                   sub = trim(sub) // trim(tmp)
-                end if
-             end do
-             if (len_trim(sub) > 0) then
-                write(msg, '(A,I0,3A)') "    body ", i, " ", &
-                     trim(fr_lbl), " :" // trim(sub)
-                call neko_log%message(trim(msg))
-             end if
-          end if
-       end do
+       call subiter_log_iteration(this, kit, vmetric, fmetric, wv_body, &
+            wv_dof, wf_body, wf_dof, t_sub)
 
        ! Convergence.
        if (kit >= this%min_subiter) then
@@ -949,7 +777,8 @@ contains
     end do
 
     if (.not. converged) then
-       write(msg, '(A,I0,A)') "  WARNING: FSI sub-iteration did not converge in ", &
+       write(msg, '(A,I0,A)') &
+            "  WARNING: FSI sub-iteration did not converge in ", &
             this%max_subiter, " iterations."
        call neko_log%message(trim(msg))
     end if
@@ -962,20 +791,7 @@ contains
     ! merely to the coupling tolerance. (BDF is left exactly as before.)
     if (this%structure_newmark) then
        call this%update_kinematics_bdfk(time, beta, nadv)
-       do i = 1, this%nbodies_fsi
-          this%batch_ids(i) = this%fsi_bodies(i)%ale_id
-          this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
-          this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
-       end do
-       call this%ale%update_mesh_velocity(this%c_Xh, time, &
-            override_ids = this%batch_ids, &
-            override_trans = this%batch_trans, &
-            override_ang = this%batch_ang, &
-            out_prescribed_vels = this%temp_prescribed_vels, mode = 0)
-       do i = 1, this%nbodies_fsi
-          this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
-               this%temp_prescribed_vels(:, i)
-       end do
+       call subiter_update_mesh_velocity(this, time, .true.)
     end if
 
     ! The last trial solution (u,v,w,p) and the last mesh
@@ -984,20 +800,7 @@ contains
     call this%commit_histories(time, beta, nadv)
 
     ! Final mesh velocity = predictor for the next step.
-    do i = 1, this%nbodies_fsi
-       this%batch_ids(i) = this%fsi_bodies(i)%ale_id
-       this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
-       this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
-    end do
-    call this%ale%update_mesh_velocity(this%c_Xh, time, &
-         override_ids = this%batch_ids, &
-         override_trans = this%batch_trans, &
-         override_ang = this%batch_ang, &
-         out_prescribed_vels = this%temp_prescribed_vels, mode = 0)
-    do i = 1, this%nbodies_fsi
-       this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
-            this%temp_prescribed_vels(:, i)
-    end do
+    call subiter_update_mesh_velocity(this, time, .true.)
 
     call fsi_prep_checkpoint(this%nbodies_fsi, this%fsi_bodies, &
          this%global_disp_rel, this%global_body_vel, &
@@ -1011,8 +814,207 @@ contains
 
   end subroutine fluid_subiter_step
 
+  !> Update the mesh velocity with the current body velocities added to the
+  !! prescribed motion.
+  !! @param store_frame_vel If true, also store the prescribed velocity of
+  !! the moving frame of each body.
+  subroutine subiter_update_mesh_velocity(this, time, store_frame_vel)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    logical, intent(in) :: store_frame_vel
+    integer :: i
 
-  ! EXT-k predictor for the sub-iteration trial-1 velcoity-guess.
+    do i = 1, this%nbodies_fsi
+       this%batch_ids(i) = this%fsi_bodies(i)%ale_id
+       this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
+       this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
+    end do
+    call this%ale%update_mesh_velocity(this%c_Xh, time, &
+         override_ids = this%batch_ids, &
+         override_trans = this%batch_trans, &
+         override_ang = this%batch_ang, &
+         out_prescribed_vels = this%temp_prescribed_vels, &
+         mode = ALE_VEL_SUPERPOSE)
+
+    if (store_frame_vel) then
+       do i = 1, this%nbodies_fsi
+          this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
+               this%temp_prescribed_vels(:, i)
+       end do
+    end if
+  end subroutine subiter_update_mesh_velocity
+
+  !> Add the fluid forces and torques on the bodies to B_global.
+  subroutine subiter_add_fluid_forces(this, time)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    integer :: i, k, row_g
+    real(kind=rp) :: F_fluid(6)
+
+    do i = 1, this%nbodies_fsi
+       call this%fsi_bodies(i)%force_monitor%compute_(time)
+       F_fluid(1:3) = this%fsi_bodies(i)%force_monitor%total_force
+       F_fluid(4:6) = this%fsi_bodies(i)%force_monitor%total_torque
+       do k = 1, 6
+          row_g = this%fsi_dof_map(i, k)
+          if (row_g > 0) this%B_global(row_g) = this%B_global(row_g) + &
+               F_fluid(k)
+       end do
+    end do
+  end subroutine subiter_add_fluid_forces
+
+  !> Update the relaxation factor of each body and apply the relaxed
+  !! velocity increment.
+  subroutine subiter_relax_velocities(this, kit)
+    class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
+    integer, intent(in) :: kit
+    integer :: i, k, row_g
+    real(kind=rp) :: r_body(6), dr_body(6)
+    real(kind=rp) :: num, den
+
+    ! Per-body relaxation factor.
+    ! Each body gets its own factor, computed
+    ! from that body's own increment vector.
+    do i = 1, this%nbodies_fsi
+       if (this%accel_method == ACCEL_AITKEN) then
+          ! this body's increment vector (inactive DOFs stay 0).
+          r_body = 0.0_rp
+          do k = 1, 6
+             row_g = this%fsi_dof_map(i, k)
+             if (row_g > 0) r_body(k) = this%X_sol(row_g)
+          end do
+          if (kit == 1) then
+             this%accel_omega(i) = this%relax
+          else
+             dr_body = r_body - this%accel_r_prev(:, i)
+             den = dot_product(dr_body, dr_body)
+             if (den > 1.0e-30_rp) then
+                num = dot_product(this%accel_r_prev(:, i), dr_body)
+                this%accel_omega(i) = -this%accel_omega(i) * num / den
+             end if
+             this%accel_omega(i) = max(this%aitken_min, &
+                  min(this%aitken_max, this%accel_omega(i)))
+          end if
+          this%accel_r_prev(:, i) = r_body
+       else
+          ! ACCEL_CONSTANT
+          this%accel_omega(i) = this%relax
+       end if
+    end do
+
+    do i = 1, this%nbodies_fsi
+       do k = 1, 6
+          row_g = this%fsi_dof_map(i, k)
+          if (row_g > 0) then
+             this%fsi_bodies(i)%body_vel(k) = &
+                  this%fsi_bodies(i)%body_vel(k) + &
+                  this%accel_omega(i) * this%X_sol(row_g)
+          end if
+       end do
+    end do
+  end subroutine subiter_relax_velocities
+
+  !> Log one sub-iteration: the worst velocity and force metrics, the
+  !! relaxation factor and the per-DOF breakdown.
+  subroutine subiter_log_iteration(this, kit, vmetric, fmetric, wv_body, &
+       wv_dof, wf_body, wf_dof, t_sub)
+    class(fluid_pnpn_fsi_subiter_t), intent(in) :: this
+    integer, intent(in) :: kit
+    real(kind=rp), intent(in) :: vmetric, fmetric
+    integer, intent(in) :: wv_body, wv_dof, wf_body, wf_dof
+    real(kind=dp), intent(in) :: t_sub
+    integer :: i, k
+    real(kind=rp) :: omega
+    logical :: show_v, show_f
+    character(len=2), parameter :: dof_lbl(6) = &
+         ['Tx', 'Ty', 'Tz', 'Rx', 'Ry', 'Rz']
+    character(len=LOG_SIZE) :: sub
+    character(len=12) :: vtag, ftag
+    character(len=24) :: tmp
+    ! Breakdown labels (rel/abs mode)
+    character(len=8) :: dv_lbl, fr_lbl
+    character(len=128) :: msg
+
+    select case (trim(this%conv_criterion))
+    case ('velocity')
+       show_v = .true.
+       show_f = .false.
+    case ('force')
+       show_v = .false.
+       show_f = .true.
+    case default ! both / either
+       show_v = .true.
+       show_f = .true.
+    end select
+    if (this%conv_relative) then
+       dv_lbl = 'dv_rel'
+       fr_lbl = 'Fr_rel'
+    else
+       dv_lbl = 'dv_abs'
+       fr_lbl = 'Fr_abs'
+    end if
+
+    ! representative factor for the log (least-relaxed body).
+    omega = maxval(this%accel_omega)
+
+    ! Worst velocity/force metric with the body: DOF that
+    ! owns it, plus the representative relaxation factor.
+    if (wv_body > 0) then
+       write(vtag, '(A,I0,A,A)') 'b', wv_body, ' ', dof_lbl(wv_dof)
+    else
+       vtag = 'none'
+    end if
+    if (wf_body > 0) then
+       write(ftag, '(A,I0,A,A)') 'b', wf_body, ' ', dof_lbl(wf_dof)
+    else
+       ftag = 'none'
+    end if
+
+    write(msg, '(A,I4,A,ES11.4,A,A,A,ES11.4,A,A,A,F6.3,A,ES15.7,A)') &
+         "  subiter ", kit, &
+         " | delta_v=", vmetric, " @" , trim(vtag), &
+         " | F_res=", fmetric, " @", trim(ftag), &
+         " | omega=", omega, &
+         " | substep_time=", t_sub, " s"
+    call neko_log%message(trim(msg))
+
+    ! Per-body-per-DOF breakdown (only the criterion's metric(s), only
+    ! active DOFs). Evidence that every DOF is individually converged.
+    do i = 1, this%nbodies_fsi
+       if (show_v) then
+          sub = ''
+          do k = 1, 6
+             if (this%rel_dof_v(k, i) >= 0.0_rp) then
+                write(tmp, '(1X,A,A,ES10.3)') dof_lbl(k), '=', &
+                     this%rel_dof_v(k, i)
+                sub = trim(sub) // trim(tmp)
+             end if
+          end do
+          if (len_trim(sub) > 0) then
+             write(msg, '(A,I0,3A)') "    body ", i, " ", &
+                  trim(dv_lbl), " :" // trim(sub)
+             call neko_log%message(trim(msg))
+          end if
+       end if
+       if (show_f) then
+          sub = ''
+          do k = 1, 6
+             if (this%rel_dof_f(k, i) >= 0.0_rp) then
+                write(tmp, '(1X,A,A,ES10.3)') dof_lbl(k), '=', &
+                     this%rel_dof_f(k, i)
+                sub = trim(sub) // trim(tmp)
+             end if
+          end do
+          if (len_trim(sub) > 0) then
+             write(msg, '(A,I0,3A)') "    body ", i, " ", &
+                  trim(fr_lbl), " :" // trim(sub)
+             call neko_log%message(trim(msg))
+          end if
+       end if
+    end do
+  end subroutine subiter_log_iteration
+
+  !> EXT-k predictor for the sub-iteration trial-1 velocity-guess.
   subroutine subiter_apply_ext_predictor(this, time)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -1041,16 +1043,16 @@ contains
     end do
   end subroutine subiter_apply_ext_predictor
 
-  ! Per-body-per-DOF convergence metric.
-  !   is_force = .false. : numerator = velocity increment X_sol(row),
-  !                        own scale = |body_vel(dof)|
-  !   is_force = .true.  : numerator = force residual  B_global(row),
-  !                        own scale = |total_force/torque(dof)|
-  ! Each DOF is normalised (when conv_relative) by its own scale, floored at
-  ! REL_FLOOR times the peak scale among active DOFs of the same *type*
-  ! (translation k<=3, rotation k>=4).
-  ! The returned metric is the
-  ! worst DOF, with its (body, dof) index.
+  !> Per-body-per-DOF convergence metric.
+  !!   is_force = .false. : numerator = velocity increment X_sol(row),
+  !!                        own scale = |body_vel(dof)|
+  !!   is_force = .true.  : numerator = force residual  B_global(row),
+  !!                        own scale = |total_force/torque(dof)|
+  !! Each DOF is normalised (when conv_relative) by its own scale, floored at
+  !! REL_FLOOR times the peak scale among active DOFs of the same *type*
+  !! (translation k<=3, rotation k>=4).
+  !! The returned metric is the
+  !! worst DOF, with its (body, dof) index.
   subroutine subiter_dof_metric(this, is_force, metric, wbody, wdof)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     logical, intent(in) :: is_force
@@ -1136,8 +1138,8 @@ contains
     end do
   end subroutine subiter_dof_metric
 
-  ! vmetric / fmetric are the worst-DOF relative (or absolute) errors already
-  ! formed by subiter_dof_metric; this routine only applies the criterion.
+  !> vmetric / fmetric are the worst-DOF relative (or absolute) errors already
+  !! formed by subiter_dof_metric; this routine only applies the criterion.
   function subiter_is_converged(this, vmetric, fmetric) result(ok)
     class(fluid_pnpn_fsi_subiter_t), intent(in) :: this
     real(kind=rp), intent(in) :: vmetric, fmetric
@@ -1160,7 +1162,7 @@ contains
     end select
   end function subiter_is_converged
 
-  ! Fluid reference (u^n, f, u_e) snapshot for the sub-iteration.
+  !> Fluid reference (u^n, f, u_e) snapshot for the sub-iteration.
   subroutine subiter_snapshot_fluid(this)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     call field_copy(this%u_ref, this%u)
@@ -1175,6 +1177,7 @@ contains
     call field_copy(this%we_ref, this%w_e)
   end subroutine subiter_snapshot_fluid
 
+  !> Restore the fluid reference saved by `subiter_snapshot_fluid`.
   subroutine subiter_restore_fluid(this, warm_start)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     ! warm_start = .true.  -> keep the current u,v,w,p (the previous
@@ -1184,7 +1187,7 @@ contains
     !   (used on the first sub-iteration).
     logical, intent(in), optional :: warm_start
     logical :: ws
-    ! ===============================================================
+
     ws = .false.
     if (present(warm_start)) ws = warm_start
 
@@ -1204,8 +1207,8 @@ contains
     end if
   end subroutine subiter_restore_fluid
 
-  !  Implicit (BDF-k) kinematics from the FROZEN n-histories, using v_s.
-  !  Writes ale_pivot%pos, trackers%pos and disp_rel, and recomputes R^{n+1}.
+  !> Implicit (BDF-k) kinematics from the FROZEN n-histories, using v_s.
+  !! Writes ale_pivot%pos, trackers%pos and disp_rel, and recomputes R^{n+1}.
   subroutine subiter_update_kinematics(this, time, beta, nadv)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -1260,8 +1263,8 @@ contains
 
   end subroutine subiter_update_kinematics
 
-  ! Advance every geometry / structure history once, using
-  ! the converged velocity field.
+  !> Advance every geometry / structure history once, using
+  !! the converged velocity field.
   subroutine subiter_commit_histories(this, time, beta, nadv)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -1272,9 +1275,12 @@ contains
     ! Rewind geometry to x^n (= lag 1) so that B = mass(x^n), shift the
     ! B-history, then restore the converged x^{n+1} and recompute the metrics.
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_copy(this%c_Xh%dof%x%x_d, this%mesh_x_lag(1)%x_d, this%n_mesh)
-       call device_copy(this%c_Xh%dof%y%x_d, this%mesh_y_lag(1)%x_d, this%n_mesh)
-       call device_copy(this%c_Xh%dof%z%x_d, this%mesh_z_lag(1)%x_d, this%n_mesh)
+       call device_copy(this%c_Xh%dof%x%x_d, this%mesh_x_lag(1)%x_d, &
+            this%n_mesh)
+       call device_copy(this%c_Xh%dof%y%x_d, this%mesh_y_lag(1)%x_d, &
+            this%n_mesh)
+       call device_copy(this%c_Xh%dof%z%x_d, this%mesh_z_lag(1)%x_d, &
+            this%n_mesh)
     else
        call copy(this%c_Xh%dof%x%x, this%mesh_x_lag(1)%x, this%n_mesh)
        call copy(this%c_Xh%dof%y%x, this%mesh_y_lag(1)%x, this%n_mesh)
@@ -1295,9 +1301,12 @@ contains
        this%mesh_z_lag(j) = this%mesh_z_lag(j - 1)
     end do
     if (NEKO_BCKND_DEVICE .eq. 1) then
-       call device_copy(this%mesh_x_lag(1)%x_d, this%c_Xh%dof%x%x_d, this%n_mesh)
-       call device_copy(this%mesh_y_lag(1)%x_d, this%c_Xh%dof%y%x_d, this%n_mesh)
-       call device_copy(this%mesh_z_lag(1)%x_d, this%c_Xh%dof%z%x_d, this%n_mesh)
+       call device_copy(this%mesh_x_lag(1)%x_d, this%c_Xh%dof%x%x_d, &
+            this%n_mesh)
+       call device_copy(this%mesh_y_lag(1)%x_d, this%c_Xh%dof%y%x_d, &
+            this%n_mesh)
+       call device_copy(this%mesh_z_lag(1)%x_d, this%c_Xh%dof%z%x_d, &
+            this%n_mesh)
     else
        call copy(this%mesh_x_lag(1)%x, this%c_Xh%dof%x%x, this%n_mesh)
        call copy(this%mesh_y_lag(1)%x, this%c_Xh%dof%y%x, this%n_mesh)
@@ -1309,13 +1318,13 @@ contains
        a = this%fsi_bodies(i)%ale_id
        do j = this%n_lag, 2, -1
           this%pivot_hist(:, j, i) = this%pivot_hist(:, j - 1, i)
-          this%disp_hist(:, j, i)  = this%disp_hist(:, j - 1, i)
+          this%disp_hist(:, j, i) = this%disp_hist(:, j - 1, i)
           do g = 1, 2
              this%ghost_hist(:, j, g, i) = this%ghost_hist(:, j - 1, g, i)
           end do
        end do
        this%pivot_hist(:, 1, i) = this%ale%ale_pivot(a)%pos
-       this%disp_hist(:, 1, i)  = this%fsi_bodies(i)%disp_rel
+       this%disp_hist(:, 1, i) = this%fsi_bodies(i)%disp_rel
        do g = 1, 2
           h = this%ale%ghost_handles(g, a)
           this%ghost_hist(:, 1, g, i) = this%ale%trackers(h)%pos
@@ -1346,7 +1355,7 @@ contains
 
   end subroutine subiter_commit_histories
 
-  !  Prescribed frame motion.
+  !> Prescribed frame motion.
   subroutine subiter_query_frame_prescribed_motion(this, time, beta, nadv)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -1363,10 +1372,10 @@ contains
        this%batch_ids(i) = this%fsi_bodies(i)%ale_id
     end do
 
-    ! prescribed motion only (mode = 2 does not touch wm).
+    ! prescribed motion only (ALE_VEL_QUERY does not touch wm).
     call this%ale%update_mesh_velocity(this%c_Xh, time, &
          override_ids = this%batch_ids, &
-         out_prescribed_vels = this%temp_prescribed_vels, mode = 2)
+         out_prescribed_vels = this%temp_prescribed_vels, mode = ALE_VEL_QUERY)
 
     do i = 1, this%nbodies_fsi
        this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
@@ -1397,14 +1406,14 @@ contains
           do k = 0, nadv
              this%fsi_bodies(i)%moving_frame_presc_acc = &
                   this%fsi_bodies(i)%moving_frame_presc_acc + &
-                  (beta(k) * this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / &
-                  time%dt
+                  (beta(k) * &
+                  this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
           end do
        end do
     end if
   end subroutine subiter_query_frame_prescribed_motion
 
-  !  Assemble the structural inertial system (M_global, B_global).
+  !> Assemble the structural inertial system (M_global, B_global).
   subroutine subiter_calc_fsi_terms(this, time, beta, nadv)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -1441,25 +1450,25 @@ contains
     end if
   end subroutine subiter_calc_fsi_terms
 
-  ! Newmark 'balance' initial acceleration:  a^0 = M_mass^{-1} F_net^0.
-  !
-  ! F_net^0 = (external + fluid forces) - (frame + velocity-dependent inertial
-  ! terms) is obtained by reusing assemble_structural_inertial_terms with the
-  ! relative acceleration forced to zero (accel_hist = -gamma*body_vel makes
-  ! a_full = gamma*v_guess + accel_hist = 0), so its residual B equals exactly
-  ! M_mass*a^0. M_mass is the pure generalized rigid-body mass matrix
-  !   [  m I        -m [c]x ]
-  !   [  m [c]x       I_P   ]
-  ! built here from the current geometry (c = R*offset_com, I_P = R I_body R^T).
-  ! M_global/B_global are overwritten but are reassembled by the sub-iteration
-  ! loop afterwards.
+  !> Newmark 'balance' initial acceleration:  a^0 = M_mass^{-1} F_net^0.
+  !!
+  !! F_net^0 = (external + fluid forces) - (frame + velocity-dependent inertial
+  !! terms) is obtained by reusing assemble_structural_inertial_terms with the
+  !! relative acceleration forced to zero (accel_hist = -gamma*body_vel makes
+  !! a_full = gamma*v_guess + accel_hist = 0), so its residual B equals exactly
+  !! M_mass*a^0. M_mass is the pure generalized rigid-body mass matrix
+  !!   [  m I        -m [c]x ]
+  !!   [  m [c]x       I_P   ]
+  !! built here from the current geometry (c = R*offset_com,
+  !! I_P = R I_body R^T). M_global/B_global are overwritten but are
+  !! reassembled by the sub-iteration loop afterwards.
   subroutine subiter_newmark_init_accel(this, time, beta, nadv)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
     real(kind=rp), intent(in) :: beta(0:3)
     integer, intent(in) :: nadv
     real(kind=rp), allocatable :: accel_hist(:,:), Mmass(:,:), a0(:)
-    real(kind=rp) :: gamma, F_fluid(6), R(3,3), c(3), I_body(3,3), I_P(3,3)
+    real(kind=rp) :: gamma, R(3,3), c(3), I_body(3,3), I_P(3,3)
     real(kind=rp) :: Cs(3,3), M_loc(6,6), I3(3,3), m
     integer :: i, j, k, row_g, col_g, a
 
@@ -1479,19 +1488,13 @@ contains
     deallocate(accel_hist)
 
     ! Add the initial fluid force/torque to the net force.
-    do i = 1, this%nbodies_fsi
-       call this%fsi_bodies(i)%force_monitor%compute_(time)
-       F_fluid(1:3) = this%fsi_bodies(i)%force_monitor%total_force
-       F_fluid(4:6) = this%fsi_bodies(i)%force_monitor%total_torque
-       do k = 1, 6
-          row_g = this%fsi_dof_map(i, k)
-          if (row_g > 0) this%B_global(row_g) = this%B_global(row_g) + F_fluid(k)
-       end do
-    end do
+    call subiter_add_fluid_forces(this, time)
 
     ! Build the generalized mass matrix M_mass.
     I3 = 0.0_rp
-    I3(1,1) = 1.0_rp; I3(2,2) = 1.0_rp; I3(3,3) = 1.0_rp
+    I3(1,1) = 1.0_rp
+    I3(2,2) = 1.0_rp
+    I3(3,3) = 1.0_rp
     allocate(Mmass(this%total_active_dofs, this%total_active_dofs))
     allocate(a0(this%total_active_dofs))
     Mmass = 0.0_rp
@@ -1504,13 +1507,13 @@ contains
        I_P = matmul(R, matmul(I_body, transpose(R)))
        ! Cs = skew(c)
        Cs = 0.0_rp
-       Cs(1,2) = -c(3); Cs(1,3) =  c(2)
-       Cs(2,1) =  c(3); Cs(2,3) = -c(1)
-       Cs(3,1) = -c(2); Cs(3,2) =  c(1)
+       Cs(1,2) = -c(3); Cs(1,3) = c(2)
+       Cs(2,1) = c(3); Cs(2,3) = -c(1)
+       Cs(3,1) = -c(2); Cs(3,2) = c(1)
        M_loc = 0.0_rp
        M_loc(1:3, 1:3) = m * I3
        M_loc(1:3, 4:6) = - m * Cs
-       M_loc(4:6, 1:3) =   m * Cs
+       M_loc(4:6, 1:3) = m * Cs
        M_loc(4:6, 4:6) = I_P
        do j = 1, 6
           row_g = this%fsi_dof_map(i, j)
@@ -1539,22 +1542,22 @@ contains
          "the initial force balance.")
   end subroutine subiter_newmark_init_accel
 
-  ! Add the spring contribution to the LHS Jacobian M_global.
-  !
-  ! calc_fsi_terms (via assemble_structural_inertial_terms, shared with the
-  ! Green's scheme) places the spring only in the residual B, as
-  ! B -= K*(disp_rel - pos_eq).
-  !
-  ! That is correct for the Green's scheme, where disp_rel is advanced
-  ! explicitly (Adams-Bashforth) and is therefore independent of the velocity
-  ! being solved for, so d(spring)/dv = 0.
-  !
-  ! In the sub-iteration, disp_rel is implicit in the current velocity iterate,
-  ! with a scheme-dependent sensitivity dvdisp = d(disp_rel)/d(body_vel):
-  !   BDF: disp_rel = (dt*v - sum_hist)/beta(0)   => dvdisp = dt/beta(0)
-  !   CN : disp_rel = disp_rel^n + (dt/2)(v+v^n)  => dvdisp = dt/2
-  ! K_lin/K_ang are diagonal per DOF and disp_rel(j) depends only on
-  ! body_vel(j), so the Jacobian is diagonal: M(row,row) += K*dvdisp.
+  !> Add the spring contribution to the LHS Jacobian M_global.
+  !!
+  !! calc_fsi_terms (via assemble_structural_inertial_terms, shared with the
+  !! Green's scheme) places the spring only in the residual B, as
+  !! B -= K*(disp_rel - pos_eq).
+  !!
+  !! That is correct for the Green's scheme, where disp_rel is advanced
+  !! explicitly (Adams-Bashforth) and is therefore independent of the velocity
+  !! being solved for, so d(spring)/dv = 0.
+  !!
+  !! In the sub-iteration, disp_rel is implicit in the current velocity iterate,
+  !! with a scheme-dependent sensitivity dvdisp = d(disp_rel)/d(body_vel):
+  !!   BDF: disp_rel = (dt*v - sum_hist)/beta(0)   => dvdisp = dt/beta(0)
+  !!   CN : disp_rel = disp_rel^n + (dt/2)(v+v^n)  => dvdisp = dt/2
+  !! K_lin/K_ang are diagonal per DOF and disp_rel(j) depends only on
+  !! body_vel(j), so the Jacobian is diagonal: M(row,row) += K*dvdisp.
   subroutine subiter_add_spring_jacobian(this, time, beta)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
@@ -1585,7 +1588,7 @@ contains
     end do
   end subroutine subiter_add_spring_jacobian
 
-  !  Logging
+  !> Log the state of the FSI bodies.
   subroutine subiter_log_results(this, time)
     class(fluid_pnpn_fsi_subiter_t), intent(in) :: this
     type(time_state_t), intent(in) :: time
@@ -1603,22 +1606,26 @@ contains
     call neko_log%message("variable, step, time, body, x, y, z")
     do i = 1, this%nbodies_fsi
        write(msg, fmt_res) "FSI_DISP_L  ", time%tstep, "  ", time%t, "  ", &
-            trim(this%fsi_bodies(i)%name), "  ", this%fsi_bodies(i)%disp_rel(1:3)
+            trim(this%fsi_bodies(i)%name), "  ", &
+            this%fsi_bodies(i)%disp_rel(1:3)
        call neko_log%message(trim(msg))
        write(msg, fmt_res) "FSI_DISP_A  ", time%tstep, "  ", time%t, "  ", &
-            trim(this%fsi_bodies(i)%name), "  ", this%fsi_bodies(i)%disp_rel(4:6)
+            trim(this%fsi_bodies(i)%name), "  ", &
+            this%fsi_bodies(i)%disp_rel(4:6)
        call neko_log%message(trim(msg))
        write(msg, fmt_res) "FSI_VEL_L   ", time%tstep, "  ", time%t, "  ", &
-            trim(this%fsi_bodies(i)%name), "  ", this%fsi_bodies(i)%body_vel(1:3)
+            trim(this%fsi_bodies(i)%name), "  ", &
+            this%fsi_bodies(i)%body_vel(1:3)
        call neko_log%message(trim(msg))
        write(msg, fmt_res) "FSI_VEL_A   ", time%tstep, "  ", time%t, "  ", &
-            trim(this%fsi_bodies(i)%name), "  ", this%fsi_bodies(i)%body_vel(4:6)
+            trim(this%fsi_bodies(i)%name), "  ", &
+            this%fsi_bodies(i)%body_vel(4:6)
        call neko_log%message(trim(msg))
     end do
     call neko_log%message(" ")
   end subroutine subiter_log_results
 
-  !  Restart
+  !> Restart from a previous solution.
   subroutine fluid_subiter_restart(this, chkp)
     class(fluid_pnpn_fsi_subiter_t), target, intent(inout) :: this
     type(chkp_t), intent(inout) :: chkp
@@ -1650,7 +1657,7 @@ contains
        call this%ale%update_mesh_velocity(this%c_Xh, t_restart, &
             override_ids = this%batch_ids, &
             override_trans = this%batch_trans, &
-            override_ang = this%batch_ang, mode = 0)
+            override_ang = this%batch_ang, mode = ALE_VEL_SUPERPOSE)
 
        if (this%structure_newmark) then
           ! Seed the frozen wm^n for the CN reposition from the rebuilt mesh
@@ -1679,7 +1686,7 @@ contains
     end if
   end subroutine fluid_subiter_restart
 
-  !  Destruction
+  !> Destructor.
   subroutine fluid_subiter_free(this)
     class(fluid_pnpn_fsi_subiter_t), intent(inout) :: this
     integer :: i, j, k
@@ -1722,7 +1729,8 @@ contains
     if (allocated(this%batch_ids)) deallocate(this%batch_ids)
     if (allocated(this%batch_trans)) deallocate(this%batch_trans)
     if (allocated(this%batch_ang)) deallocate(this%batch_ang)
-    if (allocated(this%temp_prescribed_vels)) deallocate(this%temp_prescribed_vels)
+    if (allocated(this%temp_prescribed_vels)) &
+         deallocate(this%temp_prescribed_vels)
 
     if (allocated(this%mesh_x_lag)) then
        do j = 1, size(this%mesh_x_lag)

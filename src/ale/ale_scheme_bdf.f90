@@ -71,7 +71,6 @@ contains
          mesh_z_lag(:)
     real(kind=rp), intent(in), optional :: beta(0:3)
     type(field_t), intent(in), optional :: wm_x_prev, wm_y_prev, wm_z_prev
-    integer :: n
     real(kind=rp) :: inv_b0, gamma
 
     if (.not. (present(mesh_x_lag) .and. present(mesh_y_lag) .and. &
@@ -79,7 +78,6 @@ contains
          call neko_error("ale_scheme_bdf: reposition_mesh requires " // &
          "mesh_*_lag and beta")
 
-    n = c_Xh%dof%size()
     inv_b0 = 1.0_rp / beta(0)
     gamma = time%dt * inv_b0
 

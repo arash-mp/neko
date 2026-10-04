@@ -362,7 +362,8 @@ contains
                            labeled_zone_offsets(NEKO_ON_BC_LABEL) .eq. 0)
 
                       labeled_zone_offsets(NEKO_ON_BC_LABEL) = 1
-                   case ('s', 'sl', 'sh', 'shl', 'S', 'SL', 'SH', 'SHL', 'mv', 'MV')
+                   case ('s', 'sl', 'sh', 'shl', 'S', 'SL', 'SH', 'SHL', &
+                        'mv', 'MV')
                       if (NEKO_SHL_BC_LABEL .eq. -1) then
                          NEKO_SHL_BC_LABEL = current_internal_zone
                          current_internal_zone = current_internal_zone + 1

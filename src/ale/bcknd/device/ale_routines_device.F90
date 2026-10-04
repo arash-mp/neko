@@ -332,7 +332,7 @@ contains
 
   !> Update ALE Mesh
   subroutine update_ale_mesh_ab_device(c_Xh, wm_x, wm_y, wm_z, wm_x_lag, &
-        wm_y_lag, wm_z_lag, time, nadv)
+       wm_y_lag, wm_z_lag, time, nadv)
 
     type(coef_t), intent(inout) :: c_Xh
     type(field_t), intent(in) :: wm_x, wm_y, wm_z
@@ -378,7 +378,7 @@ contains
     integer, intent(in) :: nadv
     integer :: j, n
     real(kind=rp) :: inv_b0, gamma_j
- 
+
     n = c_Xh%dof%size()
     inv_b0 = 1.0_rp / beta(0)
 

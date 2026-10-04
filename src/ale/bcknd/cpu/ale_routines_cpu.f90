@@ -348,8 +348,8 @@ contains
   end subroutine add_kinematics_to_mesh_velocity_cpu
 
   !> Updates mesh position by integrating mesh velocity in time using AB (CPU)
-  subroutine update_ale_mesh_ab_cpu(c_Xh, wm_x, wm_y, wm_z, wm_x_lag, wm_y_lag, &
-       wm_z_lag, time, nadv)
+  subroutine update_ale_mesh_ab_cpu(c_Xh, wm_x, wm_y, wm_z, wm_x_lag, &
+       wm_y_lag, wm_z_lag, time, nadv)
     type(coef_t), intent(inout) :: c_Xh
     type(field_t), intent(in) :: wm_x, wm_y, wm_z
     type(field_series_t), intent(in) :: wm_x_lag, wm_y_lag, wm_z_lag

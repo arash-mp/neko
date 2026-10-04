@@ -841,8 +841,8 @@ contains
     have_abvel = mod(optional_fields,16)/8
     have_scalarlag = mod(optional_fields,32)/16
     have_ale = mod(optional_fields,64)/32
-    have_fsi = mod(optional_fields,128)/64
-    have_fsi_subiter = mod(optional_fields,256)/128
+    have_fsi = mod(optional_fields, 128)/64
+    have_fsi_subiter = mod(optional_fields, 256)/128
 
     if ( ( glb_nelv .ne. msh%glb_nelv ) .or. &
          ( gdim .ne. msh%gdim) .or. &

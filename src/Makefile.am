@@ -305,7 +305,7 @@ neko_fortran_SOURCES = \
 	fluid/fluid_aux.f90\
 	fluid/fluid_pnpn.f90\
 	fluid/fluid_pnpn_fsi_greens.f90\
-	fluid/fluid_pnpn_fsi_subiteration.f90\	
+	fluid/fluid_pnpn_fsi_subiteration.f90\
 	fluid/fluid_base_fctry.f90\
 	fluid/fluid_pnpn_bc_fctry.f90\
 	fluid/compressible_ns_bc_fctry.f90\

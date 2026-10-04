@@ -30,20 +30,15 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
+!> PnPn fluid scheme coupled to rigid bodies with the Green's function method.
 module fluid_pnpn_fsi_greens
-  use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms, &
-       add_fsi_non_linear_matrices, add_fsi_user_structural_terms
-  use fsi_manager, only: fsi_manager_init, linsolve_dense, &
+  use fsi_dynamics, only : fsi_body_t, assemble_structural_inertial_terms
+  use fsi_manager, only : fsi_manager_init, fsi_solve_structure, &
        fsi_register_checkpoint, fsi_prep_checkpoint, fsi_restart_restore
   use fluid_pnpn, only : fluid_pnpn_t
-  use force_torque, only : force_torque_t
   use field, only : field_t
-  use field_math, only : field_add2, field_copy, field_cmult, field_rzero, &
-       field_add2s2, field_cfill
+  use field_math, only : field_copy, field_add2s2, field_cfill
   use num_types, only : rp, dp
-  use mathops, only : opadd2cm
-  use device_mathops, only : device_opadd2cm
-  use neko_config, only : NEKO_BCKND_DEVICE
   use time_state, only : time_state_t
   use time_step_controller, only : time_step_controller_t
   use projection, only : projection_t
@@ -65,27 +60,23 @@ module fluid_pnpn_fsi_greens
   use profiler, only : profiler_start_region, profiler_end_region
   use json_module, only : json_file
   use utils, only : neko_error
-  use logger, only : neko_log, LOG_SIZE
+  use logger, only : neko_log
   use mesh, only : mesh_t
-  use user_intf, only : user_t, user_fsi_body_params_intf, &
+  use user_intf, only : user_t, user_fsi_structural_parameters_intf, &
        user_fsi_structural_terms_intf, dummy_fsi_structural_terms
   use checkpoint, only : chkp_t
-  use mpi_f08, only: MPI_Wtime
+  use mpi_f08, only : MPI_Wtime
   use ab_time_scheme, only : ab_time_scheme_t
   use math, only : rzero
-  use fld_file, only : fld_file_t
-  use file, only : file_t
-  use dofmap, only : dofmap_t
-  use ale_manager
-  use mxm_wrapper, only : mxm
-  use tensor, only : tnsr3d, trsp
+  use ale_manager, only : ALE_VEL_SUPERPOSE, ALE_VEL_EXCLUSIVE, ALE_VEL_QUERY
   implicit none
   private
 
-  ! Green's method of Fischer, P., Schmitt, M., & Tomboulides, A. (2017). 
-  ! Recent developments in spectral element simulations of moving-domain problems
-  ! Recent progress and modern challenges in 
-  ! applied mathematics, modeling and computational science, 213-244.
+  !> PnPn fluid scheme coupled to rigid bodies with the Green's function
+  !! method of Fischer, P., Schmitt, M., & Tomboulides, A. (2017). Recent
+  !! developments in spectral element simulations of moving-domain problems.
+  !! Recent progress and modern challenges in applied mathematics, modeling
+  !! and computational science, 213-244.
   type, public, extends(fluid_pnpn_t) :: fluid_pnpn_fsi_greens_t
      logical :: if_fsi = .false.
      logical :: skip_greens_solve = .false.
@@ -134,13 +125,16 @@ module fluid_pnpn_fsi_greens
 
      !> User hook: runtime modification of FSI body parameters. Always
      !> associated (dummy if not registered in the user file).
-     procedure(user_fsi_body_params_intf), nopass, pointer :: &
+     procedure(user_fsi_structural_parameters_intf), nopass, pointer :: &
           user_fsi_body_params => null()
      !> User hook: extra structural equation terms.
      procedure(user_fsi_structural_terms_intf), nopass, pointer :: &
           user_fsi_structural_terms => null()
      !> True when the user registered structural terms.
      logical :: has_user_structural_terms = .false.
+     !> Accumulated wall time of the standard and of the Green's solves.
+     real(kind=dp) :: total_elapsed_s = 0.0_dp
+     real(kind=dp) :: total_elapsed_g = 0.0_dp
    contains
      procedure, pass(this) :: init => fluid_fsi_init
      procedure, pass(this) :: step => fluid_fsi_step
@@ -150,7 +144,7 @@ module fluid_pnpn_fsi_greens
      procedure, pass(this) :: bc_apply_vel => fluid_fsi_bc_apply_vel
      procedure, pass(this) :: bc_apply_prs => fluid_fsi_bc_apply_prs
      procedure, pass(this) :: calc_fsi_terms => &
-           assemble_fsi_structural_inertial_terms
+          assemble_fsi_structural_inertial_terms
      procedure, pass(this) :: log_fsi_results => fluid_fsi_log_results
      procedure, pass(this) :: query_frame_prescribed_motion => &
           fluid_fsi_query_frame_prescribed_motion
@@ -158,6 +152,7 @@ module fluid_pnpn_fsi_greens
 
 contains
 
+  !> Initialise the fluid scheme and the FSI bodies.
   subroutine fluid_fsi_init(this, msh, lx, params, user, chkp)
     class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
     type(mesh_t), target, intent(inout) :: msh
@@ -192,7 +187,7 @@ contains
     call this%p_s%init(this%dm_Xh, 'p_s')
 
     ! Init fsi_manager
-    call fsi_manager_init(params, msh, this%ale, this%c_Xh, this%dm_Xh, &
+    call fsi_manager_init(params, this%ale, this%c_Xh, this%dm_Xh, &
          this%if_fsi, this%nbodies_fsi, this%fsi_bodies, this%fsi_dof_map, &
          this%total_active_dofs, &
          this%M_global, this%B_global, this%X_sol, &
@@ -233,9 +228,9 @@ contains
        call this%ale%update_mesh_velocity(this%c_Xh, t_init, &
             override_ids = this%batch_ids, &
             override_trans = this%batch_trans, &
-            override_ang = this%batch_ang,&
+            override_ang = this%batch_ang, &
             out_prescribed_vels = this%temp_prescribed_vels, &
-            mode = 0)
+            mode = ALE_VEL_SUPERPOSE)
        do i = 1, this%nbodies_fsi
           this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
                this%temp_prescribed_vels(:, i)
@@ -244,30 +239,20 @@ contains
 
   end subroutine fluid_fsi_init
 
-
+  !> Advance the fluid and the FSI bodies one time step.
   subroutine fluid_fsi_step(this, time, dt_controller)
     class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
     type(time_state_t), intent(in) :: time
     type(time_step_controller_t), intent(in) :: dt_controller
     type(ab_time_scheme_t) :: ab_scheme_obj
     character(len=1000) :: msg
-
     real(kind=rp) :: ab_coeffs(4), dt_history(10)
     real(kind=rp) :: beta(0:3)
-    integer :: nadv, n, i, j, k, row_g, col_g, k_row, idx_g
+    integer :: nadv, i, k, row_g
     real(kind=rp) :: F_fluid(6)
     real(kind=dp) :: start_time_s, end_time_s, step_time_s
-    real(kind=dp) :: start_time_g, end_time_g, step_time_g
-    real(kind=dp), save :: total_elapsed_s = 0.0_dp
-    real(kind=dp), save :: total_elapsed_g = 0.0_dp
+    logical :: iter_verbose
 
-    ! Fixed-Point Iteration variables
-    real(kind=rp), allocatable :: M_linear(:,:), B_linear(:), X_prev(:)
-    real(kind=rp) :: nr_residual
-    integer :: nr_iter, max_nr_iter
-    logical :: iter_verbose, converged
-
-    n = this%dm_Xh%size()
     nadv = this%ext_bdf%nadv
 
     do i = 0, nadv
@@ -280,19 +265,6 @@ contains
     dt_history(2) = time%dtlag(1)
     dt_history(3) = time%dtlag(2)
     call ab_scheme_obj%compute_coeffs(ab_coeffs, dt_history, nadv)
-
-    !write(msg, '(A, 4(F10.5, 1X))') "DEBUG BETA (0-3):   ", &
-    !      beta(0), beta(1), beta(2), beta(3)
-    !call neko_log%message(trim(msg))
-
-    !write(msg, '(A, 3(F10.5, 1X))') "DEBUG ALPHA_EXT (1-3):", &
-    !      alpha_ext(1), alpha_ext(2), alpha_ext(3)
-    !call neko_log%message(trim(msg))
-
-    !write(msg, '(A, 4(F10.5, 1X))') "DEBUG AB_COEFFS (1-3):", &
-    !      ab_coeffs(1), ab_coeffs(2), ab_coeffs(3), ab_coeffs(4)
-    !call neko_log%message(trim(msg))
-
 
     ! Calculate the new displacements at the current time-step
     ! using AB-k.
@@ -313,17 +285,17 @@ contains
     ! I should double check if it is the right place to put this. I think it is.
     ! But, should become sure.
     call this%query_frame_prescribed_motion(time, beta, nadv)
-    
+
     ! Standard fluid step
     start_time_s = MPI_WTIME()
 
     ! Fluid standard step, using final velocity from previous step,
     ! which includes the FSI correction and prescribed motions.
     ! We advance the mesh only here.
-    ! We should not skip the mesh velocity here, since we need to update the 
+    ! We should not skip the mesh velocity here, since we need to update the
     ! rotation matrix.
-    ! I think I can move compute_rotationm matrics inside advance_mesh_explicit. 
-    ! I need to remember if there was any reason that 
+    ! I think I can move compute_rotationm matrics inside
+    ! advance_mesh_explicit. I need to remember if there was any reason that
     ! I put it there at first place.
     ! Calling update_mesh_velocity here should be totally harmless.
     call this%fluid_pnpn_t%step(time, dt_controller)
@@ -331,13 +303,13 @@ contains
     ! Add FSI structural terms at current time step.
     ! Rotation matrix etc should be updated at this point.
     ! I moved this after the above step, since the rotation matrix should for
-    ! the current time step. 
+    ! the current time step.
     ! Need to verify more.
     call this%calc_fsi_terms(time, beta, nadv)
 
     end_time_s = MPI_WTIME()
     step_time_s = end_time_s - start_time_s
-    total_elapsed_s = total_elapsed_s + step_time_s
+    this%total_elapsed_s = this%total_elapsed_s + step_time_s
 
     write(msg, '(A, E15.7, A, I0, A, E15.7)') "Standard step time (s):  ", &
          step_time_s, "  Step: ", time%tstep, "  time: ", time%t
@@ -365,96 +337,21 @@ contains
        end do
     end do
 
-    ! Skip Green's function if skip_greens_solve is true
     if (.not. this%skip_greens_solve) then
-       ! Green's Function Loop
-       do j = 1, this%nbodies_fsi
-          do k = 1, 6
-             ! Solve Green's function for active DOFs only.
-             col_g = this%fsi_dof_map(j, k)
-             if (col_g == 0) cycle
-
-             ! Use the last impulse response fields for initial guess.
-             call field_copy(this%u, this%u_g(col_g))
-             call field_copy(this%v, this%v_g(col_g))
-             call field_copy(this%w, this%w_g(col_g))
-             call field_copy(this%p, this%p_g(col_g))
-
-             ! Setup Perturbation
-             this%batch_ids(1) = this%fsi_bodies(j)%ale_id
-             this%batch_trans(:,1) = 0.0_rp
-             this%batch_ang(:,1) = 0.0_rp
-
-             if (k <= 3) then
-                ! transaltional DOF
-                this%batch_trans(k, 1) = 1.0_rp
-             else
-               ! rotational DOF
-                this%batch_ang(k-3, 1) = 1.0_rp
-             end if
-
-             ! Mode 1: Set rigid body vels to zero, then apply impulse.
-             call this%ale%update_mesh_velocity(this%c_Xh, time, &
-                  override_ids = this%batch_ids(1:1), &
-                  override_trans = this%batch_trans(:,1:1), &
-                  override_ang = this%batch_ang(:,1:1), &
-                  mode = 1)
-
-             start_time_g = MPI_WTIME()
-             call fluid_fsi_greens_solve(this, time, dt_controller, col_g)
-             end_time_g = MPI_WTIME()
-             step_time_g = end_time_g - start_time_g
-             total_elapsed_g = total_elapsed_g + step_time_g
-
-             write(msg, '(A, E15.7, A, I0, A, E15.7)') &
-                  "Green's step time (s):  ", step_time_g, "  Step: ", &
-                  time%tstep, "  time: ", time%t
-             call neko_log%message(trim(msg))
-             call neko_log%message(' ')
-
-             ! Save Green's function response.
-             call field_copy(this%u_g(col_g), this%u)
-             call field_copy(this%v_g(col_g), this%v)
-             call field_copy(this%w_g(col_g), this%w)
-             call field_copy(this%p_g(col_g), this%p)
-
-             ! Fill M matrix with Impulse forces/torques (F_g)
-             ! Here, we add the cross-coupling forces on all bodies, on all DOFs.
-             do i = 1, this%nbodies_fsi
-                call this%fsi_bodies(i)%force_monitor%compute_(time)
-                do k_row = 1, 6
-                   row_g = this%fsi_dof_map(i, k_row)
-                   if (row_g > 0) then
-                      if (k_row <= 3) then
-                         this%M_global(row_g, col_g) = &
-                              this%M_global(row_g, col_g) - &
-                              this%fsi_bodies(i)%&
-                              force_monitor%total_force(k_row)
-                      else
-                         this%M_global(row_g, col_g) = &
-                              this%M_global(row_g, col_g) - &
-                              this%fsi_bodies(i)%&
-                              force_monitor%total_torque(k_row-3)
-                      end if
-                   end if
-                end do
-             end do
-          end do
-       end do
+       call fluid_fsi_compute_greens_functions(this, time, dt_controller)
     else
        call neko_log%message("Weak coupling enabled: " // &
             "Skipping Green's function fluid feedback.")
-       step_time_g = 0.0_dp
     end if
 
     call neko_log%message(' ')
     write(msg, '(A, E15.7, A, I0, A, E15.7)') &
          "Standard's step total elapsed time (s):  ", &
-         total_elapsed_s, "  Step: ", time%tstep, "  time: ", time%t
+         this%total_elapsed_s, "  Step: ", time%tstep, "  time: ", time%t
     call neko_log%message(trim(msg))
     write(msg, '(A, E15.7, A, I0, A, E15.7)') &
          "Green's step total elapsed time (s):  ", &
-         total_elapsed_g, "  Step: ", time%tstep, "  time: ", time%t
+         this%total_elapsed_g, "  Step: ", time%tstep, "  time: ", time%t
     call neko_log%message(trim(msg))
     call neko_log%message(' ')
 
@@ -464,74 +361,137 @@ contains
     ! X_sol enters holding the previous step's solution, which serves as
     ! the initial guess of the fixed-point loop below.
     if (this%total_active_dofs > 0) then
-       allocate(M_linear(this%total_active_dofs, this%total_active_dofs))
-       allocate(B_linear(this%total_active_dofs))
-       allocate(X_prev(this%total_active_dofs))
-
-       ! Save the linear base. Both M and B are rebuilt every pass: the
-       ! built-in nonlinear correction touches M, user terms touch both.
-       M_linear = this%M_global
-       B_linear = this%B_global
-
-       ! The loop always runs to convergence. When nothing depends on
-       ! X_sol, pass 2 reproduces pass 1 (linsolve_dense is
-       ! deterministic), the residual is exactly zero, and the result is
-       ! identical to a single solve. X_sol enters with the previous
-       ! step's solution as a warm start.
-       max_nr_iter = 20
        iter_verbose = this%non_linear_correction_term .or. &
             this%has_user_structural_terms
-       if (iter_verbose) then
-          call neko_log%message("  --- Fixed-point Iteration ---")
-       end if
-
-       converged = .false.
-       do nr_iter = 1, max_nr_iter
-          ! Reset to linear base
-          this%M_global = M_linear
-          this%B_global = B_linear
-
-          if (this%non_linear_correction_term) then
-             call add_fsi_non_linear_matrices(this%nbodies_fsi, &
-                  this%fsi_bodies, this%fsi_dof_map, this%M_global, &
-                  this%X_sol, this%ale%body_rot_matrices)
-          end if
-
-          call add_fsi_user_structural_terms(this%nbodies_fsi, &
-               this%fsi_bodies, this%fsi_dof_map, this%M_global, &
-               this%B_global, this%X_sol, this%ale%body_rot_matrices, &
-               time, this%gravity_vec, this%user_fsi_structural_terms)
-
-          X_prev = this%X_sol
-
-          call linsolve_dense(this%total_active_dofs, this%M_global, &
-               this%B_global, this%X_sol)
-
-          nr_residual = maxval(abs(this%X_sol - X_prev))
-
-          if (iter_verbose) then
-             write(msg, '(A, I2, A, ES13.6)') "    Iter: ", &
-                  nr_iter, " | Max Residual: ", nr_residual
-             call neko_log%message(trim(msg))
-          end if
-          if (nr_residual .lt. 1.0e-14_rp) then
-             converged = .true.
-             exit
-          end if
-       end do
-
-       if (.not. converged) then
-          write(msg, '(A,I0,A,I0,A,ES13.6)') &
-               "FSI structural loop did not converge at step ", time%tstep, &
-               " after ", max_nr_iter, " passes. Max residual: ", nr_residual
-          call neko_log%warning(trim(msg))
-       end if
+       call fsi_solve_structure(this%nbodies_fsi, this%fsi_bodies, &
+            this%fsi_dof_map, this%total_active_dofs, this%M_global, &
+            this%B_global, this%X_sol, this%ale%body_rot_matrices, time, &
+            this%gravity_vec, this%non_linear_correction_term, &
+            this%user_fsi_structural_terms, iter_verbose)
        if (iter_verbose) call neko_log%message(' ')
-
-       deallocate(M_linear)
-       deallocate(B_linear)
-       deallocate(X_prev)
     end if
+
+    call fluid_fsi_apply_correction(this)
+    call fluid_fsi_update_bodies(this, nadv)
+
+    ! Calculate Final Velocity (FSI + Prescribed)
+    ! This velocity will be used as the "guessed" velocity
+    ! for the next time step, and also for the ALE mesh update.
+    call this%ale%update_mesh_velocity(this%c_Xh, time, &
+         override_ids = this%batch_ids, &
+         override_trans = this%batch_trans, &
+         override_ang = this%batch_ang, &
+         out_prescribed_vels = this%temp_prescribed_vels, &
+         mode = ALE_VEL_SUPERPOSE)
+    do i = 1, this%nbodies_fsi
+       this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
+            this%temp_prescribed_vels(:, i)
+    end do
+
+    call fsi_prep_checkpoint(this%nbodies_fsi, this%fsi_bodies, &
+         this%global_disp_rel, &
+         this%global_body_vel, &
+         this%global_body_vel_lag, &
+         this%global_moving_frame_presc_vel)
+
+    call this%log_fsi_results(time)
+    call this%ale%log_pivot(time)
+    call this%ale%log_rot_angles(time)
+
+  end subroutine fluid_fsi_step
+
+  !> Solve the Green's function problem of every active DOF and add the
+  !! resulting forces to the structural system.
+  subroutine fluid_fsi_compute_greens_functions(this, time, dt_controller)
+    class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
+    type(time_state_t), intent(in) :: time
+    type(time_step_controller_t), intent(in) :: dt_controller
+    integer :: i, j, k, k_row, row_g, col_g
+    real(kind=dp) :: start_time_g, end_time_g, step_time_g
+    character(len=1000) :: msg
+
+    do j = 1, this%nbodies_fsi
+       do k = 1, 6
+          ! Solve Green's function for active DOFs only.
+          col_g = this%fsi_dof_map(j, k)
+          if (col_g == 0) cycle
+
+          ! Use the last impulse response fields for initial guess.
+          call field_copy(this%u, this%u_g(col_g))
+          call field_copy(this%v, this%v_g(col_g))
+          call field_copy(this%w, this%w_g(col_g))
+          call field_copy(this%p, this%p_g(col_g))
+
+          ! Setup Perturbation
+          this%batch_ids(1) = this%fsi_bodies(j)%ale_id
+          this%batch_trans(:,1) = 0.0_rp
+          this%batch_ang(:,1) = 0.0_rp
+
+          if (k <= 3) then
+             ! translational DOF
+             this%batch_trans(k, 1) = 1.0_rp
+          else
+             ! rotational DOF
+             this%batch_ang(k-3, 1) = 1.0_rp
+          end if
+
+          ! Mode 1: Set rigid body vels to zero, then apply impulse.
+          call this%ale%update_mesh_velocity(this%c_Xh, time, &
+               override_ids = this%batch_ids(1:1), &
+               override_trans = this%batch_trans(:,1:1), &
+               override_ang = this%batch_ang(:,1:1), &
+               mode = ALE_VEL_EXCLUSIVE)
+
+          start_time_g = MPI_WTIME()
+          call fluid_fsi_greens_solve(this, time, dt_controller, col_g)
+          end_time_g = MPI_WTIME()
+          step_time_g = end_time_g - start_time_g
+          this%total_elapsed_g = this%total_elapsed_g + step_time_g
+
+          write(msg, '(A, E15.7, A, I0, A, E15.7)') &
+               "Green's step time (s):  ", step_time_g, "  Step: ", &
+               time%tstep, "  time: ", time%t
+          call neko_log%message(trim(msg))
+          call neko_log%message(' ')
+
+          ! Save Green's function response.
+          call field_copy(this%u_g(col_g), this%u)
+          call field_copy(this%v_g(col_g), this%v)
+          call field_copy(this%w_g(col_g), this%w)
+          call field_copy(this%p_g(col_g), this%p)
+
+          ! Fill M matrix with Impulse forces/torques (F_g)
+          ! Here, we add the cross-coupling forces on all bodies, on all DOFs.
+          do i = 1, this%nbodies_fsi
+             call this%fsi_bodies(i)%force_monitor%compute_(time)
+             do k_row = 1, 6
+                row_g = this%fsi_dof_map(i, k_row)
+                if (row_g > 0) then
+                   if (k_row <= 3) then
+                      this%M_global(row_g, col_g) = &
+                           this%M_global(row_g, col_g) - &
+                           this%fsi_bodies(i)%&
+                           force_monitor%total_force(k_row)
+                   else
+                      this%M_global(row_g, col_g) = &
+                           this%M_global(row_g, col_g) - &
+                           this%fsi_bodies(i)%&
+                           force_monitor%total_torque(k_row-3)
+                   end if
+                end if
+             end do
+          end do
+       end do
+    end do
+  end subroutine fluid_fsi_compute_greens_functions
+
+  !> Restore the standard solution and, for strong coupling, add the
+  !! Green's function correction: u = u_s + sum( X_sol(k) * u_g(k) ).
+  subroutine fluid_fsi_apply_correction(this)
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
+    integer :: n, idx_g
+
+    n = this%dm_Xh%size()
 
     ! Restore standard fields (this is the final state for weak coupling)
     call field_copy(this%u, this%u_s)
@@ -551,8 +511,15 @@ contains
           end do
        end if
     end if
+  end subroutine fluid_fsi_apply_correction
 
-    ! Structure Update
+  !> Update the body velocities with the structural solution and shift
+  !! their history.
+  subroutine fluid_fsi_update_bodies(this, nadv)
+    class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
+    integer, intent(in) :: nadv
+    integer :: i, k, row_g
+
     do i = 1, this%nbodies_fsi
        do k = 1, 6
           row_g = this%fsi_dof_map(i, k)
@@ -576,32 +543,7 @@ contains
        this%batch_trans(:, i) = this%fsi_bodies(i)%body_vel(1:3)
        this%batch_ang(:, i) = this%fsi_bodies(i)%body_vel(4:6)
     end do
-
-    ! Calculate Final Velocity (FSI + Prescribed)
-    ! This velocity will be used as the "guessed" velocity
-    ! for the next time step, and also for the ALE mesh update.
-    call this%ale%update_mesh_velocity(this%c_Xh, time, &
-          override_ids = this%batch_ids, &
-          override_trans = this%batch_trans, &
-          override_ang = this%batch_ang,&
-          out_prescribed_vels = this%temp_prescribed_vels, &
-          mode = 0)
-    do i = 1, this%nbodies_fsi
-       this%fsi_bodies(i)%moving_frame_presc_vel(:, 0) = &
-            this%temp_prescribed_vels(:, i)
-    end do
-
-    call fsi_prep_checkpoint(this%nbodies_fsi, this%fsi_bodies, &
-              this%global_disp_rel, &
-              this%global_body_vel, &
-              this%global_body_vel_lag, &
-              this%global_moving_frame_presc_vel)
-
-    call this%log_fsi_results(time)
-    call this%ale%log_pivot(time)
-    call this%ale%log_rot_angles(time)
-
-  end subroutine fluid_fsi_step
+  end subroutine fluid_fsi_update_bodies
 
   !> Solve the Green's function problem of one active DOF.
   subroutine fluid_fsi_greens_solve(this, time, dt_controller, col_g)
@@ -648,7 +590,7 @@ contains
     b => null()
 
     call this%bcs_vel_green%apply_vector(this%u%x, this%v%x, this%w%x, &
-         this%dm_Xh%size(), time, strong=.true.)
+         this%dm_Xh%size(), time, strong = .true.)
 
     call rotate_cyc(this%u, this%v, this%w, 1, this%c_Xh)
     call this%gs_Xh%op(this%u, GS_OP_MIN, glb_cmd_event)
@@ -660,7 +602,7 @@ contains
     call rotate_cyc(this%u, this%v, this%w, 0, this%c_Xh)
 
     call this%bcs_vel_green%apply_vector(this%u%x, this%v%x, this%w%x, &
-         this%dm_Xh%size(), time, strong=.true.)
+         this%dm_Xh%size(), time, strong = .true.)
 
     call rotate_cyc(this%u%x, this%v%x, this%w%x, 1, this%c_Xh)
     call this%gs_Xh%op(this%u, GS_OP_MAX, glb_cmd_event)
@@ -746,7 +688,7 @@ contains
        if (orig%is_moving) then
           allocate(no_slip_t :: bc_green)
           ! We must verify if no_slip needs init via JSON or manual components
-          select type(n => bc_green)
+          select type (n => bc_green)
           type is (no_slip_t)
              call n%zero_dirichlet_t%init_from_components(this%c_Xh)
              n%is_moving = .true.
@@ -777,7 +719,7 @@ contains
        ! resolved_msk and would silently apply nothing.
     type is (symmetry_aligned_t)
        allocate(symmetry_aligned_t :: bc_green)
-       select type(s => bc_green)
+       select type (s => bc_green)
        type is (symmetry_aligned_t)
           call s%init_from_components(this%c_Xh)
        end select
@@ -828,7 +770,7 @@ contains
 
     if (bc_i%bc_type .eq. BC_DIRICHLET) then
        allocate(zero_dirichlet_t :: bc_p_green)
-       select type(z => bc_p_green)
+       select type (z => bc_p_green)
        type is (zero_dirichlet_t)
           call z%init_from_components(this%c_Xh)
           call z%mark_facets(bc_i%marked_facet)
@@ -839,6 +781,7 @@ contains
 
   end subroutine fluid_fsi_green_prs_bc
 
+  !> Destructor.
   subroutine fluid_fsi_free(this)
     class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
     class(bc_t), pointer :: bc
@@ -903,15 +846,14 @@ contains
 
   end subroutine fluid_fsi_free
 
+  !> Get the prescribed velocity of the moving frame of each body and
+  !! compute its acceleration.
   subroutine fluid_fsi_query_frame_prescribed_motion(this, time, beta, nadv)
     class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
     real(kind=rp), intent(in) :: beta(0:3)
-    real(kind=rp) :: gamma
     integer, intent(in) :: nadv
     integer :: i, k
-
-    gamma = beta(0) / time%dt
 
     ! Shift history back
     ! index 0 is the current time prescribed velocity, 1-3 are the history.
@@ -930,7 +872,7 @@ contains
     call this%ale%update_mesh_velocity(this%c_Xh, time, &
          override_ids = this%batch_ids, &
          out_prescribed_vels = this%temp_prescribed_vels, &
-         mode = 2)
+         mode = ALE_VEL_QUERY)
 
     ! current velocity of the moving frame
     do i = 1, this%nbodies_fsi
@@ -943,23 +885,24 @@ contains
        do k = 0, nadv
           this%fsi_bodies(i)%moving_frame_presc_acc = &
                this%fsi_bodies(i)%moving_frame_presc_acc + &
-               (beta(k) * this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
+               (beta(k) * &
+               this%fsi_bodies(i)%moving_frame_presc_vel(:, k)) / time%dt
        end do
     end do
   end subroutine fluid_fsi_query_frame_prescribed_motion
 
+  !> Assemble the structural and inertial terms of the FSI system.
   subroutine assemble_fsi_structural_inertial_terms(this, time, beta, nadv)
     class(fluid_pnpn_fsi_greens_t), intent(inout) :: this
     type(time_state_t), intent(in) :: time
     real(kind=rp), intent(in) :: beta(0:3)
-    real(kind=rp) :: gamma
     integer, intent(in) :: nadv
-    integer :: i, k
+    real(kind=rp) :: gamma
 
     gamma = beta(0) / time%dt
 
     ! Here we fill the M_global and B_global
-    ! using the contributuon from strucutre and also
+    ! using the contribution from structure and also
     ! bodies' inertial motion from previous time steps.
     call assemble_structural_inertial_terms(this%nbodies_fsi, &
          this%fsi_bodies, &
@@ -970,6 +913,7 @@ contains
 
   end subroutine assemble_fsi_structural_inertial_terms
 
+  !> Log the state of the FSI bodies.
   subroutine fluid_fsi_log_results(this, time)
     class(fluid_pnpn_fsi_greens_t), intent(in) :: this
     type(time_state_t), intent(in) :: time
@@ -988,7 +932,8 @@ contains
        fmt_res = '(A, I0, A, ES17.10, A, A, A, 3(ES17.10, :, 2X))'
     end if
 
-    call neko_log%message("variable, time step, time, body, x_val, y_val, z_val")
+    call neko_log%message("variable, time step, time, body, x_val, " // &
+         "y_val, z_val")
 
     do i = 1, this%nbodies_fsi
        ! Correction Coefficients (X_sol) for this body
@@ -1048,6 +993,7 @@ contains
 
   end subroutine fluid_fsi_log_results
 
+  !> Restart from a previous solution.
   subroutine fluid_fsi_restart(this, chkp)
     class(fluid_pnpn_fsi_greens_t), target, intent(inout) :: this
     type(chkp_t), intent(inout) :: chkp
@@ -1083,7 +1029,7 @@ contains
             override_ids = this%batch_ids, &
             override_trans = this%batch_trans, &
             override_ang = this%batch_ang, &
-            mode = 0)
+            mode = ALE_VEL_SUPERPOSE)
     end if
   end subroutine fluid_fsi_restart
 

@@ -30,7 +30,7 @@
 ! ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 ! POSSIBILITY OF SUCH DAMAGE.
 !
-! > Abstract interface for ALE mesh-position integration schemes.
+!> Abstract interface for ALE mesh-position integration schemes.
 module ale_scheme
   use num_types, only : rp
   use coefs, only : coef_t
@@ -51,7 +51,7 @@ module ale_scheme
      procedure(ale_6dof_intf), pass(this), deferred :: integrate_6dof
      !> Update the mesh-velocity lag history.
      procedure(ale_commit_intf), pass(this), deferred :: commit_history
-     !> .true. for BDF (implicit), .false. for AB (explicit).
+     !> .true. for the implicit schemes (BDF, CN), .false. for AB.
      procedure(ale_flag_intf), pass(this), deferred :: is_implicit
   end type ale_scheme_t
 
@@ -63,8 +63,8 @@ module ale_scheme
      !> Implicit (CN): uses `mesh_*_lag(1)` (= x^n) + `wm_*_prev` (= wm^n)
      !>   + `time%dt`, i.e. x^{n+1} = x^n + (dt/2)(wm^{n+1} + wm^n).
      subroutine ale_reposition_intf(this, c_Xh, wm_x, wm_y, wm_z, time, nadv, &
-          wm_x_lag, wm_y_lag, wm_z_lag, mesh_x_lag, mesh_y_lag, mesh_z_lag, beta, &
-          wm_x_prev, wm_y_prev, wm_z_prev)
+          wm_x_lag, wm_y_lag, wm_z_lag, mesh_x_lag, mesh_y_lag, mesh_z_lag, &
+          beta, wm_x_prev, wm_y_prev, wm_z_prev)
        import :: ale_scheme_t, coef_t, field_t, field_series_t, time_state_t, rp
        class(ale_scheme_t), intent(inout) :: this
        type(coef_t), intent(inout) :: c_Xh
@@ -72,7 +72,8 @@ module ale_scheme
        type(time_state_t), intent(in) :: time
        integer, intent(in) :: nadv
        !> Mesh-velocity lags for the AB scheme.
-       type(field_series_t), intent(in), optional :: wm_x_lag, wm_y_lag, wm_z_lag
+       type(field_series_t), intent(in), optional :: wm_x_lag, wm_y_lag, &
+            wm_z_lag
        !> Mesh-coordinate lags for the BDF/CN schemes (CN uses lag 1 only).
        type(field_t), intent(in), optional :: mesh_x_lag(:), mesh_y_lag(:), &
             mesh_z_lag(:)
@@ -88,8 +89,8 @@ module ale_scheme
      !>   pos_bdf = (dt*vel - sum_j beta(j)*hist(:,j)) / beta(0).
      !> Implicit (CN) path uses `hist(:,1)` (= pos^n) + `vel_prev` (= vel^n):
      !>   pos_cn = pos^n + (dt/2)(vel + vel^n).
-     subroutine ale_point_intf(this, pos, vel, time, nadv, vel_lag, beta, hist, &
-          vel_prev)
+     subroutine ale_point_intf(this, pos, vel, time, nadv, vel_lag, beta, &
+          hist, vel_prev)
        import :: ale_scheme_t, time_state_t, rp
        class(ale_scheme_t), intent(inout) :: this
        real(kind=rp), intent(inout) :: pos(3)
@@ -135,7 +136,7 @@ module ale_scheme
        type(field_series_t), intent(inout) :: wm_x_lag, wm_y_lag, wm_z_lag
      end subroutine ale_commit_intf
 
-     !> is_implicit:  .true. for BDF, .false. for AB.
+     !> is_implicit: .true. for BDF and CN, .false. for AB.
      pure function ale_flag_intf(this) result(implicit_scheme)
        import :: ale_scheme_t
        class(ale_scheme_t), intent(in) :: this

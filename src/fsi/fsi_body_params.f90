@@ -50,7 +50,7 @@ module fsi_body_params
      real(kind=rp) :: mass_disp = 0.0_rp
      !> Reference point of inertia (FSI_INERTIA_ABOUT_PIVOT/_COM).
      integer :: inertia_ref = FSI_INERTIA_ABOUT_PIVOT
-     !> Mass moment of inertia tensor, body frame, 
+     !> Mass moment of inertia tensor, body frame,
      !! about the point declared by inertia_ref.
      real(kind=rp) :: inertia(3, 3) = 0.0_rp
      !> Pivot -> center of mass, body frame.
@@ -156,7 +156,7 @@ contains
           asym = abs(prm%inertia(i, j) - prm%inertia(j, i))
           if (asym .gt. tol) then
              write(msg, '(A,I0,A,I0,A,ES16.9,A,I0,A,I0,A,ES16.9,A,ES16.9,A,&
-                  &ES16.9)') &
+             &ES16.9)') &
                   "': inertia tensor must be symmetric: I(", i, ",", j, &
                   ") = ", prm%inertia(i, j), ", I(", j, ",", i, ") = ", &
                   prm%inertia(j, i), ", difference = ", asym, &

@@ -221,7 +221,7 @@ module user_intf
   !! @param body_vel Body velocity [u, v, w, wx, wy, wz] (read-only).
   !! @param prm The body parameters to be modified.
   abstract interface
-     subroutine user_fsi_body_params_intf(body_name, body_id, time, &
+     subroutine user_fsi_structural_parameters_intf(body_name, body_id, time, &
           rot_mat, disp_rel, body_vel, prm)
        import rp, time_state_t, fsi_body_params_t
        character(len=*), intent(in) :: body_name
@@ -231,7 +231,7 @@ module user_intf
        real(kind=rp), intent(in) :: disp_rel(6)
        real(kind=rp), intent(in) :: body_vel(6)
        type(fsi_body_params_t), intent(inout) :: prm
-     end subroutine user_fsi_body_params_intf
+     end subroutine user_fsi_structural_parameters_intf
   end interface
 
   !> Abstract interface for user-defined structural equation terms on an
@@ -279,7 +279,6 @@ module user_intf
        real(kind=rp), intent(inout) :: dforce_dacc(6, 6)
      end subroutine user_fsi_structural_terms_intf
   end interface
-
 
   !> A type collecting all the overridable user routines and flag to suppress
   !! type injection from custom modules.
@@ -334,7 +333,7 @@ module user_intf
           ale_rigid_kinematics => null()
      !> User routine to modify FSI body structural parameters (mass,
      !! inertia, COM offset, springs, dampers, ...).
-     procedure(user_fsi_body_params_intf), nopass, pointer :: &
+     procedure(user_fsi_structural_parameters_intf), nopass, pointer :: &
           fsi_structural_parameters => null()
      !> User routine to add structural equation terms to an FSI body.
      procedure(user_fsi_structural_terms_intf), nopass, pointer :: &
@@ -365,7 +364,7 @@ module user_intf
        dummy_user_ale_mesh_velocity, dummy_user_ale_base_shapes, &
        dummy_user_ale_rigid_kinematics, morph_overset_interface, &
        user_wall_sampling_gll_intf, user_wall_sampling_distance_intf, &
-       user_fsi_body_params_intf, dummy_fsi_structural_parameters, &
+       user_fsi_structural_parameters_intf, dummy_fsi_structural_parameters, &
        user_fsi_structural_terms_intf, dummy_fsi_structural_terms
 contains
 

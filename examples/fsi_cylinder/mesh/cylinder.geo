@@ -10,7 +10,7 @@
 
 
 
-meshDim=3;  
+meshDim=3;
 
 //  ----Nxll---|----Nxc---|----Nxlr---|-----------------Nxw--------------|
 //  |          |          |           |                                  |
@@ -28,7 +28,7 @@ meshDim=3;
 
 
 // NOTE: Number of elemenets = number of points-1
-// 
+//
 Nxc  = 6;      Rxc  = 1.00;   // Progression ratio towards right (elements clustered on right side of Nxc box if Rxc<0)
 Nxw  = 6;      Rxw  = 1.15;   // Progression ratio towards right  (elements clustered on right side of Nxw box if Rxw<0)
 Nxlr =  6;      Rxlr = 1.15;    // Progression ratio towards right (elements clustered on right side of Nxlr box if Rxlr<0)
@@ -50,7 +50,7 @@ xc = 4;
 yc = 4;
 R  = 0.5; D = 1;
 // Cylinder xr=yr= R*sqrt(2)/2
-xr = 0.35355339; yr = 0.35355339;  
+xr = 0.35355339; yr = 0.35355339;
 // External box
 xe = 15.0;
 ye = 20;
@@ -263,9 +263,9 @@ If (meshDim==3)
 
 
    Extrude {0, 0, Lz} {
-     Surface{1:15}; 
+     Surface{1:15};
      Layers{Nz};
-     Recombine; 
+     Recombine;
    }
    Color Black{Surface{:};}
    Color Black{Volume{:};}

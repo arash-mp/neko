@@ -37,7 +37,7 @@ contains
     type(fsi_body_params_t), intent(inout) :: prm
 
     if (trim(body_name) .ne. fsi_body) return
-    
+
     ! Mass and displaced (buoyancy) mass.
     prm%mass = cyl_mass
     prm%mass_disp = cyl_mass_disp
