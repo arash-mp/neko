@@ -70,11 +70,14 @@ module fluid_stats_output
 contains
 
   !> Constructor.
-  subroutine fluid_stats_output_init(this, stats, T_begin, hom_dir, name, path)
+  !! @param precision Precision of the fld output (sp or dp).
+  subroutine fluid_stats_output_init(this, stats, T_begin, hom_dir, &
+       precision, name, path)
     class(fluid_stats_output_t), intent(inout) :: this
     type(fluid_stats_t), intent(inout), target :: stats
     real(kind=dp), intent(in) :: T_begin
     character(len=*), intent(in) :: hom_dir
+    integer, intent(in) :: precision
     character(len=*), intent(in), optional :: name
     character(len=*), intent(in), optional :: path
     character(len=1024) :: fname
@@ -123,6 +126,7 @@ contains
        ft%skip_pressure = .false.
        ft%skip_velocity = .false.
        ft%skip_temperature = .false.
+       call ft%set_precision(precision)
     end select
 
     this%stats => stats

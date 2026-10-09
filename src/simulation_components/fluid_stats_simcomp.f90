@@ -41,9 +41,11 @@ module fluid_stats_simcomp
   use field, only : field_t
   use fluid_stats, only : fluid_stats_t
   use fluid_stats_output, only : fluid_stats_output_t
+  use fld_file, only : fld_file_t
   use case, only : case_t
   use coefs, only : coef_t
-  use utils, only : NEKO_FNAME_LEN, filename_suffix, NEKO_VARNAME_LEN
+  use utils, only : NEKO_FNAME_LEN, filename_suffix, NEKO_VARNAME_LEN, &
+       neko_error
   use logger, only : LOG_SIZE, neko_log
   use json_utils, only : json_get, json_get_or_default, &
        json_get_or_lookup_or_default
@@ -70,6 +72,8 @@ module fluid_stats_simcomp
      !> Time value at which the sampling of statistics is initiated.
      real(kind=dp) :: start_time
      real(kind=dp) :: time
+     !> Precision of the fld output (sp or dp).
+     integer :: output_precision
      !> Output filename stem without the run counter.
      character(len=:), allocatable :: base_filename
 
@@ -103,6 +107,8 @@ contains
     character(len=:), allocatable :: hom_dir
     character(len=:), allocatable :: stat_set
     character(len=:), allocatable :: name
+    character(len=:), allocatable :: precision_name
+    integer :: precision
     real(kind=dp) :: start_time
     type(field_t), pointer :: u, v, w, p
     type(coef_t), pointer :: coef
@@ -115,7 +121,17 @@ contains
          start_time, 0.0_dp)
     call json_get_or_default(json, 'set_of_stats', &
          stat_set, 'full')
+    call json_get_or_default(json, 'output_precision', &
+         precision_name, 'single')
 
+    if (precision_name .eq. 'single') then
+       precision = sp
+    else if (precision_name .eq. 'double') then
+       precision = dp
+    else
+       call neko_error('Invalid output_precision for fluid_stats: ' // &
+            trim(precision_name))
+    end if
 
     u => neko_registry%get_field("u")
     v => neko_registry%get_field("v")
@@ -127,10 +143,10 @@ contains
     if (json%valid_path("output_filename")) then
        call json_get(json, "output_filename", filename)
        call fluid_stats_simcomp_init_from_components(this, name, u, v, w, p, &
-            coef, start_time, hom_dir, stat_set, filename)
+            coef, start_time, hom_dir, stat_set, precision, filename)
     else
        call fluid_stats_simcomp_init_from_components(this, name, u, v, w, p, &
-            coef, start_time, hom_dir, stat_set)
+            coef, start_time, hom_dir, stat_set, precision)
     end if
 
     nullify(u, v, w, p, coef)
@@ -146,9 +162,10 @@ contains
   !! @param start_time time to start sampling stats
   !! @param hom_dir directions to average in
   !! @param stat_set Set of statistics to compute (basic/full)
+  !! @param precision Precision of the fld output (sp or dp)
   !! @param fname name of the output file
   subroutine fluid_stats_simcomp_init_from_components(this, name, u, v, w, p, &
-       coef, start_time, hom_dir, stat_set, fname)
+       coef, start_time, hom_dir, stat_set, precision, fname)
     class(fluid_stats_simcomp_t), target, intent(inout) :: this
     character(len=*), intent(in) :: name
     character(len=*), intent(in) :: hom_dir
@@ -156,6 +173,7 @@ contains
     real(kind=dp), intent(in) :: start_time
     type(field_t), intent(in), target :: u, v, w, p
     type(coef_t), intent(in), target :: coef
+    integer, intent(in) :: precision
     character(len=*), intent(in), optional :: fname
     character(len=NEKO_FNAME_LEN) :: stats_fname
     character(len=LOG_SIZE) :: log_buf
@@ -174,6 +192,7 @@ contains
     this%name = name
     this%start_time = start_time
     this%time = start_time
+    this%output_precision = precision
     if (present(fname)) then
        this%base_filename = fname
     else
@@ -182,8 +201,8 @@ contains
     stats_fname = trim(this%base_filename) // "0"
 
     call this%stats_output%init(this%stats, this%start_time, &
-         hom_dir = hom_dir, name = stats_fname, &
-         path = this%case%output_directory)
+         hom_dir = hom_dir, precision = this%output_precision, &
+         name = stats_fname, path = this%case%output_directory)
 
     ! Statistics are averaged over the interval between two writes, so
     ! writing at the very start of the averaging would only produce an
@@ -223,6 +242,12 @@ contains
     fname = trim(this%case%output_directory) // &
          trim(this%base_filename) // trim(prefix) // "." // trim(suffix)
     call this%stats_output%init_base(fname)
+
+    ! init_base creates a new file object, so the precision is set again.
+    select type (ft => this%stats_output%file_%file_type)
+    type is (fld_file_t)
+       call ft%set_precision(this%output_precision)
+    end select
 
   end subroutine fluid_stats_simcomp_restart
 
