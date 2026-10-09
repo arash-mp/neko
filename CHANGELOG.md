@@ -11,6 +11,7 @@
 
 ## Develop
 
+- Add `output_precision` to `fluid_stats` and `user_stats` simcomps.
 - *BREAKING* User initial conditions are no longer copied from the host to the
   device after the user routine, so on GPUs the routine must leave the values in
   the device arrays itself, e.g. with `device_memcpy`.
