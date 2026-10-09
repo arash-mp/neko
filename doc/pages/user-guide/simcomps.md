@@ -815,7 +815,9 @@ keywords:
   `yz`. Averaging across two directions will lead to the average being saved as
   a .csv, whereas a 2D .fld file will be produced when averaging across only one
   axis. The base filename is controlled by the `output_filename` keyword and
-  defaults to `user_stats`. The run and per-run counters follow the convention
+  defaults to `user_stats`. The precision of the .fld output is controlled by
+  the `output_precision` keyword, `single` or `double`, and defaults to
+  `single`. The run and per-run counters follow the convention
   in the [statistics guide](@ref statistics-guide). We encourage reading that
   guide for further details regarding how statistics are computed in Neko.
 
