@@ -41,13 +41,15 @@ module user_stats
   use field, only : field_t
   use case, only : case_t
   use mean_field_output, only : mean_field_output_t
+  use fld_file, only : fld_file_t
   use json_utils, only : json_get, json_get_or_default, &
        json_get_or_lookup_or_default
   use mean_field, only : mean_field_t
   use coefs, only : coef_t
   use time_state, only : time_state_t
   use time_based_controller, only : time_based_controller_t
-  use utils, only : NEKO_FNAME_LEN, filename_suffix, NEKO_VARNAME_LEN
+  use utils, only : NEKO_FNAME_LEN, filename_suffix, NEKO_VARNAME_LEN, &
+       neko_error
   implicit none
   private
 
@@ -67,6 +69,8 @@ module user_stats
      character(len=NEKO_VARNAME_LEN), allocatable :: field_names(:)
      !> Output writer.
      type(mean_field_output_t), private :: output
+     !> Precision of the fld output (sp or dp).
+     integer :: output_precision
      !> Output filename stem without the run counter.
      character(len=:), allocatable :: base_filename
 
@@ -104,6 +108,8 @@ contains
     character(len=:), allocatable :: filename
     character(len=:), allocatable :: avg_dir
     character(len=:), allocatable :: name
+    character(len=:), allocatable :: precision_name
+    integer :: precision
 
     call json_get_or_default(json, "name", name, "user_stats")
     call this%init_base(json, case)
@@ -114,14 +120,26 @@ contains
     call json_get_or_lookup_or_default(json, 'start_time', this%start_time, &
          0.0_dp)
     call json_get_or_default(json, 'avg_direction', avg_dir, 'none')
+    call json_get_or_default(json, 'output_precision', precision_name, &
+         'single')
+
+    if (precision_name .eq. 'single') then
+       precision = sp
+    else if (precision_name .eq. 'double') then
+       precision = dp
+    else
+       call neko_error('Invalid output_precision for user_stats: ' // &
+            trim(precision_name))
+    end if
 
     if (json%valid_path('output_filename')) then
        call json_get(json, 'output_filename', filename)
        call user_stats_init_common(this, name, this%start_time, &
-            case%fluid%c_Xh, avg_dir, filename = filename)
+            case%fluid%c_Xh, avg_dir, filename = filename, &
+            precision = precision)
     else
        call user_stats_init_common(this, name, this%start_time, &
-            case%fluid%c_Xh, avg_dir)
+            case%fluid%c_Xh, avg_dir, precision = precision)
     end if
 
   end subroutine user_stats_init_from_json
@@ -143,6 +161,12 @@ contains
     fname = trim(this%case%output_directory) // &
          trim(this%base_filename) // trim(prefix) // "." // trim(suffix)
     call this%output%init_base(fname)
+
+    ! init_base creates a new file object, so the precision is set again.
+    select type (ft => this%output%file_%file_type)
+    type is (fld_file_t)
+       call ft%set_precision(this%output_precision)
+    end select
 
   end subroutine user_stats_restart
 
@@ -252,6 +276,12 @@ contains
     this%start_time = start_time
     this%time = start_time
 
+    if (present(precision)) then
+       this%output_precision = precision
+    else
+       this%output_precision = sp
+    end if
+
     if (present(filename)) then
        this%base_filename = filename
     else
@@ -268,7 +298,8 @@ contains
     end do
 
     call this%output%init(this%mean_fields, this%n_avg_fields, &
-         this%start_time, coef, avg_dir, name = stats_fname, &
+         this%start_time, coef, avg_dir, &
+         precision = this%output_precision, name = stats_fname, &
          path = this%case%output_directory)
     ! Statistics are averaged over the interval between two writes, so
     ! writing at the very start of the averaging would only produce an

@@ -84,6 +84,7 @@ Statistics are enabled in the case file as a simcomp with the added argument
 | `set_of_stats`    | What set of stats to compute.                                                                                         | basic, full          | full                                     |
 | `compute_value`   | Interval, in timesteps or simulationtime, depending on compute\_control, for sampling the flow fields for statistics. | Positive real or int | - (recommended every 50 timesteps or so) |
 | `output_filename` | User-specified base filename for the output.                                                                           | filename             | `fluid_stats`                            |
+| `output_precision`| Precision of the `.fld` output. Has no effect on `.csv` output.                                                       | single, double       | single                                   |
 
 The run and per-run counters are appended according to
 @ref statistics-output-filenames.

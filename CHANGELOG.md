@@ -19,6 +19,7 @@
 - Improved the performance of the AABB tree and the AABB element/process
   finders: Morton-ordered bottom-up build, exact node-pool capacity, and a
   bulk tree build instead of per-element insertion.
+- Add `output_precision` to `fluid_stats` and `user_stats` simcomps.
 - Fixed the scalar debug log computing its norms from stale host arrays on
   GPUs and running its global reductions every step at any log level.
 - *BREAKING* User initial conditions are no longer copied from the host to the

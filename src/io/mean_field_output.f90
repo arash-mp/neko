@@ -81,15 +81,17 @@ contains
   !! @param SEM coefficients.
   !! @param avg_dir Direction(s) to average in. Either 'none', 'x', 'y', 'z',
   !! 'xy', 'xz', 'yz'.
+  !! @param precision Precision of the fld output (sp or dp).
   !! @param name Name of the output file.
   !! @param path Path to the output file.
   subroutine mean_field_output_init(this, mean_fields, n_fields, start_time, &
-       coef, avg_dir, name, path)
+       coef, avg_dir, precision, name, path)
     class(mean_field_output_t), intent(inout):: this
     integer, intent(in) :: n_fields
     type(mean_field_t), intent(inout), target :: mean_fields(n_fields)
     type(coef_t), intent(inout) :: coef
     character(len=*), intent(in) :: avg_dir
+    integer, intent(in) :: precision
     character(len=*), intent(in), optional :: name
     character(len=*), intent(in), optional :: path
     real(kind=dp), intent(in) :: start_time
@@ -141,6 +143,7 @@ contains
        ft%skip_pressure = .false.
        ft%skip_velocity = .false.
        ft%skip_temperature = .false.
+       call ft%set_precision(precision)
     end select
 
     call this%fields%init(n_fields)

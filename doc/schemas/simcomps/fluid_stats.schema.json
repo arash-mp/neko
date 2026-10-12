@@ -24,6 +24,13 @@
             },
             "output_filename": {
               "$ref": "urn:neko:schema:simulation-components#/$defs/nonEmptyString"
+            },
+            "output_precision": {
+              "type": "string",
+              "enum": [
+                "single",
+                "double"
+              ]
             }
           },
           "additionalProperties": true
