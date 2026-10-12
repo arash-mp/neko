@@ -23,6 +23,7 @@ test-suite.log
 !templates/parallel/parallel_test
 !tensor3/tensor3_test
 !tensor4/tensor4_test
+!fst_spectrum/fst_spectrum_test
 !vector/vector_test
 !vtkhdf/vtkhdf_test
 !restart_consistency/restart_consistency_test

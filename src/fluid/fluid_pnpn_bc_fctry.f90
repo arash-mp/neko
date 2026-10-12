@@ -50,6 +50,7 @@ submodule(fluid_pnpn) fluid_pnpn_bc_fctry
   use blasius, only : blasius_t
   use dirichlet, only : dirichlet_t
   use dong_outflow, only : dong_outflow_t
+  use fst_inflow, only : fst_inflow_wrap
   use symmetry_aligned, only : symmetry_aligned_t
   use symmetry, only : symmetry_t
   use non_normal_aligned, only : non_normal_aligned_t
@@ -79,7 +80,7 @@ submodule(fluid_pnpn) fluid_pnpn_bc_fctry
   !! To add a new one, append a row with the type name, the velocity condition
   !! type and the pressure condition type. When Neumann is zero valued
   !! it amounts to do nothing, and is encoded as "".
-  type(fluid_pnpn_bc_preset_t), parameter :: FLUID_PNPN_BC_PRESETS(17) = [ &
+  type(fluid_pnpn_bc_preset_t), parameter :: FLUID_PNPN_BC_PRESETS(21) = [ &
        fluid_pnpn_bc_preset_t("symmetry", "symmetry", ""), &
        fluid_pnpn_bc_preset_t("velocity_value", "dirichlet", ""), &
        fluid_pnpn_bc_preset_t("expression_velocity", "expression", ""), &
@@ -99,10 +100,16 @@ submodule(fluid_pnpn) fluid_pnpn_bc_fctry
        fluid_pnpn_bc_preset_t("blasius_profile", "blasius_profile", ""), &
        fluid_pnpn_bc_preset_t("wall_model", "wall_model", ""), &
        fluid_pnpn_bc_preset_t("overset_interface", "overset_interface", &
-       "overset_interface")]
+       "overset_interface"), &
+       fluid_pnpn_bc_preset_t("velocity_value+fst", "dirichlet+fst", ""), &
+       fluid_pnpn_bc_preset_t("expression_velocity+fst", "expression+fst", &
+       ""), &
+       fluid_pnpn_bc_preset_t("blasius_profile+fst", "blasius_profile+fst", &
+       ""), &
+       fluid_pnpn_bc_preset_t("user_velocity+fst", "user_dirichlet+fst", "")]
 
   !> The built-in velocity boundary condition types.
-  character(len=25), parameter :: FLUID_PNPN_VELOCITY_BCS(11) = [ &
+  character(len=25), parameter :: FLUID_PNPN_VELOCITY_BCS(15) = [ &
        character(len=25) :: &
        "dirichlet", &
        "expression", &
@@ -114,7 +121,11 @@ submodule(fluid_pnpn) fluid_pnpn_bc_fctry
        "wall_model", &
        "blasius_profile", &
        "user_dirichlet", &
-       "overset_interface"]
+       "overset_interface", &
+       "dirichlet+fst", &
+       "expression+fst", &
+       "blasius_profile+fst", &
+       "user_dirichlet+fst"]
 
   !> The built-in pressure boundary condition types.
   character(len=25), parameter :: FLUID_PNPN_PRESSURE_BCS(7) = [ &
@@ -535,6 +546,8 @@ contains
     integer, allocatable :: zone_indices(:)
     character(len=:), allocatable :: default_name
     character(len=:), allocatable :: bc_name
+    character(len=:), allocatable :: base_type
+    logical :: add_fst
     character(len=64) :: buf
     integer :: var_type, n_children
 
@@ -558,10 +571,21 @@ contains
        end if
     end if
 
-    call fluid_pnpn_velocity_bc_allocator(object, type, &
+    ! "<inflow>+fst": the inflow is built as usual and then becomes the base
+    ! of an fst inflow
+    add_fst = .false.
+    base_type = trim(type)
+    select case (trim(type))
+    case ("dirichlet+fst", "expression+fst", "blasius_profile+fst", &
+         "user_dirichlet+fst")
+       add_fst = .true.
+       base_type = type(1:len_trim(type) - len("+fst"))
+    end select
+
+    call fluid_pnpn_velocity_bc_allocator(object, base_type, &
          scheme%full_stress_formulation)
 
-    select case (trim(type))
+    select case (base_type)
     case ("wall_model")
        ! Kind of hack, but  OK for now
        call json%add("scheme_name", scheme%name)
@@ -582,6 +606,8 @@ contains
        end select
     end select
 
+    if (add_fst) call fst_inflow_wrap(object)
+
     call json_get_or_lookup(json, "zone_indices", zone_indices)
     write(buf,'("velocity_bc_",I0)') zone_indices(1)
     default_name = trim(buf)
@@ -598,6 +624,7 @@ contains
     call object%finalize()
 
     deallocate(type)
+    deallocate(base_type)
     deallocate(zone_indices)
     deallocate(default_name)
     deallocate(bc_name)

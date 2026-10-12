@@ -614,6 +614,150 @@
       },
       "additionalProperties": false
     },
+    "fstSourceTerm": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "fst"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "zone_name": {
+          "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+        },
+        "gain": {
+          "$ref": "urn:neko:schema:common#/$defs/positiveNumberOrRef"
+        },
+        "convection_velocity": {
+          "$ref": "urn:neko:schema:common#/$defs/vector3OrRef"
+        },
+        "spectrum": {
+          "$ref": "urn:neko:schema:fst#/$defs/spectrum"
+        },
+        "fringe": {
+          "$ref": "urn:neko:schema:fst#/$defs/fringe"
+        },
+        "baseflow": {
+          "type": "object",
+          "required": [
+            "method"
+          ],
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "initial_condition",
+                "constant",
+                "field"
+              ]
+            },
+            "value": {
+              "$ref": "urn:neko:schema:common#/$defs/vector3OrRef"
+            },
+            "file_name": {
+              "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+            },
+            "mesh_file_name": {
+              "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+            },
+            "interpolate": {
+              "type": "boolean"
+            },
+            "interpolation": {
+              "type": "object",
+              "properties": {
+                "tolerance": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                },
+                "padding": {
+                  "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "method": {
+                    "const": "constant"
+                  }
+                },
+                "required": [
+                  "method"
+                ]
+              },
+              "then": {
+                "required": [
+                  "value"
+                ]
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "method": {
+                    "const": "field"
+                  }
+                },
+                "required": [
+                  "method"
+                ]
+              },
+              "then": {
+                "required": [
+                  "file_name"
+                ]
+              }
+            }
+          ],
+          "additionalProperties": false
+        },
+        "ramp_time": {
+          "$ref": "urn:neko:schema:common#/$defs/nonNegativeNumberOrRef"
+        },
+        "dump_fields": {
+          "type": "boolean"
+        },
+        "dump_file_name": {
+          "$ref": "urn:neko:schema:common#/$defs/nonEmptyString"
+        },
+        "validate_only": {
+          "type": "boolean"
+        },
+        "start_time": {
+          "$ref": "urn:neko:schema:common#/$defs/nonNegativeNumberOrRef"
+        },
+        "end_time": {
+          "$ref": "urn:neko:schema:common#/$defs/nonNegativeNumberOrRef"
+        }
+      },
+      "if": {
+        "properties": {
+          "enabled": {
+            "const": true
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "then": {
+        "required": [
+          "zone_name",
+          "gain",
+          "convection_velocity",
+          "spectrum",
+          "baseflow"
+        ]
+      },
+      "additionalProperties": false
+    },
     "fluidOnlySourceTerm": {
       "oneOf": [
         {
@@ -633,6 +777,9 @@
         },
         {
           "$ref": "#/$defs/translationSourceTerm"
+        },
+        {
+          "$ref": "#/$defs/fstSourceTerm"
         }
       ]
     },

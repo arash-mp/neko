@@ -1,0 +1,29 @@
+USEMPI=YES
+ifneq ("$(wildcard @PFUNIT_DIR@/include/PFUNIT.mk)", "")
+include @PFUNIT_DIR@/include/PFUNIT.mk
+endif
+FFLAGS += $(PFUNIT_EXTRA_FFLAGS) @NEKO_PKG_FCFLAGS@ -I@top_builddir@/src
+FC = @FC@
+
+%.o : %.F90
+	$(FC) -c $(FFLAGS) $<
+
+
+check: fst_spectrum_suite
+
+
+fst_spectrum_suite_TESTS := test_fst_spectrum.pf
+fst_spectrum_suite_OTHER_LIBRARIES = -L@top_builddir@/src/.libs -lneko @LDFLAGS@ @LIBS@
+$(eval $(call make_pfunit_test,fst_spectrum_suite))
+fst_spectrum_suite.inc: Makefile
+
+distclean:
+clean:
+	$(RM) *.o *.mod *.a  *.inc *.F90 fst_spectrum_suite
+
+
+
+all:
+html:
+install:
+distdir:

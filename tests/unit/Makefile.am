@@ -31,6 +31,7 @@ SUBDIRS = tuple\
 	  matrix\
 	  tensor3\
 	  tensor4\
+	  fst_spectrum\
 	  case_file_utils\
 	  registry\
 	  errors\
@@ -86,6 +87,7 @@ TESTS = device/device_test\
 	matrix/matrix_test\
 	tensor3/tensor3_test\
 	tensor4/tensor4_test\
+	fst_spectrum/fst_spectrum_test\
 	case_file_utils/case_file_utils_test\
 	registry/registry_test\
 	errors/errors_test\
@@ -170,6 +172,7 @@ EXTRA_DIST = \
 	matrix/test_matrix_parallel.pf\
 	tensor3/test_tensor3_parallel.pf\
 	tensor4/test_tensor4_parallel.pf\
+	fst_spectrum/test_fst_spectrum.pf\
 	case_file_utils/test_case_file_utils.pf\
 	registry/test_registry.pf\
 	registry/test_field_registry.pf\
