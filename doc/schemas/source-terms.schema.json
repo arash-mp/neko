@@ -721,6 +721,9 @@
         "ramp_time": {
           "$ref": "urn:neko:schema:common#/$defs/nonNegativeNumberOrRef"
         },
+        "time_offset": {
+          "$ref": "urn:neko:schema:common#/$defs/numberOrRef"
+        },
         "dump_fields": {
           "type": "boolean"
         },

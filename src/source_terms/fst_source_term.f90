@@ -133,7 +133,9 @@ contains
     call neko_log%section("FST SOURCE TERM")
 
     call this%ramp%init(json)
-    call this%init_base(fields, coef, this%ramp%start, this%ramp%end)
+    ! The base class compares its window with the solver time
+    call this%init_base(fields, coef, this%ramp%start - this%ramp%offset, &
+         this%ramp%end - this%ramp%offset)
 
     call json_get_or_default(json, "enabled", this%enabled, .false.)
     if (.not. this%enabled) then
@@ -339,10 +341,12 @@ contains
     type(time_state_t), intent(in) :: time
 
     type(field_t), pointer :: fu, fv, fw
-    real(kind=rp) :: ramp, coeff
+    real(kind=rp) :: ramp, coeff, t_fst
     character(len=LOG_SIZE) :: log_buf
 
     if (.not. this%enabled) return
+
+    t_fst = this%ramp%clock(real(time%t, kind=rp))
 
     if (.not. this%setup_done) then
 
@@ -397,7 +401,7 @@ contains
        end if
     end if
 
-    ramp = this%ramp%value(real(time%t, kind=rp))
+    ramp = this%ramp%value(t_fst)
     if (ramp .le. 0.0_rp) return
 
     coeff = this%gain*ramp
@@ -409,7 +413,7 @@ contains
     call fst_apply(this, this%u, this%v, this%w, fu, fv, fw, &
          this%u_bf, this%v_bf, this%w_bf, &
          this%u_bf_d, this%v_bf_d, this%w_bf_d, &
-         coeff, this%fringe%smooth, real(time%t, kind=rp))
+         coeff, this%fringe%smooth, t_fst)
 
   end subroutine fst_compute
 
@@ -421,7 +425,7 @@ contains
   !! @param u_bf_d, v_bf_d, w_bf_d The same on the device.
   !! @param coeff gain * ramp(t).
   !! @param smooth Directions with a smooth fringe, the others are flat.
-  !! @param t Time.
+  !! @param t FST clock (solver time + time_offset).
   subroutine fst_apply(this, u, v, w, fu, fv, fw, u_bf, v_bf, w_bf, &
        u_bf_d, v_bf_d, w_bf_d, coeff, smooth, t)
     class(fst_source_term_t), intent(inout) :: this
@@ -570,7 +574,7 @@ contains
     call fst_apply(this, f_zero, f_zero, f_zero, f_up, f_vp, f_wp, &
          f_zero%x, f_zero%x, f_zero%x, &
          f_zero%x_d, f_zero%x_d, f_zero%x_d, &
-         1.0_rp, flat, real(time%t, kind=rp))
+         1.0_rp, flat, this%ramp%clock(real(time%t, kind=rp)))
 
     call fout%init(sp, trim(this%dump_fname), 4)
     call fout%fields%assign_to_ptr(1, f_lam)

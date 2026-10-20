@@ -1894,12 +1894,24 @@ The zone is a regular point zone, for example
 | `fringe`                   | `"none"`, or `x`, `y`, `z` entries with `start`, `end`, `rise`, `fall` | No            | flat          |
 | `start_time`, `end_time`   | When the term is active                                              | No              | whole run     |
 | `ramp_time`                | Linear ramp after `start_time`                                       | No              | `0.0`         |
+| `time_offset`              | Added to the solver time to give the FST clock, see below            | No              | `0.0`         |
 | `validate_only`            | Print the checks, dump the fields and stop                           | No              | `false`       |
 | `dump_fields`              | Dump the fields at the first step and continue                       | No              | `false`       |
 | `dump_file_name`           | Name of the dump file                                                | No              | `"fst_fields"`|
 
 Real values have to be written with a decimal point, for example `20.0` and not
 `20`.
+
+The turbulence is convected and `start_time`, `end_time` and `ramp_time` are
+evaluated with the FST clock \f$ t_{fst} = t + \f$ `time_offset`, where
+\f$ t \f$ is the solver time. To continue the turbulence of an earlier run
+from a snapshot of it written at time \f$ T \f$, for example when the
+snapshot is used as initial condition and the solver time restarts at zero,
+set `time_offset` to \f$ T \f$ and keep the same spectrum, preferably with
+`read_from_file` pointing at the files of the earlier run. With the FST keys of
+the earlier run copied unchanged, the forcing then picks up where it stopped,
+without a new ramp. `time_offset` works the same way in the `fst` object of an
+inflow.
 
 ##### The spectrum
 
