@@ -278,7 +278,7 @@ contains
        call neko_error("(FST) The inflow needs the time state")
     end if
 
-    t = real(time%t, kind=rp)
+    t = this%ramp%clock(real(time%t, kind=rp))
     coeff = this%ramp%value(t)
     this%active = coeff .gt. 0.0_rp
 
@@ -373,7 +373,8 @@ contains
          this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, f_lam%x)
     call this%modes%fill(f_up%size(), this%msk(0), this%msk(1:), &
          this%coef%dof%x%x, this%coef%dof%y%x, this%coef%dof%z%x, &
-         f_up%x, f_vp%x, f_wp%x, this%modes%conv_vel*real(time%t, kind=rp))
+         f_up%x, f_vp%x, f_wp%x, &
+         this%modes%conv_vel*this%ramp%clock(real(time%t, kind=rp)))
 
     call f_lam%copy_from(HOST_TO_DEVICE, .false.)
     call f_up%copy_from(HOST_TO_DEVICE, .false.)

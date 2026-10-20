@@ -41,6 +41,7 @@ module fst_fringe
   use math, only : math_stepf
   use utils, only : neko_error, neko_warning
   use comm, only : pe_rank
+  use logger, only : neko_log, LOG_SIZE
   implicit none
   private
 
@@ -60,13 +61,20 @@ module fst_fringe
   end type fst_fringe_t
 
   !> Activation in time: active between start and end, ramped over ramp.
+  !! All three refer to the FST clock, t_fst = t + offset, where t is the
+  !! solver time. The same clock convects the turbulence, so a run started
+  !! from a snapshot written at time T of an earlier run continues that
+  !! run's turbulence when offset = T.
   type, public :: fst_ramp_t
      real(kind=rp) :: start = 0.0_rp
      real(kind=rp) :: end = huge(0.0_rp)
      real(kind=rp) :: ramp = 0.0_rp
+     !> Added to the solver time to give the FST clock.
+     real(kind=rp) :: offset = 0.0_rp
    contains
      procedure, pass(this) :: init => fst_ramp_init
      procedure, pass(this) :: value => fst_ramp_value
+     procedure, pass(this) :: clock => fst_ramp_clock
   end type fst_ramp_t
 
 contains
@@ -177,10 +185,11 @@ contains
 
   end subroutine fst_fringe_fill
 
-  !> Read start_time, end_time and ramp_time from `json`.
+  !> Read start_time, end_time, ramp_time and time_offset from `json`.
   subroutine fst_ramp_init(this, json)
     class(fst_ramp_t), intent(inout) :: this
     type(json_file), intent(inout) :: json
+    character(len=LOG_SIZE) :: log_buf
 
     call json_get_or_lookup_or_default(json, "start_time", this%start, &
          0.0_rp)
@@ -190,10 +199,28 @@ contains
     if (this%ramp .lt. 0.0_rp) then
        call neko_error("(FST) ramp_time must be >= 0")
     end if
+    call json_get_or_lookup_or_default(json, "time_offset", this%offset, &
+         0.0_rp)
+    if (this%offset .ne. 0.0_rp) then
+       write(log_buf, '(A,E15.7)') "[FST] time_offset (t_fst = t + offset): ", &
+            this%offset
+       call neko_log%message(log_buf)
+    end if
 
   end subroutine fst_ramp_init
 
+  !> FST clock at solver time t.
+  pure function fst_ramp_clock(this, t) result(t_fst)
+    class(fst_ramp_t), intent(in) :: this
+    real(kind=rp), intent(in) :: t
+    real(kind=rp) :: t_fst
+
+    t_fst = t + this%offset
+
+  end function fst_ramp_clock
+
   !> 0 before start and after end, rising linearly to 1 over the ramp.
+  !! @param t FST clock, see clock().
   pure function fst_ramp_value(this, t) result(r)
     class(fst_ramp_t), intent(in) :: this
     real(kind=rp), intent(in) :: t
