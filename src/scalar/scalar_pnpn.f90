@@ -60,6 +60,7 @@ module scalar_pnpn
   use scratch_registry, only : neko_scratch_registry
   use logger, only : neko_log, LOG_SIZE, NEKO_LOG_DEBUG
   use advection, only : advection_t, advection_factory
+  use adv_oifs, only : adv_oifs_t
   use profiler, only : profiler_start_region, profiler_end_region
   use json_utils, only : json_get, json_get_or_default, json_extract_item
   use json_module, only : json_file, json_core, json_value
@@ -67,9 +68,8 @@ module scalar_pnpn
   use neko_config, only : NEKO_BCKND_DEVICE
   use time_step_controller, only : time_step_controller_t
   use time_state, only : time_state_t
-  use utils, only : neko_error
+  use utils, only : neko_error, NEKO_TYPENAME_LEN
   use bc, only : bc_t, BC_DIRICHLET
-  use utils, only : NEKO_VARNAME_LEN
   use comm, only : NEKO_COMM
   use mpi_f08, only : MPI_Allreduce, MPI_INTEGER, MPI_MAX
   implicit none
@@ -193,7 +193,7 @@ module scalar_pnpn
 
   !> A name-allocator pair for user-defined scalar Pn/Pn boundary conditions.
   type scalar_pnpn_bc_allocator_entry
-     character(len=NEKO_VARNAME_LEN) :: type_name
+     character(len=NEKO_TYPENAME_LEN) :: type_name
      procedure(scalar_pnpn_bc_allocate), pointer, nopass :: allocator => null()
   end type scalar_pnpn_bc_allocator_entry
 
@@ -390,6 +390,14 @@ contains
     end do
 
     nullify(bc_i)
+
+    ! The OIFS convecting field series is not in the checkpoint, rebuild it
+    ! from the restored velocity lags of the fluid. The fluid is restarted
+    ! before the scalars, so these lags are already restored.
+    select type (adv => this%adv)
+    type is (adv_oifs_t)
+       call adv%restart()
+    end select
 
   end subroutine scalar_pnpn_restart
 
@@ -631,13 +639,12 @@ contains
                   MPI_INTEGER, MPI_MAX, NEKO_COMM, ierr)
 
              if (global_zone_size .eq. 0) then
-                write(error_msg, '(A, I0, A, A, I0, A)') &
+                write(error_msg, '(A, I0, A, A, A, I0, A)') &
                      "Zone index ", zone_indices(j), &
                      " is invalid as this zone has 0 size, meaning it ", &
                      "does not exist in the mesh. Check scalar boundary ", &
                      "condition ", i, "."
                 call neko_error(error_msg)
-                error stop
              end if
 
              if (marked_zones(zone_indices(j))) then
@@ -648,7 +655,6 @@ contains
                      "scalar and make sure that each zone index appears only ",&
                      "in a single boundary condition."
                 call neko_error(error_msg)
-                error stop
              else
                 marked_zones(zone_indices(j)) = .true.
              end if
@@ -667,7 +673,6 @@ contains
              write(error_msg, '(A, I0)') &
                   "No scalar boundary condition assigned to zone ", i
              call neko_error(error_msg)
-             error stop
           end if
        end do
     else
@@ -678,7 +683,6 @@ contains
                   "No boundary_conditions entry in the case file for scalar ", &
                   this%s%name
              call neko_error(error_msg)
-             error stop
           end if
        end do
 

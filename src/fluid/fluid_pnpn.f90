@@ -53,6 +53,7 @@ module fluid_pnpn
   use device, only : device_memcpy, HOST_TO_DEVICE, device_event_sync, &
        glb_cmd_event
   use advection, only : advection_t, advection_factory
+  use adv_oifs, only : adv_oifs_t
   use profiler, only : profiler_start_region, profiler_end_region
   use json_module, only : json_file, json_core, json_value
   use json_utils, only : json_get, json_get_or_default, json_extract_item, &
@@ -78,7 +79,7 @@ module fluid_pnpn
   use neko_config, only : NEKO_BCKND_DEVICE
   use mathops, only : opadd2cm, opcolv
   use zero_dirichlet, only : zero_dirichlet_t
-  use utils, only : neko_error, neko_type_error, NEKO_VARNAME_LEN
+  use utils, only : neko_error, neko_type_error, NEKO_TYPENAME_LEN
   use field_math, only : field_add2, field_copy
   use bc, only : bc_t, BC_DIRICHLET
   use mixed_bc, only : mixed_bc_t
@@ -326,7 +327,7 @@ module fluid_pnpn
 
   !> A name-allocator pair for user-defined fluid Pn/Pn boundary conditions.
   type fluid_pnpn_bc_allocator_entry
-     character(len=NEKO_VARNAME_LEN) :: type_name
+     character(len=NEKO_TYPENAME_LEN) :: type_name
      procedure(fluid_pnpn_bc_allocate), pointer, nopass :: allocator => null()
   end type fluid_pnpn_bc_allocator_entry
 
@@ -362,11 +363,11 @@ contains
     class(bc_t), pointer :: bc_i, vel_bc
     real(kind=rp) :: abs_tol
     character(len=LOG_SIZE) :: log_buf
-    integer :: ierr, integer_val, solver_maxiter
+    integer :: ierr, integer_val
     character(len=:), allocatable :: solver_type, precon_type
-    logical :: monitor, found
+    logical :: found
     logical :: advection
-    type(json_file) :: numerics_params, precon_params
+    type(json_file) :: numerics_params, precon_params, solver_params
     type(checkpoint_payload_t), pointer :: payload
     real(kind=dp), pointer :: tlag(:), dtlag(:)
 
@@ -505,9 +506,7 @@ contains
     ! Setup pressure solver
     call neko_log%section("Pressure solver")
 
-    call json_get_or_lookup_or_default(params, &
-         'case.fluid.pressure_solver.max_iterations', &
-         solver_maxiter, 800)
+    call json_get(params, 'case.fluid.pressure_solver', solver_params)
     call json_get(params, 'case.fluid.pressure_solver.type', solver_type)
     call json_get(params, 'case.fluid.pressure_solver.preconditioner.type', &
          precon_type)
@@ -516,15 +515,12 @@ contains
     call json_get_or_lookup(params, &
          'case.fluid.pressure_solver.absolute_tolerance', &
          abs_tol)
-    call json_get_or_default(params, 'case.fluid.pressure_solver.monitor', &
-         monitor, .false.)
     call neko_log%message('Type       : ('// trim(solver_type) // &
          ', ' // trim(precon_type) // ')')
     write(log_buf, '(A,ES13.6)') 'Abs tol    :', abs_tol
     call neko_log%message(log_buf)
 
-    call this%solver_factory(this%ksp_prs, this%dm_Xh%size(), &
-         solver_type, solver_maxiter, abs_tol, monitor)
+    call this%solver_factory(this%ksp_prs, this%dm_Xh%size(), solver_params)
     call this%precon_factory_(this%pc_prs, this%ksp_prs, &
          this%c_Xh, this%bcs_prs, &
          precon_type, precon_params)
@@ -723,6 +719,13 @@ contains
     end do
 
     nullify(bc_i)
+
+    ! The OIFS convecting field series is not in the checkpoint, rebuild it
+    ! from the restored velocity lags.
+    select type (adv => this%adv)
+    type is (adv_oifs_t)
+       call adv%restart()
+    end select
 
   end subroutine fluid_pnpn_restart
 
